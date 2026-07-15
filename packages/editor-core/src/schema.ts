@@ -41,7 +41,17 @@ const wikilink: NodeSpec = {
   ],
 };
 
+/** 清單符號記在節點上:解析保留原檔的 -/+/*,新建預設 -(Obsidian 慣例) */
+const bulletSpec = mdSchema.spec.nodes.get("bullet_list")!;
+const bulletWithMarker: NodeSpec = {
+  ...bulletSpec,
+  attrs: { ...bulletSpec.attrs, bullet: { default: "-" } },
+};
+
 export const steleSchema = new Schema({
-  nodes: mdSchema.spec.nodes.addToEnd("stele_raw", steleRaw).addToEnd("wikilink", wikilink),
+  nodes: mdSchema.spec.nodes
+    .update("bullet_list", bulletWithMarker)
+    .addToEnd("stele_raw", steleRaw)
+    .addToEnd("wikilink", wikilink),
   marks: mdSchema.spec.marks,
 });

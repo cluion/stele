@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as Y from "yjs";
+import { TextSelection, type Transaction } from "prosemirror-state";
 import { SteleBinding, splitBlocks } from "../src/index.ts";
 
 const fixturesDir = fileURLToPath(new URL("../../../prototypes/mirror/fixtures/", import.meta.url));
@@ -63,6 +64,62 @@ describe("SteleBinding:本地編輯寫回", () => {
     binding.dispatch(binding.state.tr.setMeta("ui", true));
     expect(updated).toBe(0);
     expect(ytext.toString()).toBe(source);
+  });
+});
+
+/** 與 prosemirror-keymap 相同的平台偵測:Mod 在 mac 是 Meta,其他是 Ctrl */
+const IS_MAC = typeof navigator !== "undefined" && /Mac/.test(navigator.platform ?? "");
+const MOD: Partial<KeyboardEvent> = IS_MAC ? { metaKey: true } : { ctrlKey: true };
+
+/** 模擬 EditorView 的 keydown:走 state 上 keymap plugin 的 handleKeyDown,與真實視圖同一路徑 */
+function pressKey(binding: SteleBinding, event: Partial<KeyboardEvent> & { key: string }): boolean {
+  const fakeEvent = {
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+    ...event,
+  } as KeyboardEvent;
+  const fakeView = {
+    state: binding.state,
+    dispatch: (tr: Transaction) => binding.dispatch(tr),
+    endOfTextblock: () => false,
+    composing: false,
+  };
+  return binding.state.plugins.some((p) =>
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+    (p.props.handleKeyDown as ((view: unknown, e: KeyboardEvent) => boolean) | undefined)?.(fakeView, fakeEvent),
+  );
+}
+
+describe("SteleBinding:鍵盤指令經 keymap plugin", () => {
+  it("Enter 鍵切段並寫回 Y.Text", () => {
+    const source = "一二三四。\n";
+    const { ytext, binding } = setup(source);
+    binding.dispatch(binding.state.tr.setSelection(TextSelection.create(binding.state.doc, 3))); // 游標在「一二」後
+    const handled = pressKey(binding, { key: "Enter", keyCode: 13 });
+    expect(handled).toBe(true);
+    expect(ytext.toString()).toBe("一二\n\n三四。\n");
+  });
+
+  it("Mod-z 復原本地編輯", () => {
+    const { ytext, binding } = setup("段落。\n");
+    binding.dispatch(binding.state.tr.insertText("X", 1));
+    expect(ytext.toString()).toBe("X段落。\n");
+    const handled = pressKey(binding, { key: "z", keyCode: 90, ...MOD });
+    expect(handled).toBe(true);
+    expect(ytext.toString()).toBe("段落。\n");
+  });
+
+  it("遠端變更不進 undo 歷史", () => {
+    const source = "甲。\n\n乙。\n";
+    const { ytext, binding } = setup(source);
+    ytext.insert(ytext.toString().indexOf("乙。"), "遠"); // origin 非 binding → 遠端
+    expect(binding.state.doc.textContent).toContain("遠乙。");
+    const handled = pressKey(binding, { key: "z", keyCode: 90, ...MOD });
+    // 沒有本地編輯可復原:遠端變更標記 addToHistory=false,undo 不得吃掉它
+    expect(handled).toBe(false);
+    expect(ytext.toString()).toContain("遠乙。");
   });
 });
 

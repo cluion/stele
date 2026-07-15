@@ -1,6 +1,15 @@
 import type * as Y from "yjs";
 import type { Node } from "prosemirror-model";
 import { EditorState, type Transaction } from "prosemirror-state";
+import { keymap } from "prosemirror-keymap";
+import { baseKeymap, exitCode } from "prosemirror-commands";
+import { history, undo, redo } from "prosemirror-history";
+import { undoInputRule } from "prosemirror-inputrules";
+import { gapCursor } from "prosemirror-gapcursor";
+import { splitListItem, sinkListItem, liftListItem } from "prosemirror-schema-list";
+import { markdownInputRules } from "./input-rules.ts";
+import { downOutOfTrailingCode } from "./commands.ts";
+import { steleSchema } from "./schema.ts";
 import { splitBlocks, type Block } from "./blocks.ts";
 import { applyRangeEdit } from "./apply.ts";
 import { parseDoc, serializeBlock } from "./convert.ts";
@@ -53,11 +62,34 @@ export class SteleBinding {
     const { doc, blocks, gaps } = parseDoc(source);
     this.blocks = blocks;
     this.gaps = gaps;
-    this.state = EditorState.create({ doc });
+    // Enter/Backspace 等編輯指令與 undo 都來自 plugin,沒掛 = 視圖按了沒反應
+    this.state = EditorState.create({
+      doc,
+      plugins: [
+        markdownInputRules,
+        history(),
+        keymap({
+          "Mod-z": undo,
+          "Shift-Mod-z": redo,
+          "Mod-y": redo,
+          Backspace: undoInputRule,
+          // 清單:Enter 接續下一項(空項跳出)、Tab 縮排、Shift-Tab 升層;清單外回 false 交給 baseKeymap
+          Enter: splitListItem(steleSchema.nodes["list_item"]!),
+          Tab: sinkListItem(steleSchema.nodes["list_item"]!),
+          "Shift-Tab": liftListItem(steleSchema.nodes["list_item"]!),
+          // 跳出 code block:在區塊後建新段落
+          "Shift-Enter": exitCode,
+          "Mod-Enter": exitCode,
+          ArrowDown: downOutOfTrailingCode,
+        }),
+        keymap(baseKeymap),
+        gapCursor(),
+      ],
+    });
 
     this.observer = (_e, tr) => {
-      if (tr.origin === this) this.refresh();
-      else this.onRemoteChange();
+      // 自己的寫回在 writeBack 內就地維護 blocks/gaps,這裡只處理遠端
+      if (tr.origin !== this) this.onRemoteChange();
     };
     ytext.observe(this.observer);
   }
@@ -82,6 +114,7 @@ export class SteleBinding {
     const source = this.ytext.toString();
     const sameCount = endOld - start === endNew - start;
     const pieces: string[] = [];
+    const newGaps: string[] = [];
     for (let i = start; i < endNew; i++) {
       const gap = sameCount
         ? this.gaps[start + (i - start)]!
@@ -90,12 +123,28 @@ export class SteleBinding {
           : endOld > start
             ? this.gaps[endOld - 1]!
             : "\n\n";
+      newGaps.push(gap);
       pieces.push(serializeBlock(newDoc.child(i), gap));
     }
     const from = start < this.blocks.length ? this.blocks[start]!.from : source.length;
     const to = endOld > start ? this.blocks[endOld - 1]!.to : from;
     applyRangeEdit(this.ytext, from, to, pieces.join(""), this);
-    // origin 是自己 → observer 只 refresh,不回音
+
+    // 就地重建映射,維持與 PM 頂層子節點 1:1
+    // 不可從文字重新解析:空段落序列化為空字串,重解析會漏掉它,映射一歪之後每次寫回都寫錯範圍
+    const blocks: Block[] = this.blocks.slice(0, start);
+    let pos = from;
+    for (const piece of pieces) {
+      blocks.push({ type: "block", from: pos, to: pos + piece.length });
+      pos += piece.length;
+    }
+    const delta = pieces.join("").length - (to - from);
+    for (let i = endOld; i < oldDoc.childCount; i++) {
+      const b = this.blocks[i]!;
+      blocks.push({ type: b.type, from: b.from + delta, to: b.to + delta });
+    }
+    this.blocks = blocks;
+    this.gaps = [...this.gaps.slice(0, start), ...newGaps, ...this.gaps.slice(endOld)];
   }
 
   private onRemoteChange(): void {
@@ -106,7 +155,11 @@ export class SteleBinding {
       const to = childOffset(this.state.doc, endOld);
       const replacement: Node[] = [];
       for (let i = start; i < endNew; i++) replacement.push(newDoc.child(i));
-      const tr = this.state.tr.replaceWith(from, to, replacement).setMeta("stele-remote", true);
+      // addToHistory=false:遠端(協作者/外部檔案)的變更不進本地 undo 歷史
+      const tr = this.state.tr
+        .replaceWith(from, to, replacement)
+        .setMeta("stele-remote", true)
+        .setMeta("addToHistory", false);
       this.state = this.state.apply(tr);
       this.onStateChange?.(this.state);
     }

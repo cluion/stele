@@ -38,8 +38,18 @@ function wikilinkRule(state: StateInline, silent: boolean): boolean {
 const tokenizer = new MarkdownIt("commonmark", { html: false });
 tokenizer.inline.ruler.before("link", "wikilink", wikilinkRule);
 
+const baseBulletToken = defaultMarkdownParser.tokens["bullet_list"]!;
+
 const parser = new MarkdownParser(steleSchema, tokenizer, {
   ...defaultMarkdownParser.tokens,
+  // 保留原檔的清單符號(-/+/*),序列化時原樣寫回
+  bullet_list: {
+    ...baseBulletToken,
+    getAttrs: (tok, tokens, i) => ({
+      ...(baseBulletToken.getAttrs?.(tok, tokens, i) ?? {}),
+      bullet: tok.markup || "-",
+    }),
+  },
   wikilink: { node: "wikilink", getAttrs: (tok) => tok.meta as Record<string, unknown> },
 });
 
