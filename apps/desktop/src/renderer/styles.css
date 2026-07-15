@@ -102,3 +102,49 @@ body {
 }
 #editor .ProseMirror .wikilink:hover { background: var(--selection); }
 #editor .ProseMirror .wikilink-embed::before { content: "⤵ "; opacity: 0.6; }
+
+.backlinks {
+  width: 260px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  padding: var(--sp-4) var(--sp-3);
+  overflow-y: auto;
+}
+.backlinks h2 {
+  font-size: var(--fs-sm);
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin: 0 var(--sp-2) var(--sp-3);
+}
+.backlinks .count {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.backlinks ul { list-style: none; margin: 0; padding: 0; }
+.backlinks button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--text);
+  padding: var(--sp-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+.backlinks button:hover { background: var(--surface-2); }
+.backlinks button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.backlinks .file { display: block; color: var(--accent); font-size: var(--fs-sm); }
+.backlinks .context {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

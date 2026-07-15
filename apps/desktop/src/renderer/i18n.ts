@@ -7,6 +7,8 @@ export const resources = {
       "sidebar.empty": "這個 vault 沒有筆記",
       "editor.pickNote": "選一篇筆記開始",
       "editor.loading": "載入中…",
+      "backlinks.title": "反向連結",
+      "backlinks.empty": "還沒有筆記連到這裡",
     },
   },
   en: {
@@ -14,6 +16,8 @@ export const resources = {
       "sidebar.empty": "No notes in this vault",
       "editor.pickNote": "Pick a note to start",
       "editor.loading": "Loading…",
+      "backlinks.title": "Backlinks",
+      "backlinks.empty": "No notes link here yet",
     },
   },
 } as const;
