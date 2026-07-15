@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import { useTranslation } from "react-i18next";
 import * as Y from "yjs";
 import { EditorView } from "prosemirror-view";
-import { SteleBinding } from "@stele/editor-core";
+import { SteleBinding, resolveWikilink } from "@stele/editor-core";
 import type { SteleApi } from "../main/preload.ts";
 
 declare global {
@@ -22,7 +22,7 @@ const applyTheme = () => {
 applyTheme();
 media.addEventListener("change", applyTheme);
 
-function Editor({ rel }: { rel: string }) {
+function Editor({ rel, onNavigate }: { rel: string; onNavigate: (target: string) => void }) {
   const { t } = useTranslation();
   const ref = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
@@ -43,6 +43,13 @@ function Editor({ rel }: { rel: string }) {
       view = new EditorView(ref.current, {
         state: binding.state,
         dispatchTransaction: (tr) => binding!.dispatch(tr),
+        handleClickOn: (_view, _pos, node) => {
+          if (node.type.name === "wikilink") {
+            onNavigate(String(node.attrs["target"]));
+            return true;
+          }
+          return false;
+        },
       });
       binding.onStateChange = (state) => view!.updateState(state);
 
@@ -86,6 +93,22 @@ function App() {
     });
   }, []);
 
+  const navigate = (target: string) => {
+    const dest = resolveWikilink(files, target);
+    if (dest) {
+      setActive(dest);
+      return;
+    }
+    const name = target.split("#")[0]!.trim();
+    const base = name.slice(name.lastIndexOf("/") + 1);
+    if (!name || (base.includes(".") && !base.endsWith(".md"))) return; // 圖片等非筆記目標不建檔
+    void window.stele.createNote(name).then(async (rel) => {
+      const { files: refreshed } = await window.stele.listVault();
+      setFiles(refreshed);
+      setActive(rel);
+    });
+  };
+
   return (
     <div className="app">
       <nav className="sidebar">
@@ -97,7 +120,7 @@ function App() {
           </button>
         ))}
       </nav>
-      {active ? <Editor key={active} rel={active} /> : <p className="placeholder">{t("editor.pickNote")}</p>}
+      {active ? <Editor key={active} rel={active} onNavigate={navigate} /> : <p className="placeholder">{t("editor.pickNote")}</p>}
     </div>
   );
 }

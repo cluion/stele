@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain } from "electron";
 import * as Y from "yjs";
 import diff from "fast-diff";
 import chokidar, { type FSWatcher } from "chokidar";
-import { readFileSync, readdirSync, statSync, realpathSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, realpathSync, mkdirSync, existsSync, writeFileSync, rmSync } from "node:fs";
 import { writeFile, rename } from "node:fs/promises";
 import path from "node:path";
 
@@ -50,7 +50,11 @@ class DocHost {
       if (origin !== "external-file") this.scheduleMirror();
     });
 
-    this.watcher = chokidar.watch(this.file, { ignoreInitial: true });
+    // awaitWriteFinish:避免在外部程式 truncate+write 的中途讀到半成品檔案
+    this.watcher = chokidar.watch(this.file, {
+      ignoreInitial: true,
+      awaitWriteFinish: { stabilityThreshold: 80, pollInterval: 20 },
+    });
     this.watcher.on("change", () => this.absorb());
   }
 
@@ -135,6 +139,24 @@ ipcMain.handle("doc:open", (_e, rel: string) => {
   return host.snapshot();
 });
 
+ipcMain.handle("vault:create", (_e, rel: unknown) => {
+  if (
+    typeof rel !== "string" ||
+    rel.length === 0 ||
+    path.isAbsolute(rel) ||
+    rel.split("/").some((seg) => seg === "" || seg === "." || seg === "..")
+  ) {
+    throw new Error(`非法路徑:${String(rel)}`);
+  }
+  const withExt = rel.endsWith(".md") ? rel : `${rel}.md`;
+  const vaultReal = realpathSync(VAULT);
+  const abs = path.resolve(vaultReal, withExt);
+  if (!abs.startsWith(vaultReal + path.sep)) throw new Error(`非法路徑:${rel}`);
+  mkdirSync(path.dirname(abs), { recursive: true });
+  if (!existsSync(abs)) writeFileSync(abs, `# ${path.basename(withExt, ".md")}\n`);
+  return withExt;
+});
+
 ipcMain.on("doc:push", (_e, rel: string, update: Uint8Array) => {
   hosts.get(rel)?.applyFromRenderer(update);
 });
@@ -170,9 +192,33 @@ app.whenReady().then(async () => {
     await writeFile(firstFile, originalBytes);
     await sleep(300);
 
+    // 點擊 wikilink → 建立不存在的筆記並跳轉,驗證後清理
+    const clickInfo = (await win.webContents.executeJavaScript(
+      `(() => {
+        const el = document.querySelector(".wikilink");
+        if (!el) return { ok: false, editor: document.querySelector("#editor")?.innerHTML?.slice(0, 400) ?? "no-editor" };
+        const r = el.getBoundingClientRect();
+        const opts = { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0 };
+        for (const t of ["mousedown", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(t, opts));
+        return { ok: true };
+      })()`,
+    )) as { ok: boolean; editor?: string };
+    if (!clickInfo.ok) console.log("SMOKE DEBUG 找不到 .wikilink:", clickInfo.editor);
+    let navigated = false;
+    for (let waited = 0; waited < 5000 && !navigated; waited += 200) {
+      await sleep(200);
+      navigated = await win.webContents.executeJavaScript(
+        `document.querySelector("#editor .ProseMirror h1")?.textContent === "Obsidian"`,
+      );
+    }
+    const created = path.join(VAULT, "Obsidian.md");
+    const createdOk = existsSync(created);
+    if (createdOk) rmSync(created);
+
     console.log(mounted ? "SMOKE ✅ 編輯器掛載且有內容" : "SMOKE ❌ 編輯器未就緒");
     console.log(mirrored ? "SMOKE ✅ 鍵盤輸入已鏡像到磁碟" : "SMOKE ❌ 輸入未寫回磁碟");
-    app.exit(mounted && mirrored ? 0 : 1);
+    console.log(navigated && createdOk ? "SMOKE ✅ 點擊 wikilink 建檔並跳轉" : "SMOKE ❌ wikilink 導航失敗");
+    app.exit(mounted && mirrored && navigated && createdOk ? 0 : 1);
   }
 });
 
