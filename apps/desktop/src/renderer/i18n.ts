@@ -13,6 +13,9 @@ export const resources = {
       "switcher.create": "建立筆記「{{name}}」",
       "switcher.empty": "沒有符合的筆記",
       "switcher.createFailed": "建立筆記失敗",
+      "welcome.tagline": "刻下來的知識，不依賴任何人也能留存。",
+      "welcome.open": "開啟 vault 資料夾",
+      "vault.switch": "切換 vault",
     },
   },
   en: {
@@ -26,6 +29,9 @@ export const resources = {
       "switcher.create": "Create note “{{name}}”",
       "switcher.empty": "No matching notes",
       "switcher.createFailed": "Failed to create note",
+      "welcome.tagline": "Knowledge, carved to last.",
+      "welcome.open": "Open vault folder",
+      "vault.switch": "Switch vault",
     },
   },
 } as const;

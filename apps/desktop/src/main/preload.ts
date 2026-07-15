@@ -5,8 +5,18 @@ export interface BacklinkItem {
   line: string;
 }
 
+export interface VaultInfo {
+  vault: string;
+  /** vault 的絕對路徑,同名 vault 的唯一識別 */
+  root: string;
+  files: string[];
+}
+
 export interface SteleApi {
-  listVault(): Promise<{ vault: string; files: string[] }>;
+  /** 尚未開啟任何 vault 時回傳 null */
+  listVault(): Promise<VaultInfo | null>;
+  /** 彈系統選資料夾 dialog 換 vault;使用者取消時回傳 null、現狀不動 */
+  chooseVault(): Promise<VaultInfo | null>;
   createNote(rel: string): Promise<string>;
   openDoc(rel: string): Promise<Uint8Array>;
   pushUpdate(rel: string, update: Uint8Array): void;
@@ -19,6 +29,7 @@ export interface SteleApi {
 
 const api: SteleApi = {
   listVault: () => ipcRenderer.invoke("vault:list"),
+  chooseVault: () => ipcRenderer.invoke("vault:choose"),
   createNote: (rel) => ipcRenderer.invoke("vault:create", rel),
   openDoc: (rel) => ipcRenderer.invoke("doc:open", rel),
   pushUpdate: (rel, update) => ipcRenderer.send("doc:push", rel, update),
