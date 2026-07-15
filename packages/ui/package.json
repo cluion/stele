@@ -1,0 +1,10 @@
+{
+  "name": "@stele/ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    "./tokens.css": "./src/tokens.css"
+  }
+}
