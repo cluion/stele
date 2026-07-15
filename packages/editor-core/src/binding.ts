@@ -1,6 +1,7 @@
 import type * as Y from "yjs";
 import type { Node } from "prosemirror-model";
-import { EditorState, type Transaction } from "prosemirror-state";
+import { EditorState, TextSelection, type Transaction } from "prosemirror-state";
+import { textOffsetAt, posAtTextOffset, mapTextOffset } from "./remote-selection.ts";
 import { keymap } from "prosemirror-keymap";
 import { baseKeymap, exitCode } from "prosemirror-commands";
 import { history, undo, redo } from "prosemirror-history";
@@ -151,15 +152,31 @@ export class SteleBinding {
     const { doc: newDoc } = parseDoc(this.ytext.toString());
     const { start, endOld, endNew } = diffChildren(this.state.doc, newDoc, (a, b) => a.eq(b));
     if (start !== endOld || start !== endNew) {
-      const from = childOffset(this.state.doc, start);
-      const to = childOffset(this.state.doc, endOld);
+      const oldDoc = this.state.doc;
+      const from = childOffset(oldDoc, start);
+      const to = childOffset(oldDoc, endOld);
       const replacement: Node[] = [];
       for (let i = start; i < endNew; i++) replacement.push(newDoc.child(i));
+      const { anchor, head } = this.state.selection;
+
       // addToHistory=false:遠端(協作者/外部檔案)的變更不進本地 undo 歷史
       const tr = this.state.tr
         .replaceWith(from, to, replacement)
         .setMeta("stele-remote", true)
         .setMeta("addToHistory", false);
+
+      // selection mapping:端點在重建範圍外走 PM 步驟映射(精確);
+      // 在範圍內以 textContent diff 映射回語意上的原位(近似,誤差僅在標記緊鄰處)
+      const newSpanTo = from + replacement.reduce((size, node) => size + node.nodeSize, 0);
+      const oldSpanText = oldDoc.textBetween(from, to, "\n", " ");
+      const newSpanText = tr.doc.textBetween(from, newSpanTo, "\n", " ");
+      const mapPoint = (pos: number): number => {
+        if (pos < from || pos > to) return tr.mapping.map(pos);
+        const offset = mapTextOffset(oldSpanText, newSpanText, textOffsetAt(oldDoc, from, pos));
+        return posAtTextOffset(tr.doc, from, newSpanTo, offset);
+      };
+      tr.setSelection(TextSelection.between(tr.doc.resolve(mapPoint(anchor)), tr.doc.resolve(mapPoint(head))));
+
       this.state = this.state.apply(tr);
       this.onStateChange?.(this.state);
     }
