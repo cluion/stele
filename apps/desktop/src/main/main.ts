@@ -111,10 +111,16 @@ app.whenReady().then(async () => {
     const originalBytes = readFileSync(firstFile, "utf8");
     await win.webContents.executeJavaScript(`document.querySelector("#editor .ProseMirror").focus()`);
     win.webContents.sendInputEvent({ type: "char", keyCode: "Ω" });
+    await sleep(150);
+    win.webContents.sendInputEvent({ type: "keyDown", keyCode: "Return" });
+    win.webContents.sendInputEvent({ type: "keyUp", keyCode: "Return" });
+    await sleep(150);
+    win.webContents.sendInputEvent({ type: "char", keyCode: "Ψ" });
     let mirrored = false;
     for (let waited = 0; waited < 5000 && !mirrored; waited += 200) {
       await sleep(200);
-      mirrored = readFileSync(firstFile, "utf8").includes("Ω");
+      // Enter 切段:兩字被空行隔開;第二塊可能帶區塊前綴(如標題的「# 」)
+      mirrored = /Ω\n\n[^\n]{0,3}Ψ/.test(readFileSync(firstFile, "utf8"));
     }
     await writeFile(firstFile, originalBytes);
     await sleep(300);
@@ -196,6 +202,41 @@ app.whenReady().then(async () => {
     }
     if (existsSync(smokeNote)) rmSync(smokeNote);
 
+    // 源碼模式:切到 靈感箱 → Cmd+E 掛 CodeMirror → 打字鏡像到磁碟 → Cmd+E 切回 WYSIWYG
+    await win.webContents.executeJavaScript(openSwitcher);
+    await sleep(200);
+    await win.webContents.executeJavaScript(typeInSwitcher("靈感"));
+    await sleep(200);
+    await win.webContents.executeJavaScript(pressInSwitcher("Enter"));
+    await sleep(400);
+    const toggleMode = `window.dispatchEvent(new KeyboardEvent("keydown", { key: "e", metaKey: true, cancelable: true }))`;
+    await win.webContents.executeJavaScript(toggleMode);
+    let cmMounted = false;
+    for (let waited = 0; waited < 5000 && !cmMounted; waited += 200) {
+      await sleep(200);
+      cmMounted = await win.webContents.executeJavaScript(
+        `!!document.querySelector("#editor .cm-editor") && document.querySelector("#editor .cm-content").textContent.length > 0`,
+      );
+    }
+    const inspFile = path.join(FIXTURES_VAULT, "靈感箱.md");
+    const inspBytes = readFileSync(inspFile, "utf8");
+    await win.webContents.executeJavaScript(`document.querySelector("#editor .cm-content").focus()`);
+    win.webContents.sendInputEvent({ type: "char", keyCode: "Ψ" });
+    let cmMirrored = false;
+    for (let waited = 0; waited < 5000 && !cmMirrored; waited += 200) {
+      await sleep(200);
+      cmMirrored = readFileSync(inspFile, "utf8").includes("Ψ");
+    }
+    await writeFile(inspFile, inspBytes);
+    await sleep(300);
+    await win.webContents.executeJavaScript(toggleMode);
+    let pmBack = false;
+    for (let waited = 0; waited < 5000 && !pmBack; waited += 200) {
+      await sleep(200);
+      pmBack = await win.webContents.executeJavaScript(`!!document.querySelector("#editor .ProseMirror")`);
+    }
+    const sourceMode = cmMounted && cmMirrored && pmBack;
+
     // 換 vault:切到臨時 vault 驗證索引與反向連結,再切回 fixtures 確認 session 生滅正常
     const tmpVault = path.join(app.getPath("temp"), "stele-smoke-vault");
     rmSync(tmpVault, { recursive: true, force: true });
@@ -219,14 +260,15 @@ app.whenReady().then(async () => {
     rmSync(tmpVault, { recursive: true, force: true });
 
     console.log(mounted ? "SMOKE ✅ 編輯器掛載且有內容" : "SMOKE ❌ 編輯器未就緒");
-    console.log(mirrored ? "SMOKE ✅ 鍵盤輸入已鏡像到磁碟" : "SMOKE ❌ 輸入未寫回磁碟");
+    console.log(mirrored ? "SMOKE ✅ 鍵盤輸入與 Enter 切段已鏡像到磁碟" : "SMOKE ❌ 輸入未寫回磁碟");
     console.log(navigated && createdOk ? "SMOKE ✅ 點擊 wikilink 建檔並跳轉" : "SMOKE ❌ wikilink 導航失敗");
     console.log(backlinked ? "SMOKE ✅ 反向連結面板顯示來源" : "SMOKE ❌ 反向連結未顯示");
     console.log(switcherTyped && switched ? "SMOKE ✅ Cmd+P 模糊搜尋切換筆記" : "SMOKE ❌ 快速切換器切換失敗");
     console.log(switcherCreated ? "SMOKE ✅ 快速切換器建檔並開啟" : "SMOKE ❌ 快速切換器建檔失敗");
+    console.log(sourceMode ? "SMOKE ✅ 源碼模式編輯與雙向切換" : "SMOKE ❌ 源碼模式失敗");
     console.log(vaultSwitched ? "SMOKE ✅ 換 vault session 生滅正常" : "SMOKE ❌ 換 vault 失敗");
     app.exit(
-      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && vaultSwitched
+      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && vaultSwitched
         ? 0
         : 1,
     );
