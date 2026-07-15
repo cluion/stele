@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain } from "electron";
 import * as Y from "yjs";
 import diff from "fast-diff";
 import chokidar, { type FSWatcher } from "chokidar";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, realpathSync } from "node:fs";
 import { writeFile, rename } from "node:fs/promises";
 import path from "node:path";
 
@@ -11,6 +11,24 @@ const VAULT = process.env["STELE_VAULT"]
   : path.resolve(__dirname, "..", "..", "..", "prototypes", "mirror", "fixtures", "vault");
 
 const MIRROR_DEBOUNCE_MS = 120;
+
+/** 驗證 renderer 傳來的相對路徑,回傳 vault 內的真實絕對路徑;絕對路徑、遍歷、symlink 逃逸一律拒絕 */
+function resolveVaultFile(rel: unknown): string {
+  if (typeof rel !== "string" || rel.length === 0 || path.isAbsolute(rel) || !rel.endsWith(".md")) {
+    throw new Error(`非法路徑:${String(rel)}`);
+  }
+  const vaultReal = realpathSync(VAULT);
+  let real: string;
+  try {
+    real = realpathSync(path.resolve(vaultReal, rel));
+  } catch {
+    throw new Error(`非法路徑:${rel}`);
+  }
+  if (real !== vaultReal && !real.startsWith(vaultReal + path.sep)) {
+    throw new Error(`非法路徑:${rel}`);
+  }
+  return real;
+}
 
 /** 單一筆記的主端文件:唯一寫入者,負責鏡像寫回與外部修改吸收 */
 class DocHost {
@@ -21,8 +39,8 @@ class DocHost {
   private mirrorTimer: NodeJS.Timeout | undefined;
   private readonly watcher: FSWatcher;
 
-  constructor(readonly rel: string, broadcast: (rel: string, update: Uint8Array) => void) {
-    this.file = path.join(VAULT, rel);
+  constructor(readonly rel: string, file: string, broadcast: (rel: string, update: Uint8Array) => void) {
+    this.file = file;
     const initial = readFileSync(this.file, "utf8");
     this.ytext.insert(0, initial);
     this.lastMirrored = initial;
@@ -108,10 +126,10 @@ function listMarkdown(dir: string, prefix = ""): string[] {
 ipcMain.handle("vault:list", () => ({ vault: path.basename(VAULT), files: listMarkdown(VAULT) }));
 
 ipcMain.handle("doc:open", (_e, rel: string) => {
-  if (rel.includes("..")) throw new Error(`非法路徑:${rel}`);
+  const file = resolveVaultFile(rel);
   let host = hosts.get(rel);
   if (!host) {
-    host = new DocHost(rel, broadcast);
+    host = new DocHost(rel, file, broadcast);
     hosts.set(rel, host);
   }
   return host.snapshot();
