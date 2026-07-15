@@ -1,0 +1,10 @@
+{
+  "name": "stele",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Local-first knowledge base. Carved to last.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "@stele/proto-crdt-bench",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "bench": "node src/bench.mjs",
+    "bundle-size": "node src/bundle-size.mjs"
+  },
+  "dependencies": {
+    "loro-crdt": "latest",
+    "yjs": "latest"
+  },
+  "devDependencies": {
+    "esbuild": "latest"
+  }
+}

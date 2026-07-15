@@ -1,0 +1,8 @@
+packages:
+  - prototypes/*
+  - packages/*
+  - apps/*
+
+onlyBuiltDependencies:
+  - electron
+  - esbuild

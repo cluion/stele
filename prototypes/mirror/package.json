@@ -1,0 +1,20 @@
+{
+  "name": "@stele/proto-mirror",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "roundtrip": "node src/roundtrip.mjs",
+    "absorb": "node src/absorb.mjs"
+  },
+  "dependencies": {
+    "fast-diff": "latest",
+    "remark-frontmatter": "latest",
+    "remark-gfm": "latest",
+    "remark-parse": "latest",
+    "remark-stringify": "latest",
+    "unified": "latest",
+    "yjs": "latest"
+  }
+}

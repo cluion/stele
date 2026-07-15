@@ -1,0 +1,19 @@
+{
+  "name": "@stele/proto-shell",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "src/main.mjs",
+  "license": "MIT",
+  "scripts": {
+    "selftest": "electron . --selftest"
+  },
+  "dependencies": {
+    "chokidar": "latest",
+    "fast-diff": "latest",
+    "yjs": "latest"
+  },
+  "devDependencies": {
+    "electron": "latest"
+  }
+}

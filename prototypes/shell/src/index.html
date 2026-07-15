@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Stele P0-3</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1rem; background: #1e1e2e; color: #cdd6f4; }
+    pre { white-space: pre-wrap; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <strong>main process 文件的即時投影:</strong>
+  <pre id="content">(等待中)</pre>
+  <script>
+    window.stele.onDoc((text) => { document.getElementById("content").textContent = text; });
+    window.stele.onDoEdit((payload) => window.stele.edit(payload));
+    window.stele.read().then((text) => { document.getElementById("content").textContent = text; });
+  </script>
+</body>
+</html>

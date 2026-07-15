@@ -1,0 +1,4 @@
+plan/
+node_modules/
+dist/
+prototypes/shell/tmp-vault/
