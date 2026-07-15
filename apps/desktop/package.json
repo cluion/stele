@@ -1,0 +1,34 @@
+{
+  "name": "@stele/desktop",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/main.cjs",
+  "license": "MIT",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "pnpm build && electron . --no-sandbox",
+    "smoke": "pnpm build && electron . --no-sandbox --smoke"
+  },
+  "dependencies": {
+    "@stele/editor-core": "workspace:*",
+    "@stele/ui": "workspace:*",
+    "chokidar": "latest",
+    "fast-diff": "latest",
+    "i18next": "latest",
+    "prosemirror-state": "latest",
+    "prosemirror-view": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-i18next": "latest",
+    "yjs": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "electron": "latest",
+    "esbuild": "latest",
+    "typescript": "latest"
+  }
+}
