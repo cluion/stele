@@ -287,11 +287,58 @@ app.whenReady().then(async () => {
     const createdOk = existsSync(created);
     if (createdOk) rmSync(created);
 
+    // 快速切換器:Cmd+P → 打「靈感」→ Enter,應切換到 靈感箱.md
+    const typeInSwitcher = (text: string) => `(() => {
+      const input = document.querySelector(".switcher input");
+      if (!input) return false;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+      setter.call(input, ${JSON.stringify(text)});
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      return true;
+    })()`;
+    const pressInSwitcher = (key: string) => `(() => {
+      const input = document.querySelector(".switcher input");
+      if (!input) return false;
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: ${JSON.stringify(key)}, bubbles: true }));
+      return true;
+    })()`;
+    const openSwitcher = `window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true, cancelable: true }))`;
+    const activeSidebarText = `document.querySelector(".sidebar button.active")?.textContent ?? ""`;
+
+    await win.webContents.executeJavaScript(openSwitcher);
+    await sleep(200);
+    const switcherTyped = (await win.webContents.executeJavaScript(typeInSwitcher("靈感"))) as boolean;
+    await sleep(200);
+    await win.webContents.executeJavaScript(pressInSwitcher("Enter"));
+    let switched = false;
+    for (let waited = 0; waited < 5000 && !switched; waited += 200) {
+      await sleep(200);
+      switched = ((await win.webContents.executeJavaScript(activeSidebarText)) as string) === "靈感箱";
+    }
+
+    // 快速切換器建檔:查詢無符合 → 末項「建立筆記」→ Enter 建檔並開啟
+    await win.webContents.executeJavaScript(openSwitcher);
+    await sleep(200);
+    await win.webContents.executeJavaScript(typeInSwitcher("煙霧測試新檔"));
+    await sleep(200);
+    await win.webContents.executeJavaScript(pressInSwitcher("Enter"));
+    const smokeNote = path.join(VAULT, "煙霧測試新檔.md");
+    let switcherCreated = false;
+    for (let waited = 0; waited < 5000 && !switcherCreated; waited += 200) {
+      await sleep(200);
+      switcherCreated =
+        existsSync(smokeNote) &&
+        ((await win.webContents.executeJavaScript(activeSidebarText)) as string) === "煙霧測試新檔";
+    }
+    if (existsSync(smokeNote)) rmSync(smokeNote);
+
     console.log(mounted ? "SMOKE ✅ 編輯器掛載且有內容" : "SMOKE ❌ 編輯器未就緒");
     console.log(mirrored ? "SMOKE ✅ 鍵盤輸入已鏡像到磁碟" : "SMOKE ❌ 輸入未寫回磁碟");
     console.log(navigated && createdOk ? "SMOKE ✅ 點擊 wikilink 建檔並跳轉" : "SMOKE ❌ wikilink 導航失敗");
     console.log(backlinked ? "SMOKE ✅ 反向連結面板顯示來源" : "SMOKE ❌ 反向連結未顯示");
-    app.exit(mounted && mirrored && navigated && createdOk && backlinked ? 0 : 1);
+    console.log(switcherTyped && switched ? "SMOKE ✅ Cmd+P 模糊搜尋切換筆記" : "SMOKE ❌ 快速切換器切換失敗");
+    console.log(switcherCreated ? "SMOKE ✅ 快速切換器建檔並開啟" : "SMOKE ❌ 快速切換器建檔失敗");
+    app.exit(mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated ? 0 : 1);
   }
 });
 

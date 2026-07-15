@@ -103,6 +103,58 @@ body {
 #editor .ProseMirror .wikilink:hover { background: var(--selection); }
 #editor .ProseMirror .wikilink-embed::before { content: "⤵ "; opacity: 0.6; }
 
+/* 快速切換器(Cmd+P) */
+.switcher-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  background: var(--overlay);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+}
+.switcher {
+  width: min(520px, 90vw);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+}
+.switcher input {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-lg);
+  padding: var(--sp-3) var(--sp-4);
+  outline: none;
+}
+.switcher input::placeholder { color: var(--text-faint); }
+.switcher .error {
+  color: var(--err);
+  font-size: var(--fs-sm);
+  margin: var(--sp-2) var(--sp-4) 0;
+}
+.switcher .placeholder { padding: var(--sp-3) var(--sp-4); margin: 0; }
+.switcher ul { list-style: none; margin: 0; padding: var(--sp-2); }
+.switcher li button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.switcher li button.selected { background: var(--accent-subtle); color: var(--accent); }
+
 .backlinks {
   width: 260px;
   flex-shrink: 0;
