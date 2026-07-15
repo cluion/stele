@@ -1,0 +1,28 @@
+{
+  "name": "@stele/editor-core",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "fast-diff": "latest",
+    "remark-frontmatter": "latest",
+    "remark-gfm": "latest",
+    "remark-parse": "latest",
+    "unified": "latest",
+    "yjs": "latest"
+  },
+  "devDependencies": {
+    "@types/mdast": "latest",
+    "@types/node": "latest",
+    "typescript": "latest",
+    "vitest": "latest"
+  }
+}
