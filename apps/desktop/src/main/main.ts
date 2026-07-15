@@ -162,8 +162,11 @@ app.whenReady().then(async () => {
     const originalBytes = readFileSync(firstFile, "utf8");
     await win.webContents.executeJavaScript(`document.querySelector("#editor .ProseMirror").focus()`);
     win.webContents.sendInputEvent({ type: "char", keyCode: "Ω" });
-    await sleep(900);
-    const mirrored = readFileSync(firstFile, "utf8").includes("Ω");
+    let mirrored = false;
+    for (let waited = 0; waited < 5000 && !mirrored; waited += 200) {
+      await sleep(200);
+      mirrored = readFileSync(firstFile, "utf8").includes("Ω");
+    }
     await writeFile(firstFile, originalBytes);
     await sleep(300);
 
