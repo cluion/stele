@@ -65,9 +65,15 @@ importers:
 
   packages/editor-core:
     dependencies:
+      '@types/markdown-it':
+        specifier: ^14.1.2
+        version: 14.1.2
       fast-diff:
         specifier: latest
         version: 1.3.0
+      markdown-it:
+        specifier: ^14.3.0
+        version: 14.3.0
       prosemirror-markdown:
         specifier: ^1.13.5
         version: 1.13.5

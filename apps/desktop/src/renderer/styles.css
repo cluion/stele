@@ -91,3 +91,14 @@ body {
   border: 1px dashed var(--border-strong);
   white-space: pre-wrap;
 }
+
+#editor .ProseMirror .wikilink {
+  color: var(--accent);
+  background: var(--accent-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0 0.25em;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+#editor .ProseMirror .wikilink:hover { background: var(--selection); }
+#editor .ProseMirror .wikilink-embed::before { content: "⤵ "; opacity: 0.6; }
