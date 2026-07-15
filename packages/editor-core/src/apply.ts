@@ -25,6 +25,15 @@ function inTransaction(ytext: Y.Text, run: () => void): void {
   else run();
 }
 
+/** 以最小 diff 把 [from, to) 範圍替換為 newText;origin 供迴圈防護辨識來源 */
+export function applyRangeEdit(ytext: Y.Text, from: number, to: number, newText: string, origin: unknown = "editor"): void {
+  const oldText = ytext.toString().slice(from, to);
+  if (oldText === newText) return;
+  const run = () => applyDiffAt(ytext, oldText, newText, from);
+  if (ytext.doc) ytext.doc.transact(run, origin);
+  else run();
+}
+
 /**
  * 把單一區塊的新內容以最小 diff 寫進 Y.Text,只觸碰該區塊範圍內的位元組
  * origin 標記為 "editor",供鏡像層與同步層辨識變更來源

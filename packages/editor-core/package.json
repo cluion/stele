@@ -15,6 +15,7 @@
     "fast-diff": "latest",
     "prosemirror-markdown": "^1.13.5",
     "prosemirror-model": "^1.25.11",
+    "prosemirror-state": "^1.4.4",
     "remark-frontmatter": "latest",
     "remark-gfm": "latest",
     "remark-parse": "latest",
