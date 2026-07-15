@@ -89,3 +89,54 @@ describe("applyBlockEdit", () => {
     expect(origin).toBe("editor");
   });
 });
+
+describe("applyBlockEdits 批次編輯", () => {
+  it("前面區塊變長後,後面區塊的編輯位置自動校正", async () => {
+    const { applyBlockEdits } = await import("../src/index.ts");
+    const source = "第一段。\n\n第二段。\n\n第三段。\n";
+    const doc = makeDoc(source);
+    const blocks = splitBlocks(source);
+    applyBlockEdits(doc.getText("md"), blocks, [
+      { index: 0, newText: "第一段加長很多的內容。\n\n" },
+      { index: 2, newText: "第三段改。\n" },
+    ]);
+    expect(doc.getText("md").toString()).toBe("第一段加長很多的內容。\n\n第二段。\n\n第三段改。\n");
+  });
+
+  it("未排序的編輯也正確套用,且全部在單一 transaction", async () => {
+    const { applyBlockEdits } = await import("../src/index.ts");
+    const source = "甲。\n\n乙。\n\n丙。\n";
+    const doc = makeDoc(source);
+    let updates = 0;
+    doc.on("update", () => { updates++; });
+    applyBlockEdits(doc.getText("md"), splitBlocks(source), [
+      { index: 2, newText: "丙改。\n" },
+      { index: 0, newText: "甲改很長。\n\n" },
+    ]);
+    expect(doc.getText("md").toString()).toBe("甲改很長。\n\n乙。\n\n丙改。\n");
+    expect(updates).toBe(1);
+  });
+
+  it("重複的區塊索引直接拋錯", async () => {
+    const { applyBlockEdits } = await import("../src/index.ts");
+    const source = "甲。\n";
+    const doc = makeDoc(source);
+    const blocks = splitBlocks(source);
+    expect(() =>
+      applyBlockEdits(doc.getText("md"), blocks, [
+        { index: 0, newText: "a\n" },
+        { index: 0, newText: "b\n" },
+      ]),
+    ).toThrow(RangeError);
+  });
+});
+
+describe("applyBlockEdit 陳舊陣列防護", () => {
+  it("blocks 範圍超出 ytext 現況時拋錯而非靜默寫壞", () => {
+    const source = "很長的第一段內容在這裡。\n\n第二段。\n";
+    const doc = makeDoc(source);
+    const blocks = splitBlocks(source);
+    doc.getText("md").delete(0, 14);
+    expect(() => applyBlockEdit(doc.getText("md"), blocks, 1, "第二段改。\n")).toThrow(RangeError);
+  });
+});
