@@ -325,3 +325,14 @@ body {
   margin: 0;
 }
 .vault-header .vault-switch.active { color: var(--accent); background: var(--accent-subtle); }
+
+.switcher .file { display: block; color: var(--text); }
+.switcher .context {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

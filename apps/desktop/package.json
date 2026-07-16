@@ -23,6 +23,7 @@
     "chokidar": "latest",
     "fast-diff": "latest",
     "i18next": "latest",
+    "minisearch": "^7.2.0",
     "prosemirror-state": "latest",
     "prosemirror-view": "latest",
     "react": "latest",

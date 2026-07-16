@@ -297,6 +297,85 @@ function QuickSwitcher({
   );
 }
 
+function SearchModal({ onPick, onClose }: { onPick: (rel: string) => void; onClose: () => void }) {
+  const { t } = useTranslation();
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<BacklinkItem[]>([]);
+  const [selected, setSelected] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => inputRef.current?.focus(), []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (query.trim() === "") {
+        setResults([]);
+        return;
+      }
+      void window.stele.search(query).then(setResults);
+    }, 120);
+    return () => clearTimeout(timer);
+  }, [query]);
+
+  const sel = results.length === 0 ? -1 : Math.min(selected, results.length - 1);
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing) return; // IME 選字中不攔截
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (results.length > 0) {
+        const dir = e.key === "ArrowDown" ? 1 : -1;
+        setSelected((sel + dir + results.length) % results.length);
+      }
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const hit = results[sel];
+      if (hit) {
+        onPick(hit.file);
+        onClose();
+      }
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      onClose();
+    }
+  };
+
+  return (
+    <div className="switcher-backdrop" onClick={onClose}>
+      <div className="switcher search" onClick={(e) => e.stopPropagation()}>
+        <input
+          ref={inputRef}
+          value={query}
+          placeholder={t("search.placeholder")}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setSelected(0);
+          }}
+          onKeyDown={onKeyDown}
+        />
+        {query.trim() !== "" && results.length === 0 && <p className="placeholder">{t("search.empty")}</p>}
+        <ul>
+          {results.map((hit, i) => (
+            <li key={hit.file}>
+              <button
+                className={i === sel ? "selected" : ""}
+                onMouseEnter={() => setSelected(i)}
+                onClick={() => {
+                  onPick(hit.file);
+                  onClose();
+                }}
+              >
+                <span className="file">{hit.file.replace(/\.md$/, "")}</span>
+                <span className="context">{hit.line}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
 function Welcome({ onChoose }: { onChoose: () => void }) {
   const { t } = useTranslation();
   return (
@@ -316,6 +395,7 @@ function App() {
   const [recent, setRecent] = useState<string[]>([]);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [graphOpen, setGraphOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   // 每篇筆記各自記住模式,session 內有效,預設 WYSIWYG
   const [modes, setModes] = useState<ReadonlyMap<string, EditorMode>>(new Map());
 
@@ -337,7 +417,10 @@ function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setSearchOpen(true);
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
         e.preventDefault();
         setSwitcherOpen(true);
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "g") {
@@ -480,6 +563,15 @@ function App() {
         </>
       ) : (
         <p className="placeholder">{t("editor.pickNote")}</p>
+      )}
+      {searchOpen && (
+        <SearchModal
+          onPick={(rel) => {
+            activate(rel);
+            setGraphOpen(false);
+          }}
+          onClose={() => setSearchOpen(false)}
+        />
       )}
       {switcherOpen && (
         <QuickSwitcher

@@ -5,6 +5,7 @@ import { readFileSync, readdirSync, statSync, realpathSync, mkdirSync, existsSyn
 import { writeFile, rename } from "node:fs/promises";
 import path from "node:path";
 import { extractWikilinks, resolveWikilink, type WikilinkRef } from "@stele/editor-core";
+import { SearchIndex } from "./search-index.ts";
 
 const MIRROR_DEBOUNCE_MS = 120;
 /** awaitWriteFinish:避免在外部程式 truncate+write 的中途讀到半成品檔案 */
@@ -118,9 +119,10 @@ class LinkIndex {
     for (const rel of this.files) this.updateFile(rel);
   }
 
-  updateFile(rel: string): void {
+  updateFile(rel: string, content?: string): void {
     try {
-      this.outgoing.set(rel, extractWikilinks(readFileSync(path.join(this.root, rel), "utf8")));
+      const source = content ?? readFileSync(path.join(this.root, rel), "utf8");
+      this.outgoing.set(rel, extractWikilinks(source));
     } catch {
       this.outgoing.delete(rel);
     }
@@ -186,6 +188,7 @@ export class VaultSession {
   readonly root: string;
   private readonly hosts = new Map<string, DocHost>();
   private readonly index: LinkIndex;
+  private readonly searchIndex = new SearchIndex();
   private readonly watcher: FSWatcher;
 
   /** dir 不存在或不是資料夾時建構即拋錯,呼叫端保留原 session */
@@ -194,7 +197,7 @@ export class VaultSession {
     if (!statSync(this.root).isDirectory()) throw new Error(`不是資料夾:${dir}`);
 
     this.index = new LinkIndex(this.root);
-    this.index.rebuild();
+    for (const rel of listMarkdown(this.root)) this.refreshFile(rel);
 
     this.watcher = chokidar.watch(this.root, {
       ignoreInitial: true,
@@ -203,8 +206,10 @@ export class VaultSession {
     this.watcher.on("all", (event, file) => {
       if (!file.endsWith(".md")) return;
       const rel = path.relative(this.root, file);
-      if (event === "unlink") this.index.removeFile(rel);
-      else if (event === "add" || event === "change") this.index.updateFile(rel);
+      if (event === "unlink") {
+        this.index.removeFile(rel);
+        this.searchIndex.remove(rel);
+      } else if (event === "add" || event === "change") this.refreshFile(rel);
       else return;
       callbacks.notifyIndexUpdated();
     });
@@ -220,6 +225,42 @@ export class VaultSession {
 
   graph(): { nodes: string[]; edges: Array<[number, number]> } {
     return this.index.graph();
+  }
+
+  /** 全文搜尋:回傳命中檔案與包含查詢字串的第一行作為上下文 */
+  search(query: unknown): Array<{ file: string; line: string }> {
+    if (typeof query !== "string") throw new Error("非法參數");
+    const needle = query.trim().toLowerCase();
+    return this.searchIndex.search(query).map(({ file }) => {
+      let line = "";
+      try {
+        const lines = readFileSync(path.join(this.root, file), "utf8").split("\n");
+        line =
+          lines.find((l) => l.toLowerCase().includes(needle)) ??
+          lines.find((l) => l.trim() !== "" && !l.startsWith("---")) ??
+          "";
+      } catch {
+        // 檔案剛被刪:仍回傳檔名,無上下文
+      }
+      return { file, line: line.trim() };
+    });
+  }
+
+  /** 內容只讀一次,同時餵連結索引與搜尋索引 */
+  private refreshFile(rel: string): void {
+    let content: string | undefined;
+    try {
+      content = readFileSync(path.join(this.root, rel), "utf8");
+    } catch {
+      content = undefined;
+    }
+    if (content === undefined) {
+      this.index.removeFile(rel);
+      this.searchIndex.remove(rel);
+      return;
+    }
+    this.index.updateFile(rel, content);
+    this.searchIndex.update(rel, content);
   }
 
   openDoc(rel: unknown): Uint8Array {

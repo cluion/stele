@@ -64,6 +64,8 @@ ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {
 
 ipcMain.handle("vault:graph", () => requireSession().graph());
 
+ipcMain.handle("vault:search", (_e, query: unknown) => requireSession().search(query));
+
 ipcMain.handle("vault:daily", () => {
   const now = new Date();
   const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
@@ -283,6 +285,27 @@ app.whenReady().then(async () => {
     }
     if (existsSync(dailyFile)) rmSync(dailyFile);
 
+    // 全文搜尋:Cmd+Shift+F → 中文 bigram 查詢 → Enter 開啟唯一命中
+    await win.webContents.executeJavaScript(
+      `window.dispatchEvent(new KeyboardEvent("keydown", { key: "f", metaKey: true, shiftKey: true, cancelable: true }))`,
+    );
+    await sleep(200);
+    await win.webContents.executeJavaScript(typeInSwitcher("自研"));
+    let searchHit = false;
+    for (let waited = 0; waited < 5000 && !searchHit; waited += 200) {
+      await sleep(200);
+      searchHit = await win.webContents.executeJavaScript(
+        `[...document.querySelectorAll(".switcher.search .file")].some((el) => el.textContent.includes("立項"))`,
+      );
+    }
+    await win.webContents.executeJavaScript(pressInSwitcher("Enter"));
+    let searchOpened = false;
+    for (let waited = 0; waited < 5000 && !searchOpened; waited += 200) {
+      await sleep(200);
+      searchOpened = ((await win.webContents.executeJavaScript(activeSidebarText)) as string).includes("立項");
+    }
+    const searchOk = searchHit && searchOpened;
+
     // 換 vault:切到臨時 vault 驗證索引與反向連結,再切回 fixtures 確認 session 生滅正常
     const tmpVault = path.join(app.getPath("temp"), "stele-smoke-vault");
     rmSync(tmpVault, { recursive: true, force: true });
@@ -314,9 +337,10 @@ app.whenReady().then(async () => {
     console.log(sourceMode ? "SMOKE ✅ 源碼模式編輯與雙向切換" : "SMOKE ❌ 源碼模式失敗");
     console.log(graphOk ? "SMOKE ✅ 關聯圖開啟節點數正確且可關閉" : "SMOKE ❌ 關聯圖失敗");
     console.log(dailyOk ? "SMOKE ✅ Cmd+D 建立並開啟每日筆記" : "SMOKE ❌ 每日筆記失敗");
+    console.log(searchOk ? "SMOKE ✅ 全文搜尋中文查詢並開啟結果" : "SMOKE ❌ 全文搜尋失敗");
     console.log(vaultSwitched ? "SMOKE ✅ 換 vault session 生滅正常" : "SMOKE ❌ 換 vault 失敗");
     app.exit(
-      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && dailyOk && vaultSwitched
+      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && dailyOk && searchOk && vaultSwitched
         ? 0
         : 1,
     );
