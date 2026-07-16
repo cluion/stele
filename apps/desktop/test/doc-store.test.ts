@@ -62,6 +62,25 @@ describe("DocStore", () => {
     expect(loaded && Array.from(loaded)).toEqual([2]);
   });
 
+  it("adopt 拒絕非 UUID 的 doc id,擋路徑穿越", () => {
+    const store = new DocStore(makeRoot());
+    expect(() => store.adopt("a.md", "../../../../tmp/evil")).toThrow(/非法 doc id/);
+    expect(() => store.adopt("a.md", "vault-meta")).toThrow(/非法 doc id/);
+  });
+
+  it("manifest 內非法 id 載入時被過濾", async () => {
+    const root = makeRoot();
+    const store = new DocStore(root);
+    await store.save("a.md", new Uint8Array([1]));
+    const manifestFile = path.join(root, ".stele", "docs.json");
+    const manifest = JSON.parse(readFileSync(manifestFile, "utf8")) as { docs: Record<string, string> };
+    manifest.docs["壞.md"] = "../../逃走";
+    writeFileSync(manifestFile, JSON.stringify(manifest));
+    const reopened = new DocStore(root);
+    expect(reopened.load("壞.md")).toBeUndefined();
+    expect(reopened.load("a.md")).toBeDefined();
+  });
+
   it("狀態檔以 doc id 命名,不洩漏筆記路徑", async () => {
     const root = makeRoot();
     const store = new DocStore(root);

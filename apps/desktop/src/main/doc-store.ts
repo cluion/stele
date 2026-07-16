@@ -14,6 +14,9 @@ export interface DocPersistence {
  * doc id 是穩定 UUID,改名不變,是未來同步協議在伺服器端唯一可見的識別
  * 刪掉整個 .stele 不影響 vault:下次開檔從 .md 重新播種
  */
+/** doc id 一律是 randomUUID 格式;id 會組進檔案路徑,寬鬆格式=路徑穿越面 */
+const VALID_DOC_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 export class DocStore {
   private readonly manifestFile: string;
   private readonly dir: string;
@@ -32,6 +35,26 @@ export class DocStore {
     this.docs = { ...this.docs, [rel]: id };
     this.writeManifest();
     return id;
+  }
+
+  /** 只查不配發 */
+  peekId(rel: string): string | undefined {
+    return this.docs[rel];
+  }
+
+  relFor(id: string): string | undefined {
+    for (const [rel, docId] of Object.entries(this.docs)) {
+      if (docId === id) return rel;
+    }
+    return undefined;
+  }
+
+  /** 領養遠端 doc:以同步來的 id 建立對照,不配發新 id;id 來自不受信來源,格式必驗 */
+  adopt(rel: string, id: string): void {
+    if (!VALID_DOC_ID.test(id)) throw new Error(`非法 doc id:${id}`);
+    if (this.docs[rel] === id) return;
+    this.docs = { ...this.docs, [rel]: id };
+    this.writeManifest();
   }
 
   load(rel: string): Uint8Array | undefined {
@@ -70,6 +93,7 @@ export class DocStore {
   }
 
   private stateFile(id: string): string {
+    if (!VALID_DOC_ID.test(id)) throw new Error(`非法 doc id:${id}`);
     return path.join(this.dir, `${id}.ybin`);
   }
 
@@ -79,7 +103,7 @@ export class DocStore {
       if (raw.docs === null || typeof raw.docs !== "object") return {};
       const out: Record<string, string> = {};
       for (const [rel, id] of Object.entries(raw.docs as Record<string, unknown>)) {
-        if (typeof id === "string") out[rel] = id;
+        if (typeof id === "string" && VALID_DOC_ID.test(id)) out[rel] = id;
       }
       return out;
     } catch {

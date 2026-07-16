@@ -35,6 +35,10 @@ export interface SteleApi {
   backlinks(rel: string): Promise<BacklinkItem[]>;
   /** 回傳退訂函式 */
   onIndexUpdated(cb: () => void): () => void;
+  /** "off" = 未設定同步 */
+  syncStatus(): Promise<string>;
+  /** 回傳退訂函式 */
+  onSyncStatus(cb: (status: string) => void): () => void;
 }
 
 const api: SteleApi = {
@@ -58,6 +62,12 @@ const api: SteleApi = {
     const handler = () => cb();
     ipcRenderer.on("index:updated", handler);
     return () => ipcRenderer.off("index:updated", handler);
+  },
+  syncStatus: () => ipcRenderer.invoke("sync:status"),
+  onSyncStatus: (cb) => {
+    const handler = (_e: IpcRendererEvent, status: string) => cb(status);
+    ipcRenderer.on("sync:status", handler);
+    return () => ipcRenderer.off("sync:status", handler);
   },
 };
 

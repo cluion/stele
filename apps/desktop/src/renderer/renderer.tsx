@@ -502,6 +502,13 @@ function App() {
   const [renaming, setRenaming] = useState<{ rel: string; value: string; failed?: string } | null>(null);
   // 每篇筆記各自記住模式,session 內有效,預設 WYSIWYG
   const [modes, setModes] = useState<ReadonlyMap<string, EditorMode>>(new Map());
+  // "off" = 這個 vault 沒設定同步,指示燈隱藏
+  const [syncState, setSyncState] = useState("off");
+
+  useEffect(() => {
+    void window.stele.syncStatus().then(setSyncState);
+    return window.stele.onSyncStatus(setSyncState);
+  }, [vaultInfo?.root]);
 
   useEffect(() => {
     void window.stele.listVault().then((info) => {
@@ -641,6 +648,9 @@ function App() {
       >
         <div className="vault-header">
           <h1>{vaultInfo.vault}</h1>
+          {syncState !== "off" && (
+            <span className={`sync-dot ${syncState}`} title={t(`sync.${syncState}`)} aria-label={t(`sync.${syncState}`)} />
+          )}
           <button className="vault-switch" title={t("search.open")} aria-label={t("search.open")} onClick={() => setSearchOpen(true)}>
             ⌕
           </button>

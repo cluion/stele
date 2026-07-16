@@ -44,6 +44,19 @@ body {
   padding: var(--sp-1) var(--sp-2);
 }
 .sidebar .vault-switch:hover { color: var(--accent); }
+.sidebar .sync-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  align-self: center;
+}
+.sidebar .sync-dot.online { background: var(--accent); }
+.sidebar .sync-dot.connecting { background: var(--text-faint); animation: sync-pulse 1.2s ease-in-out infinite; }
+.sidebar .sync-dot.offline { background: transparent; border: 1.5px solid var(--text-faint); }
+@keyframes sync-pulse {
+  50% { opacity: 0.3; }
+}
 
 /* 歡迎畫面:尚未開啟任何 vault */
 .welcome {

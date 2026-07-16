@@ -197,33 +197,38 @@ describe("同步伺服器", () => {
     b.close();
   });
 
-  it("超長 docId 被拒", async () => {
+  it("超長與含穿越素材的 docId 被拒", async () => {
     const c = new TestClient(server.port);
     await c.auth("vault-長id");
     c.send({ type: "push", docId: "x".repeat(129), deviceId: "dev", counter: 1, payload: new Uint8Array([1]) });
     const err = await c.next("error");
     expect(err.code).toBe("bad-message");
     await c.closed;
+
+    const c2 = new TestClient(server.port);
+    await c2.auth("vault-長id");
+    c2.send({ type: "push", docId: "a/../b", deviceId: "dev", counter: 1, payload: new Uint8Array([1]) });
+    expect((await c2.next("error")).code).toBe("bad-message");
+    await c2.closed;
   });
 
-  it("跨 vault 存取他人 doc:error 但不洩漏資料", async () => {
+  it("vault 命名空間隔離:同名 doc 讀不到他人資料也互不干擾", async () => {
     const a = new TestClient(server.port);
     await a.auth("vault-甲");
-    a.send({ type: "push", docId: "甲-d1", deviceId: "devA", counter: 1, payload: new Uint8Array([1]) });
+    a.send({ type: "push", docId: "共用名-d1", deviceId: "devA", counter: 1, payload: new Uint8Array([1]) });
     await a.next("ack");
     a.close();
 
-    const evil = new TestClient(server.port);
-    await evil.auth("vault-乙");
-    evil.send({ type: "pull", docId: "甲-d1", fromSeq: 0 });
-    evil.send({ type: "snapshotPull", docId: "甲-d1" });
-    const snap = await evil.next("snapshot");
+    const other = new TestClient(server.port);
+    const hello = await other.auth("vault-乙");
+    expect(hello.docs).toEqual([]); // 看不到 vault-甲 的 doc
+    other.send({ type: "pull", docId: "共用名-d1", fromSeq: 0 });
+    other.send({ type: "snapshotPull", docId: "共用名-d1" });
+    const snap = await other.next("snapshot");
     expect(snap.payload.length).toBe(0); // 空快照,如同不存在
-    await new Promise((r) => setTimeout(r, 100));
-    expect(evil.peekInbox().filter((m) => m.type === "update")).toEqual([]);
-    evil.send({ type: "push", docId: "甲-d1", deviceId: "devE", counter: 1, payload: new Uint8Array([6]) });
-    const err = await evil.next("error");
-    expect(err.code).toBe("forbidden");
-    evil.close();
+    expect(other.peekInbox().filter((m) => m.type === "update")).toEqual([]);
+    other.send({ type: "push", docId: "共用名-d1", deviceId: "devO", counter: 1, payload: new Uint8Array([7]) });
+    expect((await other.next("ack")).seq).toBe(1); // 自己命名空間的新 doc,從 1 起算
+    other.close();
   });
 });

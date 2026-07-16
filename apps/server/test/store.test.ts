@@ -71,13 +71,15 @@ describe("SyncStore", () => {
     ]);
   });
 
-  it("doc 隸屬 vault:跨 vault 存取同一 doc id 被拒", () => {
+  it("doc 命名空間按 vault 隔離:同名 doc 互不相干", () => {
     const store = makeStore();
     store.appendUpdate("v1", "d1", "dev1", 1, bytes(1));
-    expect(() => store.appendUpdate("v2", "d1", "dev1", 2, bytes(2))).toThrow(/vault/);
-    expect(store.updatesSince("v2", "d1", 0)).toEqual([]);
-    expect(store.snapshot("v2", "d1")).toBeUndefined();
-    expect(() => store.saveSnapshot("v2", "d1", 1, bytes(1))).toThrow(/vault/);
+    expect(store.appendUpdate("v2", "d1", "dev1", 1, bytes(2))).toBe(1); // v2 自己的 d1,從 1 起算
+    expect(store.updatesSince("v2", "d1", 0).map((u) => Array.from(u.payload))).toEqual([[2]]);
+    expect(store.updatesSince("v1", "d1", 0).map((u) => Array.from(u.payload))).toEqual([[1]]);
+    store.saveSnapshot("v2", "d1", 1, bytes(9));
+    expect(store.snapshot("v1", "d1")).toBeUndefined(); // v1 看不到 v2 的快照
+    expect(store.headSeqs("v1")).toEqual([{ docId: "d1", headSeq: 1, snapshotSeq: 0 }]);
   });
 
   it("沒有資料的 doc:updatesSince 空陣列、snapshot undefined", () => {

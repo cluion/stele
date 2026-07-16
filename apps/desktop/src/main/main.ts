@@ -1,15 +1,48 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { readFileSync, existsSync, statSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { VaultSession, type SessionCallbacks } from "./vault-session.ts";
+import { SyncManager, type SyncSettings } from "./sync-manager.ts";
 import { loadSettings, saveSettings } from "./settings.ts";
 
 const SMOKE = process.argv.includes("--smoke");
 const FIXTURES_VAULT = path.resolve(__dirname, "..", "..", "..", "prototypes", "mirror", "fixtures", "vault");
 
 let session: VaultSession | undefined;
+let syncManager: SyncManager | undefined;
 const windows = new Set<BrowserWindow>();
+
+/** vault 內 .stele/sync.json 有 url+token 才啟用同步;vaultId/deviceId 首次自動配發並寫回 */
+function loadSyncSettings(root: string): SyncSettings | undefined {
+  const file = path.join(root, ".stele", "sync.json");
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    const url = raw["url"];
+    const token = raw["token"];
+    if (typeof url !== "string" || typeof token !== "string") return undefined;
+    let changed = false;
+    if (typeof raw["vaultId"] !== "string") {
+      raw["vaultId"] = randomUUID();
+      changed = true;
+    }
+    if (typeof raw["deviceId"] !== "string") {
+      raw["deviceId"] = randomUUID();
+      changed = true;
+    }
+    if (changed) writeFileSync(file, JSON.stringify(raw, null, 2));
+    return { url, token, vaultId: raw["vaultId"] as string, deviceId: raw["deviceId"] as string };
+  } catch {
+    return undefined;
+  }
+}
+
+function broadcastSyncStatus(status: string): void {
+  for (const w of windows) {
+    if (!w.isDestroyed()) w.webContents.send("sync:status", status);
+  }
+}
 
 const callbacks: SessionCallbacks = {
   broadcastDoc(rel, update) {
@@ -41,8 +74,18 @@ function requireSession(): VaultSession {
 async function switchVault(dir: string): Promise<{ vault: string; files: string[] }> {
   const next = new VaultSession(dir, callbacks);
   const prev = session;
+  const prevManager = syncManager;
   session = next;
+  syncManager = undefined;
+  if (prevManager) await prevManager.stop().catch((err: unknown) => console.error("停止同步失敗:", err));
   if (prev) await prev.destroy();
+  const syncSettings = SMOKE ? undefined : loadSyncSettings(next.root);
+  if (syncSettings) {
+    syncManager = new SyncManager(next, syncSettings, broadcastSyncStatus);
+    syncManager.start();
+  } else {
+    broadcastSyncStatus("off");
+  }
   if (!SMOKE) {
     try {
       saveSettings({ lastVault: next.root });
@@ -64,6 +107,8 @@ function initialVaultDir(): string | undefined {
 }
 
 ipcMain.handle("vault:list", () => session?.list() ?? null);
+
+ipcMain.handle("sync:status", () => syncManager?.status ?? "off");
 
 ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {
   if (typeof rel !== "string") throw new Error("非法參數");
@@ -496,9 +541,12 @@ app.on("before-quit", (e) => {
   e.preventDefault();
   quitting = true;
   const closing = session;
+  const closingManager = syncManager;
   session = undefined;
-  void closing
-    .destroy()
+  syncManager = undefined;
+  void (closingManager ? closingManager.stop() : Promise.resolve())
+    .catch((err: unknown) => console.error("退出前停止同步失敗:", err))
+    .then(() => closing.destroy())
     .catch((err: unknown) => console.error("退出前 flush 失敗:", err))
     .finally(() => app.quit());
 });

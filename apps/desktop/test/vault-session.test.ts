@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, appendFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, appendFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import * as Y from "yjs";
@@ -40,6 +40,18 @@ describe("VaultSession", () => {
     expect(() => session.openDoc("../etc/passwd.md")).toThrow(/非法路徑/);
     expect(() => session.openDoc("/etc/passwd.md")).toThrow(/非法路徑/);
     expect(() => session.openDoc("a.txt")).toThrow(/非法路徑/);
+  });
+
+  it("adoptRemoteDoc 拒絕穿越、非 .md 與 symlink 逃逸", () => {
+    const dir = makeVault();
+    const outside = mkdtempSync(path.join(tmpdir(), "stele-outside-"));
+    symlinkSync(outside, path.join(dir, "連結"));
+    const session = new VaultSession(dir, noop);
+    const ydoc = new Y.Doc();
+    const id = "12345678-1234-1234-1234-123456789abc";
+    expect(() => session.adoptRemoteDoc("../外面.md", id, ydoc)).toThrow(/非法路徑/);
+    expect(() => session.adoptRemoteDoc("壞.exe", id, ydoc)).toThrow(/非法路徑/);
+    expect(() => session.adoptRemoteDoc("連結/x.md", id, ydoc)).toThrow(/非法路徑/);
   });
 
   it("create 拒絕遍歷分段並回傳補上副檔名的相對路徑", () => {

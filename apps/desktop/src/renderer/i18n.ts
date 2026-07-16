@@ -31,6 +31,9 @@ export const resources = {
       "rename.failed": "改名失敗:名稱不合法或已存在",
       "delete.confirm": "確定刪除「{{name}}」?會移到系統回收桶",
       "vault.switch": "切換 vault",
+      "sync.online": "已同步",
+      "sync.connecting": "同步連線中…",
+      "sync.offline": "同步離線,編輯會在重連後補上",
     },
   },
   en: {
@@ -62,6 +65,9 @@ export const resources = {
       "rename.failed": "Rename failed: invalid or already exists",
       "delete.confirm": "Delete \"{{name}}\"? It will be moved to the system trash",
       "vault.switch": "Switch vault",
+      "sync.online": "Synced",
+      "sync.connecting": "Sync connecting…",
+      "sync.offline": "Sync offline, edits will catch up on reconnect",
     },
   },
 } as const;

@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket, type RawData } from "ws";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { decodeClientMessage, encodeServerMessage, type ClientMessage, type ServerMessage } from "@stele/sync";
-import { SyncStore, VaultMismatchError } from "./store.ts";
+import { SyncStore } from "./store.ts";
 
 /**
  * blind relay:認證、存加密 blob、配序號、廣播;完全不解讀 payload
@@ -13,7 +13,8 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const MAX_PAYLOAD_BYTES = 32 * 1024 * 1024;
 const MAX_ID_LENGTH = 128;
 
-const validId = (id: string): boolean => id.length > 0 && id.length <= MAX_ID_LENGTH;
+/** 收斂字元集:id 不進伺服器路徑,但協議層就該擋掉 / 與 .. 這類穿越素材 */
+const validId = (id: string): boolean => id.length <= MAX_ID_LENGTH && /^[\p{L}\p{N}._-]+$/u.test(id) && !id.includes("..");
 
 export interface RunningServer {
   port: number;
@@ -123,12 +124,8 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         else if (vaultId === undefined) refuse("unauthorized", "尚未認證");
         else handle(vaultId, msg);
       } catch (err) {
-        if (err instanceof VaultMismatchError) {
-          refuse("forbidden", "doc 隸屬其他 vault");
-        } else {
-          console.error("處理訊息失敗:", err);
-          refuse("internal", "伺服器錯誤");
-        }
+        console.error("處理訊息失敗:", err);
+        refuse("internal", "伺服器錯誤");
       }
     });
 

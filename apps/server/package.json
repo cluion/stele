@@ -4,6 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "build": "node scripts/build.mjs",
     "start": "pnpm build && node dist/main.cjs",
@@ -21,6 +24,7 @@
     "@types/ws": "latest",
     "esbuild": "latest",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "yjs": "latest"
   }
 }
