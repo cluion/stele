@@ -64,6 +64,12 @@ ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {
 
 ipcMain.handle("vault:graph", () => requireSession().graph());
 
+ipcMain.handle("vault:daily", () => {
+  const now = new Date();
+  const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  return requireSession().daily(date);
+});
+
 ipcMain.handle("doc:open", (_e, rel: unknown) => requireSession().openDoc(rel));
 
 ipcMain.handle("vault:create", (_e, rel: unknown) => requireSession().create(rel));
@@ -260,6 +266,23 @@ app.whenReady().then(async () => {
     );
     const graphOk = graphShown && graphClosed;
 
+    // 每日筆記:Cmd+D → 建立並開啟今天的日記,驗證後清理
+    const today = new Date();
+    const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+    await win.webContents.executeJavaScript(
+      `window.dispatchEvent(new KeyboardEvent("keydown", { key: "d", metaKey: true, cancelable: true }))`,
+    );
+    const dailyFile = path.join(FIXTURES_VAULT, "日記", `${todayStr}.md`);
+    let dailyOk = false;
+    for (let waited = 0; waited < 5000 && !dailyOk; waited += 200) {
+      await sleep(200);
+      dailyOk =
+        existsSync(dailyFile) &&
+        readFileSync(dailyFile, "utf8").startsWith(`# ${todayStr}`) &&
+        ((await win.webContents.executeJavaScript(activeSidebarText)) as string) === `日記/${todayStr}`;
+    }
+    if (existsSync(dailyFile)) rmSync(dailyFile);
+
     // 換 vault:切到臨時 vault 驗證索引與反向連結,再切回 fixtures 確認 session 生滅正常
     const tmpVault = path.join(app.getPath("temp"), "stele-smoke-vault");
     rmSync(tmpVault, { recursive: true, force: true });
@@ -290,9 +313,10 @@ app.whenReady().then(async () => {
     console.log(switcherCreated ? "SMOKE ✅ 快速切換器建檔並開啟" : "SMOKE ❌ 快速切換器建檔失敗");
     console.log(sourceMode ? "SMOKE ✅ 源碼模式編輯與雙向切換" : "SMOKE ❌ 源碼模式失敗");
     console.log(graphOk ? "SMOKE ✅ 關聯圖開啟節點數正確且可關閉" : "SMOKE ❌ 關聯圖失敗");
+    console.log(dailyOk ? "SMOKE ✅ Cmd+D 建立並開啟每日筆記" : "SMOKE ❌ 每日筆記失敗");
     console.log(vaultSwitched ? "SMOKE ✅ 換 vault session 生滅正常" : "SMOKE ❌ 換 vault 失敗");
     app.exit(
-      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && vaultSwitched
+      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && dailyOk && vaultSwitched
         ? 0
         : 1,
     );

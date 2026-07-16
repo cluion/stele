@@ -343,6 +343,9 @@ function App() {
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "g") {
         e.preventDefault();
         setGraphOpen((open) => !open);
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d") {
+        e.preventDefault();
+        openDailyRef.current();
       } else if (e.key === "Escape") {
         setGraphOpen(false);
       }
@@ -370,6 +373,20 @@ function App() {
     setActive(rel);
     setRecent((r) => [rel, ...r.filter((f) => f !== rel)].slice(0, RECENT_LIMIT));
   };
+
+  const openDaily = () => {
+    void window.stele
+      .daily()
+      .then(async (rel) => {
+        const info = await window.stele.listVault();
+        if (info) setVaultInfo(info);
+        activate(rel);
+        setGraphOpen(false);
+      })
+      .catch((err: unknown) => console.error("開啟每日筆記失敗:", err));
+  };
+  const openDailyRef = useRef(openDaily);
+  openDailyRef.current = openDaily;
 
   const createAndOpen = async (name: string) => {
     const rel = await window.stele.createNote(name);
@@ -414,6 +431,9 @@ function App() {
       <nav className="sidebar">
         <div className="vault-header">
           <h1>{vaultInfo.vault}</h1>
+          <button className="vault-switch" title={t("daily.today")} aria-label={t("daily.today")} onClick={openDaily}>
+            今
+          </button>
           <button
             className={graphOpen ? "vault-switch active" : "vault-switch"}
             title={t("graph.toggle")}

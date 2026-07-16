@@ -19,6 +19,7 @@ export interface GraphData {
 
 export interface SteleApi {
   graph(): Promise<GraphData>;
+  daily(): Promise<string>;
   /** 尚未開啟任何 vault 時回傳 null */
   listVault(): Promise<VaultInfo | null>;
   /** 彈系統選資料夾 dialog 換 vault;使用者取消時回傳 null、現狀不動 */
@@ -37,6 +38,7 @@ const api: SteleApi = {
   listVault: () => ipcRenderer.invoke("vault:list"),
   chooseVault: () => ipcRenderer.invoke("vault:choose"),
   graph: () => ipcRenderer.invoke("vault:graph"),
+  daily: () => ipcRenderer.invoke("vault:daily"),
   createNote: (rel) => ipcRenderer.invoke("vault:create", rel),
   openDoc: (rel) => ipcRenderer.invoke("doc:open", rel),
   pushUpdate: (rel, update) => ipcRenderer.send("doc:push", rel, update),

@@ -254,6 +254,43 @@ export class VaultSession {
     return withExt;
   }
 
+  /** 開啟(必要時建立)date 當天的每日筆記;模板存在時套用並替換 {{date}} */
+  daily(date: string): string {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`非法日期:${date}`);
+    const cfg = this.config();
+    const rel = `${cfg.dailyFolder}/${date}.md`;
+    const abs = path.resolve(this.root, rel);
+    if (!abs.startsWith(this.root + path.sep)) throw new Error(`非法路徑:${rel}`);
+    if (!existsSync(abs)) {
+      mkdirSync(path.dirname(abs), { recursive: true });
+      writeFileSync(abs, this.dailyContent(cfg, date));
+    }
+    return rel;
+  }
+
+  private config(): { dailyFolder: string; dailyTemplate: string } {
+    const defaults = { dailyFolder: "日記", dailyTemplate: "模板/每日.md" };
+    try {
+      const raw = JSON.parse(readFileSync(path.join(this.root, ".stele", "config.json"), "utf8")) as Record<string, unknown>;
+      return {
+        dailyFolder: typeof raw["dailyFolder"] === "string" ? raw["dailyFolder"] : defaults.dailyFolder,
+        dailyTemplate: typeof raw["dailyTemplate"] === "string" ? raw["dailyTemplate"] : defaults.dailyTemplate,
+      };
+    } catch {
+      return defaults;
+    }
+  }
+
+  private dailyContent(cfg: { dailyTemplate: string }, date: string): string {
+    const tpl = path.resolve(this.root, cfg.dailyTemplate);
+    if (!tpl.startsWith(this.root + path.sep)) return `# ${date}\n`;
+    try {
+      return readFileSync(tpl, "utf8").replaceAll("{{date}}", date);
+    } catch {
+      return `# ${date}\n`;
+    }
+  }
+
   async destroy(): Promise<void> {
     await this.watcher.close();
     await Promise.all([...this.hosts.values()].map((h) => h.destroy()));
