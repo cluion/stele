@@ -11,7 +11,7 @@ const CJK = /[㐀-䶿一-鿿]/u;
 export function tokenize(text: string): string[] {
   const tokens: string[] = [];
   for (const match of text.matchAll(/[\p{L}\p{N}]+/gu)) {
-    for (const part of match[0]!.match(/[㐀-䶿一-鿿]+|[^㐀-䶿一-鿿]+/gu) ?? []) {
+    for (const part of match[0].match(/[㐀-䶿一-鿿]+|[^㐀-䶿一-鿿]+/gu) ?? []) {
       if (CJK.test(part)) {
         for (let i = 0; i < part.length; i++) {
           tokens.push(part[i]!);

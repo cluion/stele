@@ -87,7 +87,7 @@ function pressKey(binding: SteleBinding, event: Partial<KeyboardEvent> & { key: 
     composing: false,
   };
   return binding.state.plugins.some((p) =>
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+     
     (p.props.handleKeyDown as ((view: unknown, e: KeyboardEvent) => boolean) | undefined)?.(fakeView, fakeEvent),
   );
 }

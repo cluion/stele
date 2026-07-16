@@ -77,7 +77,9 @@ function Editor({
   /** 模式切換時傳遞可見頂部區塊索引,塊級近似保持捲動位置 */
   const scrollBlock = useRef(0);
   const onNavigateRef = useRef(onNavigate);
-  onNavigateRef.current = onNavigate;
+  useEffect(() => {
+    onNavigateRef.current = onNavigate;
+  });
 
   // ── [[ 自動完成 ──
   const [suggest, setSuggest] = useState<Suggest | null>(null);
@@ -89,7 +91,9 @@ function Editor({
       : files.filter((f) => f !== rel).slice(0, 8)
     : [];
   const suggestRef = useRef<{ open: Suggest | null; items: string[]; index: number }>({ open: null, items: [], index: 0 });
-  suggestRef.current = { open: suggest, items: suggestItems, index: suggestIndex };
+  useEffect(() => {
+    suggestRef.current = { open: suggest, items: suggestItems, index: suggestIndex };
+  });
 
   const refreshSuggest = (view: EditorView) => {
     const { $from, empty } = view.state.selection;
@@ -571,7 +575,11 @@ function App() {
       .catch((err: unknown) => console.error("開啟每日筆記失敗:", err));
   };
   const openDailyRef = useRef(openDaily);
-  openDailyRef.current = openDaily;
+  useEffect(() => {
+    // latest-ref 模式:鍵盤 effect 掛一次,永遠呼叫到最新的 openDaily
+    // eslint-disable-next-line react-hooks/immutability
+    openDailyRef.current = openDaily;
+  });
 
   const createAndOpen = async (name: string) => {
     const rel = await window.stele.createNote(name);

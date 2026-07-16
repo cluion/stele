@@ -15,9 +15,11 @@ export function GraphView({ active, onOpen }: { active: string | undefined; onOp
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [nodeCount, setNodeCount] = useState(0);
   const activeRef = useRef(active);
-  activeRef.current = active;
   const onOpenRef = useRef(onOpen);
-  onOpenRef.current = onOpen;
+  useEffect(() => {
+    activeRef.current = active;
+    onOpenRef.current = onOpen;
+  });
 
   useEffect(() => {
     const wrap = wrapRef.current;

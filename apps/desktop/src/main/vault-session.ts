@@ -270,7 +270,7 @@ export class VaultSession {
     const file = this.resolveFile(rel);
     let host = this.hosts.get(rel);
     if (!host) {
-      host = new DocHost(rel, file, this.callbacks.broadcastDoc);
+      host = new DocHost(rel, file, (r, u) => this.callbacks.broadcastDoc(r, u));
       this.hosts.set(rel, host);
     }
     return host.snapshot();

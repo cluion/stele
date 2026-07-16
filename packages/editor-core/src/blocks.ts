@@ -2,7 +2,6 @@ import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
 import remarkFrontmatter from "remark-frontmatter";
-import type { Root } from "mdast";
 
 /** 一個頂層 Markdown 區塊在原文中的範圍;[from, to) 半開區間,含區塊後方的空行 */
 export interface Block {
@@ -19,7 +18,7 @@ const parser = unified().use(remarkParse).use(remarkGfm).use(remarkFrontmatter, 
  */
 export function splitBlocks(source: string): Block[] {
   if (source.length === 0) return [{ type: "empty", from: 0, to: 0 }];
-  const tree = parser.parse(source) as Root;
+  const tree = parser.parse(source);
   if (tree.children.length === 0) return [{ type: "empty", from: 0, to: source.length }];
 
   const blocks: Block[] = [];

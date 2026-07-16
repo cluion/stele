@@ -68,7 +68,7 @@ export const resources = {
 
 void i18next.use(initReactI18next).init({
   resources,
-  lng: navigator.language.startsWith("zh") ? "zh-TW" : "en",
+  lng: typeof navigator !== "undefined" && navigator.language.startsWith("zh") ? "zh-TW" : "en",
   fallbackLng: "en",
   interpolation: { escapeValue: false },
 });

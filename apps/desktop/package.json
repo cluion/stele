@@ -38,7 +38,7 @@
     "@types/react-dom": "latest",
     "electron": "latest",
     "esbuild": "latest",
-    "typescript": "latest",
+    "typescript": "^5.9.3",
     "vitest": "^4.1.10"
   }
 }

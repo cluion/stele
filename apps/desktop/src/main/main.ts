@@ -101,7 +101,7 @@ ipcMain.handle("vault:choose", async (e) => {
   return switchVault(dir);
 });
 
-app.whenReady().then(async () => {
+void app.whenReady().then(async () => {
   const dir = initialVaultDir();
   if (dir) {
     try {
