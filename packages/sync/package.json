@@ -12,6 +12,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@noble/hashes": "^2.0.1",
     "lib0": "^0.2.114",
     "yjs": "latest"
   },

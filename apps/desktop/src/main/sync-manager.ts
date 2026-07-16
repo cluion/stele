@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import path from "node:path";
 import {
   SyncClient,
+  type Cipher,
   type SocketLike,
   type SyncDocState,
   type SyncHost,
@@ -58,7 +59,7 @@ export class SyncManager {
     private readonly session: VaultSession,
     settings: SyncSettings,
     private readonly onStatus?: (status: SyncStatus) => void,
-    tuning?: { pushDebounceMs?: number; snapshotThreshold?: number },
+    tuning?: { pushDebounceMs?: number; snapshotThreshold?: number; cipher?: Cipher },
   ) {
     this.metaFile = path.join(session.root, ".stele", "meta.ybin");
     this.stateFile = path.join(session.root, ".stele", "sync-state.json");
@@ -84,6 +85,7 @@ export class SyncManager {
       },
       pushDebounceMs: tuning?.pushDebounceMs,
       snapshotThreshold: tuning?.snapshotThreshold,
+      cipher: tuning?.cipher,
     });
     this.unsubscribeFiles = session.onFileEvent((event) => this.onLocalFile(event));
   }

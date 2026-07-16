@@ -179,7 +179,7 @@ export class SyncClient {
           this.send({ type: "pull", docId: msg.docId, fromSeq: rt.state.lastSeq });
           return;
         }
-        Y.applyUpdate(rt.doc, await this.cipher.decrypt(msg.payload), "sync");
+        Y.applyUpdate(rt.doc, await this.cipher.decrypt(msg.docId, msg.payload), "sync");
         rt.state = { ...rt.state, lastSeq: msg.seq };
         this.opts.host.saveState(msg.docId, rt.state);
         await this.maybeCompact(rt);
@@ -189,7 +189,7 @@ export class SyncClient {
         const rt = await this.ensure(msg.docId);
         if (!rt || msg.payload.length === 0) return;
         if (msg.uptoSeq > rt.state.lastSeq) {
-          Y.applyUpdate(rt.doc, await this.cipher.decrypt(msg.payload), "sync");
+          Y.applyUpdate(rt.doc, await this.cipher.decrypt(msg.docId, msg.payload), "sync");
           rt.state = { ...rt.state, lastSeq: msg.uptoSeq };
           this.opts.host.saveState(msg.docId, rt.state);
         }
@@ -288,7 +288,7 @@ export class SyncClient {
       docId: rt.docId,
       deviceId: this.opts.deviceId,
       counter: rt.state.counter,
-      payload: await this.cipher.encrypt(diff),
+      payload: await this.cipher.encrypt(rt.docId, diff),
     });
   }
 
@@ -299,7 +299,7 @@ export class SyncClient {
     const knownHead = head?.headSeq ?? 0;
     const threshold = this.opts.snapshotThreshold ?? DEFAULT_SNAPSHOT_THRESHOLD;
     if (rt.state.lastSeq < knownHead || rt.state.lastSeq - snapshotSeq < threshold) return;
-    const payload = await this.cipher.encrypt(Y.encodeStateAsUpdate(rt.doc));
+    const payload = await this.cipher.encrypt(rt.docId, Y.encodeStateAsUpdate(rt.doc));
     this.send({ type: "snapshotPush", docId: rt.docId, uptoSeq: rt.state.lastSeq, payload });
     this.serverHeads.set(rt.docId, {
       docId: rt.docId,

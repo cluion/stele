@@ -4,6 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { VaultSession, type SessionCallbacks } from "./vault-session.ts";
+import { deriveVaultKey, VaultCipher } from "@stele/sync";
 import { SyncManager, type SyncSettings } from "./sync-manager.ts";
 import { loadSettings, saveSettings } from "./settings.ts";
 
@@ -14,14 +15,22 @@ let session: VaultSession | undefined;
 let syncManager: SyncManager | undefined;
 const windows = new Set<BrowserWindow>();
 
-/** vault 內 .stele/sync.json 有 url+token 才啟用同步;vaultId/deviceId 首次自動配發並寫回 */
-function loadSyncSettings(root: string): SyncSettings | undefined {
+/**
+ * vault 內 .stele/sync.json 有 url+token+passphrase 才啟用同步;vaultId/deviceId 首次自動配發並寫回
+ * E2EE 是硬條件:缺 passphrase 不做明文同步,直接停用並提示
+ */
+function loadSyncSettings(root: string): (SyncSettings & { passphrase: string }) | undefined {
   const file = path.join(root, ".stele", "sync.json");
   try {
     const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
     const url = raw["url"];
     const token = raw["token"];
+    const passphrase = raw["passphrase"];
     if (typeof url !== "string" || typeof token !== "string") return undefined;
+    if (typeof passphrase !== "string" || passphrase.length === 0) {
+      console.error("sync.json 缺 passphrase:E2EE 為必要條件,同步停用");
+      return undefined;
+    }
     let changed = false;
     if (typeof raw["vaultId"] !== "string") {
       raw["vaultId"] = randomUUID();
@@ -32,7 +41,7 @@ function loadSyncSettings(root: string): SyncSettings | undefined {
       changed = true;
     }
     if (changed) writeFileSync(file, JSON.stringify(raw, null, 2));
-    return { url, token, vaultId: raw["vaultId"] as string, deviceId: raw["deviceId"] as string };
+    return { url, token, passphrase, vaultId: raw["vaultId"] as string, deviceId: raw["deviceId"] as string };
   } catch {
     return undefined;
   }
@@ -81,7 +90,8 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
   if (prev) await prev.destroy();
   const syncSettings = SMOKE ? undefined : loadSyncSettings(next.root);
   if (syncSettings) {
-    syncManager = new SyncManager(next, syncSettings, broadcastSyncStatus);
+    const cipher = new VaultCipher(await deriveVaultKey(syncSettings.passphrase, syncSettings.vaultId));
+    syncManager = new SyncManager(next, syncSettings, broadcastSyncStatus, { cipher });
     syncManager.start();
   } else {
     broadcastSyncStatus("off");

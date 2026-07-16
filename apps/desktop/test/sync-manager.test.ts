@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import * as Y from "yjs";
 import { startServer, SyncStore, type RunningServer } from "@stele/server";
+import { deriveVaultKey, VaultCipher } from "@stele/sync";
 import { VaultSession } from "../src/main/vault-session.ts";
 import { SyncManager, type SyncSettings } from "../src/main/sync-manager.ts";
 
@@ -39,12 +40,17 @@ describe("SyncManager 桌面端對端", () => {
   let store: SyncStore;
   const devices: Device[] = [];
 
-  function makeDevice(vaultId: string, deviceId: string, seedFiles: Record<string, string> = {}): Device {
+  function makeDevice(
+    vaultId: string,
+    deviceId: string,
+    seedFiles: Record<string, string> = {},
+    cipher?: VaultCipher,
+  ): Device {
     const dir = mkdtempSync(path.join(tmpdir(), "stele-sync-"));
     for (const [rel, content] of Object.entries(seedFiles)) writeFileSync(path.join(dir, rel), content);
     const session = new VaultSession(dir, noop);
     const settings: SyncSettings = { url: `ws://127.0.0.1:${server.port}`, token: TOKEN, vaultId, deviceId };
-    const manager = new SyncManager(session, settings, undefined, { pushDebounceMs: 20 });
+    const manager = new SyncManager(session, settings, undefined, { pushDebounceMs: 20, cipher });
     manager.start();
     const device = { dir, session, manager };
     devices.push(device);
@@ -152,6 +158,37 @@ describe("SyncManager 桌面端對端", () => {
     await until(
       () => JSON.stringify(contents(a)) === JSON.stringify(wanted) && JSON.stringify(contents(b)) === JSON.stringify(wanted),
       "兩邊各保留兩份內容",
+      10000, // 衝突退讓由哪端執行取決於時序,慢路徑需要多輪 meta 往返
     );
+  });
+
+  it("E2EE:兩台密語相同可收斂,伺服器只見密文", async () => {
+    const vaultId = "v-加密";
+    const cipherA = new VaultCipher(await deriveVaultKey("共同密語 正確馬", vaultId, 12));
+    const cipherB = new VaultCipher(await deriveVaultKey("共同密語 正確馬", vaultId, 12));
+    const a = makeDevice(vaultId, "devA", { "祕密.md": "極機密內容\n" }, cipherA);
+    const b = makeDevice(vaultId, "devB", {}, cipherB);
+
+    await until(() => content(b, "祕密.md") === "極機密內容\n", "乙用同密語解出內容");
+
+    // 伺服器存的每一則 payload 都不含明文
+    for (const docId of a.session.allDocIds()) {
+      for (const u of store.updatesSince(vaultId, docId, 0)) {
+        expect(Buffer.from(u.payload).includes(Buffer.from("極機密內容"))).toBe(false);
+      }
+    }
+  });
+
+  it("E2EE:密語不同解不開,內容不落地", async () => {
+    const vaultId = "v-錯密語";
+    const cipherA = new VaultCipher(await deriveVaultKey("甲的密語", vaultId, 12));
+    const cipherB = new VaultCipher(await deriveVaultKey("乙的不同密語", vaultId, 12));
+    const a = makeDevice(vaultId, "devA", { "檔.md": "只有甲讀得到\n" }, cipherA);
+    const b = makeDevice(vaultId, "devB", {}, cipherB);
+
+    // 給足時間讓同步嘗試;乙解不開,不該落地任何內容
+    await until(() => store.updatesSince(vaultId, a.session.allDocIds()[0]!, 0).length > 0, "甲已上傳");
+    await sleep(300);
+    expect(b.session.list().files).toHaveLength(0);
   });
 });

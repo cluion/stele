@@ -1,13 +1,13 @@
-/** payload 進出同步引擎的加解密縫:P2-2 換成 AES-GCM 實作,引擎與協議不動 */
+/** payload 進出同步引擎的加解密縫;docId 供每 doc 子金鑰衍生 */
 export interface Cipher {
-  encrypt(plain: Uint8Array): Promise<Uint8Array>;
-  decrypt(data: Uint8Array): Promise<Uint8Array>;
+  encrypt(docId: string, plain: Uint8Array): Promise<Uint8Array>;
+  decrypt(docId: string, data: Uint8Array): Promise<Uint8Array>;
 }
 
-/** P2-2 之前的過渡:不加密 */
+/** 測試用:不加密 */
 export const identityCipher: Cipher = {
-  encrypt: (plain) => Promise.resolve(plain),
-  decrypt: (data) => Promise.resolve(data),
+  encrypt: (_docId, plain) => Promise.resolve(plain),
+  decrypt: (_docId, data) => Promise.resolve(data),
 };
 
 /** 差分內容指紋,擋下重連時的無變更重推 */
