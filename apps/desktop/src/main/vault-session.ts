@@ -142,6 +142,30 @@ class LinkIndex {
     }
     return result;
   }
+
+  /** 全 vault 關聯圖:節點=筆記,邊=解析成功的 wikilink(去重、去自環) */
+  graph(): { nodes: string[]; edges: Array<[number, number]> } {
+    const nodes = [...this.files];
+    const indexOf = new Map(nodes.map((f, i) => [f, i]));
+    const edges: Array<[number, number]> = [];
+    const seen = new Set<string>();
+    for (const [source, refs] of this.outgoing) {
+      const si = indexOf.get(source);
+      if (si === undefined) continue;
+      for (const ref of refs) {
+        const target = resolveWikilink(nodes, ref.target);
+        if (!target) continue;
+        const ti = indexOf.get(target);
+        if (ti === undefined || ti === si) continue;
+        const key = `${si}→${ti}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          edges.push([si, ti]);
+        }
+      }
+    }
+    return { nodes, edges };
+  }
 }
 
 function listMarkdown(dir: string, prefix = ""): string[] {
@@ -192,6 +216,10 @@ export class VaultSession {
 
   backlinks(rel: string): Array<{ file: string; line: string }> {
     return this.index.backlinks(rel);
+  }
+
+  graph(): { nodes: string[]; edges: Array<[number, number]> } {
+    return this.index.graph();
   }
 
   openDoc(rel: unknown): Uint8Array {

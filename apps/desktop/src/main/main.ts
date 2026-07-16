@@ -62,6 +62,8 @@ ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {
   return requireSession().backlinks(rel);
 });
 
+ipcMain.handle("vault:graph", () => requireSession().graph());
+
 ipcMain.handle("doc:open", (_e, rel: unknown) => requireSession().openDoc(rel));
 
 ipcMain.handle("vault:create", (_e, rel: unknown) => requireSession().create(rel));
@@ -237,6 +239,27 @@ app.whenReady().then(async () => {
     }
     const sourceMode = cmMounted && cmMirrored && pmBack;
 
+    // 關聯圖:Cmd+G 開啟 → canvas 掛載且節點數=筆記數 → Esc 關閉回編輯器
+    await win.webContents.executeJavaScript(
+      `window.dispatchEvent(new KeyboardEvent("keydown", { key: "g", metaKey: true, cancelable: true }))`,
+    );
+    let graphShown = false;
+    const expectedNodes = requireSession().list().files.length;
+    for (let waited = 0; waited < 5000 && !graphShown; waited += 200) {
+      await sleep(200);
+      graphShown = await win.webContents.executeJavaScript(
+        `!!document.querySelector(".graph canvas") && document.querySelector(".graph")?.dataset.nodeCount === "${expectedNodes}"`,
+      );
+    }
+    await win.webContents.executeJavaScript(
+      `window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }))`,
+    );
+    await sleep(300);
+    const graphClosed = await win.webContents.executeJavaScript(
+      `!document.querySelector(".graph") && !!document.querySelector("#editor")`,
+    );
+    const graphOk = graphShown && graphClosed;
+
     // 換 vault:切到臨時 vault 驗證索引與反向連結,再切回 fixtures 確認 session 生滅正常
     const tmpVault = path.join(app.getPath("temp"), "stele-smoke-vault");
     rmSync(tmpVault, { recursive: true, force: true });
@@ -266,9 +289,10 @@ app.whenReady().then(async () => {
     console.log(switcherTyped && switched ? "SMOKE ✅ Cmd+P 模糊搜尋切換筆記" : "SMOKE ❌ 快速切換器切換失敗");
     console.log(switcherCreated ? "SMOKE ✅ 快速切換器建檔並開啟" : "SMOKE ❌ 快速切換器建檔失敗");
     console.log(sourceMode ? "SMOKE ✅ 源碼模式編輯與雙向切換" : "SMOKE ❌ 源碼模式失敗");
+    console.log(graphOk ? "SMOKE ✅ 關聯圖開啟節點數正確且可關閉" : "SMOKE ❌ 關聯圖失敗");
     console.log(vaultSwitched ? "SMOKE ✅ 換 vault session 生滅正常" : "SMOKE ❌ 換 vault 失敗");
     app.exit(
-      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && vaultSwitched
+      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && vaultSwitched
         ? 0
         : 1,
     );

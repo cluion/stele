@@ -306,3 +306,22 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.graph {
+  flex: 1;
+  position: relative;
+  background: var(--bg);
+}
+.graph canvas { display: block; }
+.graph-hint {
+  position: absolute;
+  bottom: var(--sp-3);
+  left: 0;
+  right: 0;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  pointer-events: none;
+  margin: 0;
+}
+.vault-header .vault-switch.active { color: var(--accent); background: var(--accent-subtle); }

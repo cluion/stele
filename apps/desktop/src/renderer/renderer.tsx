@@ -7,6 +7,7 @@ import * as Y from "yjs";
 import { EditorView } from "prosemirror-view";
 import { SteleBinding, resolveWikilink, rankFiles } from "@stele/editor-core";
 import { createSourceView, topBlockCM, scrollToBlockCM } from "./source-editor.ts";
+import { GraphView } from "./graph-view.tsx";
 import type { SteleApi, BacklinkItem, VaultInfo } from "../main/preload.ts";
 
 type EditorMode = "wysiwyg" | "source";
@@ -314,6 +315,7 @@ function App() {
   const [active, setActive] = useState<string | undefined>();
   const [recent, setRecent] = useState<string[]>([]);
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [graphOpen, setGraphOpen] = useState(false);
   // 每篇筆記各自記住模式,session 內有效,預設 WYSIWYG
   const [modes, setModes] = useState<ReadonlyMap<string, EditorMode>>(new Map());
 
@@ -338,6 +340,11 @@ function App() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
         e.preventDefault();
         setSwitcherOpen(true);
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "g") {
+        e.preventDefault();
+        setGraphOpen((open) => !open);
+      } else if (e.key === "Escape") {
+        setGraphOpen(false);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -407,6 +414,14 @@ function App() {
       <nav className="sidebar">
         <div className="vault-header">
           <h1>{vaultInfo.vault}</h1>
+          <button
+            className={graphOpen ? "vault-switch active" : "vault-switch"}
+            title={t("graph.toggle")}
+            aria-label={t("graph.toggle")}
+            onClick={() => setGraphOpen((open) => !open)}
+          >
+            ◉
+          </button>
           <button className="vault-switch" title={t("vault.switch")} aria-label={t("vault.switch")} onClick={chooseVault}>
             ⇄
           </button>
@@ -418,7 +433,15 @@ function App() {
           </button>
         ))}
       </nav>
-      {active ? (
+      {graphOpen ? (
+        <GraphView
+          active={active}
+          onOpen={(rel) => {
+            activate(rel);
+            setGraphOpen(false);
+          }}
+        />
+      ) : active ? (
         <>
           <Editor
             key={`${vaultInfo.root}:${active}`}
