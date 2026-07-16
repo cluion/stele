@@ -336,3 +336,60 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.editor-pane { position: relative; }
+
+.wikilink-suggest {
+  position: absolute;
+  z-index: var(--z-dropdown);
+  min-width: 220px;
+  max-width: 360px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-1);
+}
+.wikilink-suggest button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--text);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wikilink-suggest button.selected { background: var(--accent-subtle); color: var(--accent); }
+
+.menu-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); }
+.context-menu {
+  position: fixed;
+  min-width: 160px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  padding: var(--sp-1);
+}
+.context-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--text);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+.context-menu button:hover { background: var(--surface-2); }

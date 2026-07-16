@@ -184,11 +184,21 @@ app.whenReady().then(async () => {
     })()`;
     const openSwitcher = `window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true, cancelable: true }))`;
     const activeSidebarText = `document.querySelector(".sidebar button.active")?.textContent ?? ""`;
+    // 清單渲染有時序抖動:等預期項目出現在第一位才按 Enter
+    const waitSwitcherItem = async (text: string) => {
+      for (let waited = 0; waited < 5000; waited += 100) {
+        const ready = await win.webContents.executeJavaScript(
+          `document.querySelector(".switcher li button")?.textContent.includes(${JSON.stringify(text)}) ?? false`,
+        );
+        if (ready) return;
+        await sleep(100);
+      }
+    };
 
     await win.webContents.executeJavaScript(openSwitcher);
     await sleep(200);
     const switcherTyped = (await win.webContents.executeJavaScript(typeInSwitcher("靈感"))) as boolean;
-    await sleep(200);
+    await waitSwitcherItem("靈感箱");
     await win.webContents.executeJavaScript(pressInSwitcher("Enter"));
     let switched = false;
     for (let waited = 0; waited < 5000 && !switched; waited += 200) {
@@ -200,7 +210,7 @@ app.whenReady().then(async () => {
     await win.webContents.executeJavaScript(openSwitcher);
     await sleep(200);
     await win.webContents.executeJavaScript(typeInSwitcher("煙霧測試新檔"));
-    await sleep(200);
+    await waitSwitcherItem("煙霧測試新檔");
     await win.webContents.executeJavaScript(pressInSwitcher("Enter"));
     const smokeNote = path.join(FIXTURES_VAULT, "煙霧測試新檔.md");
     let switcherCreated = false;
@@ -216,7 +226,7 @@ app.whenReady().then(async () => {
     await win.webContents.executeJavaScript(openSwitcher);
     await sleep(200);
     await win.webContents.executeJavaScript(typeInSwitcher("靈感"));
-    await sleep(200);
+    await waitSwitcherItem("靈感箱");
     await win.webContents.executeJavaScript(pressInSwitcher("Enter"));
     await sleep(400);
     const toggleMode = `window.dispatchEvent(new KeyboardEvent("keydown", { key: "e", metaKey: true, cancelable: true }))`;
@@ -285,6 +295,58 @@ app.whenReady().then(async () => {
     }
     if (existsSync(dailyFile)) rmSync(dailyFile);
 
+    // [[ 自動完成:先明確切到立項筆記(前一個測試可能停在已刪除的每日筆記上)
+    await win.webContents.executeJavaScript(openSwitcher);
+    await sleep(200);
+    await win.webContents.executeJavaScript(typeInSwitcher("立項"));
+    await waitSwitcherItem("立項");
+    await win.webContents.executeJavaScript(pressInSwitcher("Enter"));
+    await sleep(400);
+    const acFile = path.join(FIXTURES_VAULT, "專案", "Stele", "立項.md");
+    const acBytes = readFileSync(acFile, "utf8");
+    await win.webContents.executeJavaScript(`document.querySelector("#editor .ProseMirror").focus()`);
+    win.webContents.sendInputEvent({ type: "char", keyCode: "[" });
+    win.webContents.sendInputEvent({ type: "char", keyCode: "[" });
+    let suggestShown = false;
+    for (let waited = 0; waited < 5000 && !suggestShown; waited += 200) {
+      await sleep(200);
+      suggestShown = await win.webContents.executeJavaScript(
+        `document.querySelectorAll(".wikilink-suggest button").length > 0`,
+      );
+    }
+    await win.webContents.executeJavaScript(
+      `document.querySelector("#editor .ProseMirror").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }))`,
+    );
+    let suggestInserted = false;
+    for (let waited = 0; waited < 5000 && !suggestInserted; waited += 200) {
+      await sleep(200);
+      suggestInserted = await win.webContents.executeJavaScript(
+        `document.querySelectorAll("#editor .ProseMirror .wikilink").length > 0 && !document.querySelector(".wikilink-suggest")`,
+      );
+    }
+    await sleep(300);
+    await writeFile(acFile, acBytes);
+    await sleep(400);
+    const autocompleteOk = suggestShown && suggestInserted;
+
+    // 右鍵選單:側欄 contextmenu → 新增筆記 → 未命名.md 建立並開啟,驗證後清理
+    await win.webContents.executeJavaScript(
+      `document.querySelector(".sidebar").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 60, clientY: 300 }))`,
+    );
+    await sleep(200);
+    await win.webContents.executeJavaScript(
+      `[...document.querySelectorAll(".context-menu button")][0]?.click()`,
+    );
+    const untitled = path.join(FIXTURES_VAULT, "未命名.md");
+    let contextCreated = false;
+    for (let waited = 0; waited < 5000 && !contextCreated; waited += 200) {
+      await sleep(200);
+      contextCreated =
+        existsSync(untitled) &&
+        ((await win.webContents.executeJavaScript(activeSidebarText)) as string) === "未命名";
+    }
+    if (existsSync(untitled)) rmSync(untitled);
+
     // 全文搜尋:Cmd+Shift+F → 中文 bigram 查詢 → Enter 開啟唯一命中
     await win.webContents.executeJavaScript(
       `window.dispatchEvent(new KeyboardEvent("keydown", { key: "f", metaKey: true, shiftKey: true, cancelable: true }))`,
@@ -338,9 +400,11 @@ app.whenReady().then(async () => {
     console.log(graphOk ? "SMOKE ✅ 關聯圖開啟節點數正確且可關閉" : "SMOKE ❌ 關聯圖失敗");
     console.log(dailyOk ? "SMOKE ✅ Cmd+D 建立並開啟每日筆記" : "SMOKE ❌ 每日筆記失敗");
     console.log(searchOk ? "SMOKE ✅ 全文搜尋中文查詢並開啟結果" : "SMOKE ❌ 全文搜尋失敗");
+    console.log(autocompleteOk ? "SMOKE ✅ 雙括號自動完成插入 wikilink" : "SMOKE ❌ 自動完成失敗");
+    console.log(contextCreated ? "SMOKE ✅ 右鍵選單新增筆記" : "SMOKE ❌ 右鍵新增失敗");
     console.log(vaultSwitched ? "SMOKE ✅ 換 vault session 生滅正常" : "SMOKE ❌ 換 vault 失敗");
     app.exit(
-      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && dailyOk && searchOk && vaultSwitched
+      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && dailyOk && searchOk && autocompleteOk && contextCreated && vaultSwitched
         ? 0
         : 1,
     );

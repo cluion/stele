@@ -49,14 +49,24 @@ function scrollToBlockPM(view: EditorView, index: number): void {
   if (dom instanceof HTMLElement) dom.scrollIntoView({ block: "start" });
 }
 
+interface Suggest {
+  query: string;
+  /** 「[[」起點的 PM 位置 */
+  from: number;
+  x: number;
+  y: number;
+}
+
 function Editor({
   rel,
   mode,
+  files,
   onNavigate,
   onToggleMode,
 }: {
   rel: string;
   mode: EditorMode;
+  files: string[];
   onNavigate: (target: string) => void;
   onToggleMode: () => void;
 }) {
@@ -68,6 +78,52 @@ function Editor({
   const scrollBlock = useRef(0);
   const onNavigateRef = useRef(onNavigate);
   onNavigateRef.current = onNavigate;
+
+  // ── [[ 自動完成 ──
+  const [suggest, setSuggest] = useState<Suggest | null>(null);
+  const [suggestIndex, setSuggestIndex] = useState(0);
+  const viewRef = useRef<EditorView | undefined>(undefined);
+  const suggestItems = suggest
+    ? suggest.query
+      ? rankFiles(files, suggest.query, 8)
+      : files.filter((f) => f !== rel).slice(0, 8)
+    : [];
+  const suggestRef = useRef<{ open: Suggest | null; items: string[]; index: number }>({ open: null, items: [], index: 0 });
+  suggestRef.current = { open: suggest, items: suggestItems, index: suggestIndex };
+
+  const refreshSuggest = (view: EditorView) => {
+    const { $from, empty } = view.state.selection;
+    if (!empty || !$from.parent.isTextblock) {
+      setSuggest(null);
+      return;
+    }
+    const textBefore = $from.parent.textBetween(Math.max(0, $from.parentOffset - 60), $from.parentOffset, undefined, "￼");
+    const match = /\[\[([^[\]￼]*)$/.exec(textBefore);
+    const pane = paneRef.current;
+    if (!match || !pane) {
+      setSuggest(null);
+      return;
+    }
+    const coords = view.coordsAtPos($from.pos);
+    const rect = pane.getBoundingClientRect();
+    setSuggest({
+      query: match[1]!,
+      from: $from.pos - match[0].length,
+      x: coords.left - rect.left + pane.scrollLeft,
+      y: coords.bottom - rect.top + pane.scrollTop + 4,
+    });
+    setSuggestIndex(0);
+  };
+
+  const pickSuggest = (file: string) => {
+    const view = viewRef.current;
+    const open = suggestRef.current.open;
+    if (!view || !open) return;
+    const node = view.state.schema.nodes["wikilink"]!.create({ target: file.replace(/\.md$/, "") });
+    view.dispatch(view.state.tr.replaceRangeWith(open.from, view.state.selection.from, node));
+    setSuggest(null);
+    view.focus();
+  };
 
   // 文件生命週期:每個 rel 一份本地 Y.Doc,與 main 經 IPC 雙向同步
   useEffect(() => {
@@ -117,11 +173,35 @@ function Editor({
           }
           return false;
         },
+        handleKeyDown: (_view, event) => {
+          const s = suggestRef.current;
+          if (!s.open || s.items.length === 0) return false;
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            const dir = event.key === "ArrowDown" ? 1 : -1;
+            setSuggestIndex((s.index + dir + s.items.length) % s.items.length);
+            return true;
+          }
+          if (event.key === "Enter" || event.key === "Tab") {
+            pickSuggest(s.items[s.index]!);
+            return true;
+          }
+          if (event.key === "Escape") {
+            setSuggest(null);
+            return true;
+          }
+          return false;
+        },
       });
-      binding.onStateChange = (state) => view.updateState(state);
+      viewRef.current = view;
+      binding.onStateChange = (state) => {
+        view.updateState(state);
+        refreshSuggest(view);
+      };
       scrollToBlockPM(view, scrollBlock.current);
       return () => {
         scrollBlock.current = topBlockPM(view, pane);
+        viewRef.current = undefined;
+        setSuggest(null);
         binding.destroy();
         view.destroy();
       };
@@ -149,6 +229,24 @@ function Editor({
       </div>
       {!ytext && <p className="placeholder">{t("editor.loading")}</p>}
       <div id="editor" ref={ref} />
+      {suggest && suggestItems.length > 0 && (
+        <ul className="wikilink-suggest" style={{ left: suggest.x, top: suggest.y }}>
+          {suggestItems.map((f, i) => (
+            <li key={f}>
+              <button
+                className={i === suggestIndex ? "selected" : ""}
+                onMouseEnter={() => setSuggestIndex(i)}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pickSuggest(f);
+                }}
+              >
+                {f.replace(/\.md$/, "")}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -396,6 +494,7 @@ function App() {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [graphOpen, setGraphOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [menu, setMenu] = useState<{ x: number; y: number; folder: string } | null>(null);
   // 每篇筆記各自記住模式,session 內有效,預設 WYSIWYG
   const [modes, setModes] = useState<ReadonlyMap<string, EditorMode>>(new Map());
 
@@ -417,7 +516,8 @@ function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f") {
+      // 不分 Shift:Linux 上 Ctrl+Shift+F 常被輸入法簡繁切換攔走,Ctrl+F 是主要途徑
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setSearchOpen(true);
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
@@ -431,6 +531,7 @@ function App() {
         openDailyRef.current();
       } else if (e.key === "Escape") {
         setGraphOpen(false);
+        setMenu(null);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -494,6 +595,15 @@ function App() {
 
   const files = vaultInfo?.files ?? [];
 
+  /** 未命名、未命名 2、未命名 3… 找到第一個沒被用掉的 */
+  const newUntitled = (folder: string) => {
+    const base = t("contextmenu.untitled");
+    let name = `${folder}${base}`;
+    for (let n = 2; files.includes(`${name}.md`); n++) name = `${folder}${base} ${n}`;
+    void createAndOpen(name).catch((err: unknown) => console.error("新增筆記失敗:", err));
+    setMenu(null);
+  };
+
   const navigate = (target: string) => {
     const dest = resolveWikilink(files, target);
     if (dest) {
@@ -511,9 +621,20 @@ function App() {
 
   return (
     <div className="app">
-      <nav className="sidebar">
+      <nav
+        className="sidebar"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          const rel = (e.target as HTMLElement).closest("button[data-rel]")?.getAttribute("data-rel");
+          const folder = rel ? rel.slice(0, rel.lastIndexOf("/") + 1) : "";
+          setMenu({ x: e.clientX, y: e.clientY, folder });
+        }}
+      >
         <div className="vault-header">
           <h1>{vaultInfo.vault}</h1>
+          <button className="vault-switch" title={t("search.open")} aria-label={t("search.open")} onClick={() => setSearchOpen(true)}>
+            ⌕
+          </button>
           <button className="vault-switch" title={t("daily.today")} aria-label={t("daily.today")} onClick={openDaily}>
             今
           </button>
@@ -531,7 +652,7 @@ function App() {
         </div>
         {files.length === 0 && <p className="placeholder">{t("sidebar.empty")}</p>}
         {files.map((f) => (
-          <button key={f} className={f === active ? "active" : ""} onClick={() => activate(f)}>
+          <button key={f} data-rel={f} className={f === active ? "active" : ""} onClick={() => activate(f)}>
             {f.replace(/\.md$/, "")}
           </button>
         ))}
@@ -550,6 +671,7 @@ function App() {
             key={`${vaultInfo.root}:${active}`}
             rel={active}
             mode={modes.get(active) ?? "wysiwyg"}
+            files={files}
             onNavigate={navigate}
             onToggleMode={() =>
               setModes((m) => {
@@ -563,6 +685,13 @@ function App() {
         </>
       ) : (
         <p className="placeholder">{t("editor.pickNote")}</p>
+      )}
+      {menu && (
+        <div className="menu-backdrop" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null); }}>
+          <div className="context-menu" style={{ left: menu.x, top: menu.y }}>
+            <button onClick={() => newUntitled(menu.folder)}>{t("contextmenu.newNote")}</button>
+          </div>
+        </div>
       )}
       {searchOpen && (
         <SearchModal
