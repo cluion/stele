@@ -126,11 +126,11 @@ function Editor({
       };
     }
 
-    const view = createSourceView(host, ytext);
-    scrollToBlockCM(view, ytext.toString(), scrollBlock.current);
+    const source = createSourceView(host, ytext);
+    scrollToBlockCM(source.view, ytext.toString(), scrollBlock.current);
     return () => {
-      scrollBlock.current = topBlockCM(view, pane, ytext.toString());
-      view.destroy();
+      scrollBlock.current = topBlockCM(source.view, pane, ytext.toString());
+      source.destroy();
     };
   }, [ytext, mode]);
 

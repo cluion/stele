@@ -8,7 +8,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "start": "pnpm build && electron . --no-sandbox",
-    "smoke": "pnpm build && electron . --no-sandbox --smoke"
+    "smoke": "pnpm build && electron . --no-sandbox --smoke",
+    "test": "vitest run"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.4",
@@ -36,6 +37,7 @@
     "@types/react-dom": "latest",
     "electron": "latest",
     "esbuild": "latest",
-    "typescript": "latest"
+    "typescript": "latest",
+    "vitest": "^4.1.10"
   }
 }

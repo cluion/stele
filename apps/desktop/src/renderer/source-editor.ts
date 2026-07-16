@@ -27,9 +27,15 @@ const mdHighlight = HighlightStyle.define([
   { tag: tags.contentSeparator, color: "var(--border-strong)" },
 ]);
 
-export function createSourceView(parent: HTMLElement, ytext: Y.Text): EditorView {
+export interface SourceView {
+  view: EditorView;
+  /** view 與 undoManager 必須一起銷毀:UndoManager 在共享的 Y.Doc 上掛有 afterTransaction listener */
+  destroy(): void;
+}
+
+export function createSourceView(parent: HTMLElement, ytext: Y.Text): SourceView {
   const undoManager = new Y.UndoManager(ytext);
-  return new EditorView({
+  const view = new EditorView({
     parent,
     state: EditorState.create({
       doc: ytext.toString(),
@@ -42,6 +48,13 @@ export function createSourceView(parent: HTMLElement, ytext: Y.Text): EditorView
       ],
     }),
   });
+  return {
+    view,
+    destroy() {
+      view.destroy();
+      undoManager.destroy();
+    },
+  };
 }
 
 /** 目前捲動位置最上方可見的 Markdown 區塊索引;pane 是實際的捲動容器 */

@@ -275,4 +275,18 @@ app.whenReady().then(async () => {
   }
 });
 
+// 退出前 flush 所有未落盤的鏡像;destroy 完成後才真正退出
+let quitting = false;
+app.on("before-quit", (e) => {
+  if (quitting || !session) return;
+  e.preventDefault();
+  quitting = true;
+  const closing = session;
+  session = undefined;
+  void closing
+    .destroy()
+    .catch((err: unknown) => console.error("退出前 flush 失敗:", err))
+    .finally(() => app.quit());
+});
+
 app.on("window-all-closed", () => app.quit());

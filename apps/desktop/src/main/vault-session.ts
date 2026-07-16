@@ -53,13 +53,21 @@ class DocHost {
   private scheduleMirror(): void {
     clearTimeout(this.mirrorTimer);
     this.mirrorTimer = setTimeout(() => {
-      const content = this.ytext.toString();
-      this.lastMirrored = content;
-      const tmp = this.file + ".tmp";
-      void writeFile(tmp, content)
-        .then(() => rename(tmp, this.file))
-        .catch((err: unknown) => console.error(`鏡像寫回失敗 ${this.rel}:`, err));
+      this.mirrorTimer = undefined;
+      void this.flush();
     }, MIRROR_DEBOUNCE_MS);
+  }
+
+  private async flush(): Promise<void> {
+    const content = this.ytext.toString();
+    this.lastMirrored = content;
+    const tmp = this.file + ".tmp";
+    try {
+      await writeFile(tmp, content);
+      await rename(tmp, this.file);
+    } catch (err) {
+      console.error(`鏡像寫回失敗 ${this.rel}:`, err);
+    }
   }
 
   private absorb(): void {
@@ -86,7 +94,12 @@ class DocHost {
   }
 
   async destroy(): Promise<void> {
-    clearTimeout(this.mirrorTimer);
+    // debounce 中的鏡像必須先落盤,否則最後 120ms 的編輯會無聲消失
+    if (this.mirrorTimer !== undefined) {
+      clearTimeout(this.mirrorTimer);
+      this.mirrorTimer = undefined;
+      await this.flush();
+    }
     await this.watcher.close();
     this.ydoc.destroy();
   }
