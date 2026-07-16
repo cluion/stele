@@ -393,3 +393,5 @@ body {
   transition: background var(--dur-fast) var(--ease);
 }
 .context-menu button:hover { background: var(--surface-2); }
+
+.context-menu button.danger:hover { background: var(--err); color: #fff; }

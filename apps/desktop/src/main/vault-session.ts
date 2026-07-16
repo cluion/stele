@@ -1,10 +1,10 @@
 import * as Y from "yjs";
 import diff from "fast-diff";
 import chokidar, { type FSWatcher } from "chokidar";
-import { readFileSync, readdirSync, statSync, realpathSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, realpathSync, mkdirSync, existsSync, writeFileSync, renameSync } from "node:fs";
 import { writeFile, rename } from "node:fs/promises";
 import path from "node:path";
-import { extractWikilinks, resolveWikilink, type WikilinkRef } from "@stele/editor-core";
+import { extractWikilinks, resolveWikilink, rewriteWikilinks, type WikilinkRef } from "@stele/editor-core";
 import { SearchIndex } from "./search-index.ts";
 
 const MIRROR_DEBOUNCE_MS = 120;
@@ -14,6 +14,8 @@ const WATCH_STABILITY = { stabilityThreshold: 80, pollInterval: 20 };
 export interface SessionCallbacks {
   broadcastDoc(rel: string, update: Uint8Array): void;
   notifyIndexUpdated(): void;
+  /** 移到系統回收桶;由外層注入,讓本模組不依賴 electron */
+  trash(absPath: string): Promise<void>;
 }
 
 /** 單一筆記的主端文件:唯一寫入者,負責鏡像寫回與外部修改吸收 */
@@ -293,6 +295,73 @@ export class VaultSession {
     mkdirSync(path.dirname(abs), { recursive: true });
     if (!existsSync(abs)) writeFileSync(abs, `# ${path.basename(withExt, ".md")}\n`);
     return withExt;
+  }
+
+  /** 改名(可跨資料夾)並改寫全 vault 指向它的 wikilink;開啟中的文件先 flush 再搬 */
+  async rename(oldRelRaw: unknown, nextRaw: unknown): Promise<string> {
+    if (typeof oldRelRaw !== "string" || typeof nextRaw !== "string") throw new Error("非法參數");
+    const oldFile = this.resolveFile(oldRelRaw);
+    const next = nextRaw.trim();
+    if (
+      next.length === 0 ||
+      path.isAbsolute(next) ||
+      next.split("/").some((seg) => seg.trim() === "" || seg === "." || seg === "..")
+    ) {
+      throw new Error(`非法路徑:${next}`);
+    }
+    const newRel = next.endsWith(".md") ? next : `${next}.md`;
+    if (newRel === oldRelRaw) return newRel;
+    const newAbs = path.resolve(this.root, newRel);
+    if (!newAbs.startsWith(this.root + path.sep)) throw new Error(`非法路徑:${newRel}`);
+    if (existsSync(newAbs)) throw new Error(`已存在同名筆記:${newRel}`);
+
+    const oldFiles = [...this.index.files];
+    const host = this.hosts.get(oldRelRaw);
+    if (host) {
+      this.hosts.delete(oldRelRaw);
+      await host.destroy(); // flush 未落盤的編輯,並停掉鏡像避免復活舊路徑
+    }
+    mkdirSync(path.dirname(newAbs), { recursive: true });
+    renameSync(oldFile, newAbs);
+
+    const newBase = newRel.replace(/\.md$/, "");
+    const shouldRename = (target: string): string | null => {
+      const [base, ...anchor] = target.split("#");
+      if (resolveWikilink(oldFiles, base!.trim()) !== oldRelRaw) return null;
+      return [newBase, ...anchor].join("#");
+    };
+    for (const rel of oldFiles) {
+      if (rel === oldRelRaw) continue;
+      try {
+        const source = readFileSync(path.join(this.root, rel), "utf8");
+        const rewritten = rewriteWikilinks(source, shouldRename);
+        if (rewritten !== source) writeFileSync(path.join(this.root, rel), rewritten);
+        // 開啟中的文件會經 fsWatch 吸收這次改寫,不需特別處理
+      } catch (err) {
+        console.error(`改寫連結失敗 ${rel}:`, err);
+      }
+    }
+
+    this.index.removeFile(oldRelRaw);
+    this.searchIndex.remove(oldRelRaw);
+    this.refreshFile(newRel);
+    this.callbacks.notifyIndexUpdated();
+    return newRel;
+  }
+
+  /** 刪除筆記:flush 開啟中的文件、停掉鏡像,再移入回收桶 */
+  async delete(relRaw: unknown): Promise<void> {
+    if (typeof relRaw !== "string") throw new Error("非法參數");
+    const file = this.resolveFile(relRaw);
+    const host = this.hosts.get(relRaw);
+    if (host) {
+      this.hosts.delete(relRaw);
+      await host.destroy();
+    }
+    await this.callbacks.trash(file);
+    this.index.removeFile(relRaw);
+    this.searchIndex.remove(relRaw);
+    this.callbacks.notifyIndexUpdated();
   }
 
   /** 開啟(必要時建立)date 當天的每日筆記;模板存在時套用並替換 {{date}} */

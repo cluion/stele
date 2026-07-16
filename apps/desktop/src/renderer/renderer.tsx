@@ -494,7 +494,8 @@ function App() {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [graphOpen, setGraphOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [menu, setMenu] = useState<{ x: number; y: number; folder: string } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; folder: string; rel?: string } | null>(null);
+  const [renaming, setRenaming] = useState<{ rel: string; value: string; failed?: string } | null>(null);
   // 每篇筆記各自記住模式,session 內有效,預設 WYSIWYG
   const [modes, setModes] = useState<ReadonlyMap<string, EditorMode>>(new Map());
 
@@ -625,9 +626,9 @@ function App() {
         className="sidebar"
         onContextMenu={(e) => {
           e.preventDefault();
-          const rel = (e.target as HTMLElement).closest("button[data-rel]")?.getAttribute("data-rel");
+          const rel = (e.target as HTMLElement).closest("button[data-rel]")?.getAttribute("data-rel") ?? undefined;
           const folder = rel ? rel.slice(0, rel.lastIndexOf("/") + 1) : "";
-          setMenu({ x: e.clientX, y: e.clientY, folder });
+          setMenu({ x: e.clientX, y: e.clientY, folder, rel });
         }}
       >
         <div className="vault-header">
@@ -690,6 +691,66 @@ function App() {
         <div className="menu-backdrop" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null); }}>
           <div className="context-menu" style={{ left: menu.x, top: menu.y }}>
             <button onClick={() => newUntitled(menu.folder)}>{t("contextmenu.newNote")}</button>
+            {menu.rel && (
+              <>
+                <button
+                  onClick={() => {
+                    setRenaming({ rel: menu.rel!, value: menu.rel!.replace(/\.md$/, "") });
+                    setMenu(null);
+                  }}
+                >
+                  {t("contextmenu.rename")}
+                </button>
+                <button
+                  className="danger"
+                  onClick={() => {
+                    const rel = menu.rel!;
+                    setMenu(null);
+                    if (!window.confirm(t("delete.confirm", { name: rel.replace(/\.md$/, "") }))) return;
+                    void window.stele
+                      .deleteNote(rel)
+                      .then(async () => {
+                        const info = await window.stele.listVault();
+                        if (info) setVaultInfo(info);
+                        setRecent((r) => r.filter((f) => f !== rel));
+                        if (active === rel) setActive(info?.files[0]);
+                      })
+                      .catch((err: unknown) => console.error("刪除失敗:", err));
+                  }}
+                >
+                  {t("contextmenu.delete")}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+      {renaming && (
+        <div className="switcher-backdrop" onClick={() => setRenaming(null)}>
+          <div className="switcher" onClick={(e) => e.stopPropagation()}>
+            <input
+              autoFocus
+              value={renaming.value}
+              onChange={(e) => setRenaming({ ...renaming, value: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing) return;
+                if (e.key === "Escape") setRenaming(null);
+                if (e.key !== "Enter") return;
+                e.preventDefault();
+                void window.stele
+                  .renameNote(renaming.rel, renaming.value)
+                  .then(async (newRel) => {
+                    const info = await window.stele.listVault();
+                    if (info) setVaultInfo(info);
+                    setRecent((r) => r.map((f) => (f === renaming.rel ? newRel : f)));
+                    if (active === renaming.rel) setActive(newRel);
+                    setRenaming(null);
+                  })
+                  .catch((err: unknown) => setRenaming({ ...renaming, failed: String(err) }));
+              }}
+            />
+            {renaming.failed && <p className="error">{t("rename.failed")}</p>}
+            <p className="placeholder">{t("rename.hint")}</p>
           </div>
         </div>
       )}

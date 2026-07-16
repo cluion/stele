@@ -5,7 +5,14 @@ import path from "node:path";
 import * as Y from "yjs";
 import { VaultSession } from "../src/main/vault-session.ts";
 
-const noop = { broadcastDoc() {}, notifyIndexUpdated() {} };
+const noop = {
+  broadcastDoc() {},
+  notifyIndexUpdated() {},
+  async trash(absPath: string) {
+    const { rmSync } = await import("node:fs");
+    rmSync(absPath);
+  },
+};
 
 function makeVault(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "stele-vault-"));
@@ -89,5 +96,48 @@ describe("每日筆記", () => {
     const session = new VaultSession(dir, noop);
     expect(() => session.daily("16-07-2026")).toThrow(/非法日期/);
     expect(() => session.daily("2026-07-16")).toThrow(/非法路徑/);
+  });
+});
+
+describe("改名與刪除", () => {
+  it("改名搬移檔案並改寫全 vault 指向它的連結", async () => {
+    const dir = makeVault();
+    writeFileSync(path.join(dir, "b.md"), "參考 [[a|老A]] 和 ![[a#^x]]。\n");
+    const session = new VaultSession(dir, noop);
+    const newRel = await session.rename("a.md", "資料夾/新A");
+    expect(newRel).toBe("資料夾/新A.md");
+    expect(readFileSync(path.join(dir, "資料夾/新A.md"), "utf8")).toBe("# A\n");
+    expect(readFileSync(path.join(dir, "b.md"), "utf8")).toBe("參考 [[資料夾/新A|老A]] 和 ![[資料夾/新A#^x]]。\n");
+  });
+
+  it("開啟中的筆記改名:未落盤的編輯先 flush 再搬,舊路徑不復活", async () => {
+    const dir = makeVault();
+    const session = new VaultSession(dir, noop);
+    const replica = new Y.Doc();
+    Y.applyUpdate(replica, session.openDoc("a.md"));
+    replica.getText("md").insert(replica.getText("md").length, "最後編輯\n");
+    session.pushUpdate("a.md", Y.encodeStateAsUpdate(replica));
+    const newRel = await session.rename("a.md", "改名後");
+    expect(readFileSync(path.join(dir, newRel), "utf8")).toContain("最後編輯");
+    await new Promise((r) => setTimeout(r, 300));
+    expect(() => readFileSync(path.join(dir, "a.md"))).toThrow(); // 舊檔不存在也沒被鏡像復活
+  });
+
+  it("改名到既有筆記或非法路徑被拒", async () => {
+    const dir = makeVault();
+    writeFileSync(path.join(dir, "b.md"), "x\n");
+    const session = new VaultSession(dir, noop);
+    await expect(session.rename("a.md", "b")).rejects.toThrow(/已存在/);
+    await expect(session.rename("a.md", "../外面")).rejects.toThrow(/非法路徑/);
+  });
+
+  it("刪除筆記:檔案進 trash,開啟中的文件不復活", async () => {
+    const dir = makeVault();
+    const session = new VaultSession(dir, noop);
+    session.openDoc("a.md");
+    await session.delete("a.md");
+    await new Promise((r) => setTimeout(r, 300));
+    expect(() => readFileSync(path.join(dir, "a.md"))).toThrow();
+    expect(session.list().files).not.toContain("a.md");
   });
 });

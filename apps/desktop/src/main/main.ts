@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { readFileSync, existsSync, statSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -20,6 +20,14 @@ const callbacks: SessionCallbacks = {
   notifyIndexUpdated() {
     for (const w of windows) {
       if (!w.isDestroyed()) w.webContents.send("index:updated");
+    }
+  },
+  async trash(absPath) {
+    try {
+      await shell.trashItem(absPath);
+    } catch (err) {
+      console.warn(`回收桶不可用,改為永久刪除 ${absPath}:`, err);
+      rmSync(absPath);
     }
   },
 };
@@ -76,6 +84,10 @@ ipcMain.handle("doc:open", (_e, rel: unknown) => requireSession().openDoc(rel));
 
 ipcMain.handle("vault:create", (_e, rel: unknown) => requireSession().create(rel));
 
+ipcMain.handle("vault:rename", (_e, oldRel: unknown, next: unknown) => requireSession().rename(oldRel, next));
+
+ipcMain.handle("vault:delete", (_e, rel: unknown) => requireSession().delete(rel));
+
 ipcMain.on("doc:push", (_e, rel: string, update: Uint8Array) => {
   session?.pushUpdate(rel, update);
 });
@@ -110,7 +122,12 @@ app.whenReady().then(async () => {
   await win.loadFile(path.join(__dirname, "..", "src", "renderer", "index.html"));
 
   if (SMOKE) {
+    try {
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    // 先清掉前次失敗可能殘留的測試檔,確保每輪獨立
+    for (const junk of ["未命名.md", "未命名 2.md", "煙霧改名.md", "煙霧測試新檔.md", "Obsidian.md"]) {
+      rmSync(path.join(FIXTURES_VAULT, junk), { force: true });
+    }
     await sleep(1800);
     const mounted = await win.webContents.executeJavaScript(
       `!!document.querySelector("#editor .ProseMirror") && document.querySelector("#editor .ProseMirror").textContent.length > 0`,
@@ -345,6 +362,55 @@ app.whenReady().then(async () => {
         existsSync(untitled) &&
         ((await win.webContents.executeJavaScript(activeSidebarText)) as string) === "未命名";
     }
+
+    // 側欄項目是非同步刷新的:等按鈕出現再右鍵,否則 null.dispatchEvent 會讓整個自測懸空
+    const contextMenuOn = async (rel: string): Promise<boolean> => {
+      const selector = `.sidebar button[data-rel=${JSON.stringify(rel)}]`;
+      for (let waited = 0; waited < 5000; waited += 200) {
+        const ok = await win.webContents.executeJavaScript(
+          `(() => {
+            const el = document.querySelector(${JSON.stringify(selector)});
+            if (!el) return false;
+            el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 60, clientY: 300 }));
+            return true;
+          })()`,
+        );
+        if (ok) return true;
+        await sleep(200);
+      }
+      return false;
+    };
+
+    // 改名:右鍵未命名 → 重新命名 → 改「煙霧改名」→ 檔案搬移
+    await contextMenuOn("未命名.md");
+    await sleep(200);
+    await win.webContents.executeJavaScript(
+      `[...document.querySelectorAll(".context-menu button")].find((b) => b.textContent === "重新命名")?.click()`,
+    );
+    await sleep(200);
+    await win.webContents.executeJavaScript(typeInSwitcher("煙霧改名"));
+    await sleep(200);
+    await win.webContents.executeJavaScript(pressInSwitcher("Enter"));
+    const renamed = path.join(FIXTURES_VAULT, "煙霧改名.md");
+    let renameOk = false;
+    for (let waited = 0; waited < 5000 && !renameOk; waited += 200) {
+      await sleep(200);
+      renameOk = existsSync(renamed) && !existsSync(untitled);
+    }
+
+    // 刪除:右鍵煙霧改名 → 刪除筆記(confirm 直接放行)→ 檔案消失
+    await win.webContents.executeJavaScript(`window.confirm = () => true; undefined`);
+    await contextMenuOn("煙霧改名.md");
+    await sleep(200);
+    await win.webContents.executeJavaScript(
+      `[...document.querySelectorAll(".context-menu button")].find((b) => b.textContent === "刪除筆記")?.click()`,
+    );
+    let deleteOk = false;
+    for (let waited = 0; waited < 5000 && !deleteOk; waited += 200) {
+      await sleep(200);
+      deleteOk = !existsSync(renamed);
+    }
+    if (existsSync(renamed)) rmSync(renamed);
     if (existsSync(untitled)) rmSync(untitled);
 
     // 全文搜尋:Cmd+Shift+F → 中文 bigram 查詢 → Enter 開啟唯一命中
@@ -402,12 +468,18 @@ app.whenReady().then(async () => {
     console.log(searchOk ? "SMOKE ✅ 全文搜尋中文查詢並開啟結果" : "SMOKE ❌ 全文搜尋失敗");
     console.log(autocompleteOk ? "SMOKE ✅ 雙括號自動完成插入 wikilink" : "SMOKE ❌ 自動完成失敗");
     console.log(contextCreated ? "SMOKE ✅ 右鍵選單新增筆記" : "SMOKE ❌ 右鍵新增失敗");
+    console.log(renameOk ? "SMOKE ✅ 改名搬移檔案" : "SMOKE ❌ 改名失敗");
+    console.log(deleteOk ? "SMOKE ✅ 刪除筆記進回收桶" : "SMOKE ❌ 刪除失敗");
     console.log(vaultSwitched ? "SMOKE ✅ 換 vault session 生滅正常" : "SMOKE ❌ 換 vault 失敗");
     app.exit(
-      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && dailyOk && searchOk && autocompleteOk && contextCreated && vaultSwitched
+      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && dailyOk && searchOk && autocompleteOk && contextCreated && renameOk && deleteOk && vaultSwitched
         ? 0
         : 1,
     );
+    } catch (err) {
+      console.error("SMOKE 崩潰:", err);
+      app.exit(1);
+    }
   }
 });
 

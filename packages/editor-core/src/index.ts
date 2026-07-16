@@ -3,6 +3,6 @@ export { applyBlockEdit, applyBlockEdits, applyRangeEdit, type BlockEdit } from 
 export { SteleBinding } from "./binding.ts";
 export { resolveWikilink } from "./resolve.ts";
 export { fuzzyScore, rankFiles } from "./fuzzy.ts";
-export { extractWikilinks, type WikilinkRef } from "./links.ts";
+export { extractWikilinks, rewriteWikilinks, type WikilinkRef } from "./links.ts";
 export { steleSchema } from "./schema.ts";
 export { parseBlock, serializeBlock, parseDoc, type ParsedBlock, type ParsedDoc } from "./convert.ts";

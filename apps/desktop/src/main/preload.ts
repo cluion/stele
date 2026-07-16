@@ -26,6 +26,8 @@ export interface SteleApi {
   /** 彈系統選資料夾 dialog 換 vault;使用者取消時回傳 null、現狀不動 */
   chooseVault(): Promise<VaultInfo | null>;
   createNote(rel: string): Promise<string>;
+  renameNote(oldRel: string, next: string): Promise<string>;
+  deleteNote(rel: string): Promise<void>;
   openDoc(rel: string): Promise<Uint8Array>;
   pushUpdate(rel: string, update: Uint8Array): void;
   /** 回傳退訂函式 */
@@ -42,6 +44,8 @@ const api: SteleApi = {
   daily: () => ipcRenderer.invoke("vault:daily"),
   search: (query) => ipcRenderer.invoke("vault:search", query),
   createNote: (rel) => ipcRenderer.invoke("vault:create", rel),
+  renameNote: (oldRel, next) => ipcRenderer.invoke("vault:rename", oldRel, next),
+  deleteNote: (rel) => ipcRenderer.invoke("vault:delete", rel),
   openDoc: (rel) => ipcRenderer.invoke("doc:open", rel),
   pushUpdate: (rel, update) => ipcRenderer.send("doc:push", rel, update),
   onDocUpdate: (cb) => {
