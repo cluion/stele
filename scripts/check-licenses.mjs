@@ -8,6 +8,16 @@ const EXCEPTIONS = new Map([
   ["argparse", "Python-2.0,OSI 寬鬆授權;markdown-it 傳遞依賴,無法單獨替換"],
   ["entities", "BSD-2-Clause,OSI 寬鬆授權;markdown-it 傳遞依賴,無法單獨替換"],
   ["typescript", "Apache-2.0,僅 devDependencies;pnpm licenses --prod 誤列,不隨產品散布"],
+  // 以下 9 個為 better-sqlite3 傳遞依賴,業主核准 2026-07-16;全屬安裝時下載預編譯二進位的工具鏈
+  ["chownr", "ISC,OSI 寬鬆授權;better-sqlite3 傳遞依賴,無法單獨替換"],
+  ["inherits", "ISC,OSI 寬鬆授權;better-sqlite3 傳遞依賴,無法單獨替換"],
+  ["ini", "ISC,OSI 寬鬆授權;better-sqlite3 傳遞依賴,無法單獨替換"],
+  ["once", "ISC,OSI 寬鬆授權;better-sqlite3 傳遞依賴,無法單獨替換"],
+  ["semver", "ISC,OSI 寬鬆授權;better-sqlite3 傳遞依賴,無法單獨替換"],
+  ["wrappy", "ISC,OSI 寬鬆授權;better-sqlite3 傳遞依賴,無法單獨替換"],
+  ["detect-libc", "Apache-2.0,OSI 寬鬆授權;better-sqlite3 傳遞依賴,無法單獨替換"],
+  ["tunnel-agent", "Apache-2.0,OSI 寬鬆授權;better-sqlite3 傳遞依賴,無法單獨替換"],
+  ["ieee754", "BSD-3-Clause,OSI 寬鬆授權;better-sqlite3 傳遞依賴,無法單獨替換"],
 ]);
 
 const passes = (license) => license.split(/\s+OR\s+|[()]/i).some((part) => part.trim().startsWith("MIT"));

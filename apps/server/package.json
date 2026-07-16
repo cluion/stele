@@ -1,0 +1,26 @@
+{
+  "name": "@stele/server",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "pnpm build && node dist/main.cjs",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@stele/sync": "workspace:*",
+    "better-sqlite3": "^12.11.1",
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "latest",
+    "@types/node": "latest",
+    "@types/ws": "latest",
+    "esbuild": "latest",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  }
+}

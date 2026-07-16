@@ -21,6 +21,13 @@ export default tseslint.config(
     },
   },
   {
+    // 伺服器入口:啟動訊息走 stdout 是常規
+    files: ["apps/server/src/main.ts"],
+    rules: {
+      "no-console": "off",
+    },
+  },
+  {
     // main.ts 一半是 smoke 測試工具:console.log 是輸出機制、executeJavaScript 天生回傳 any
     files: ["apps/desktop/src/main/main.ts"],
     rules: {
