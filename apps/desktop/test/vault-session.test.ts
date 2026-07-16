@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import * as Y from "yjs";
@@ -96,6 +96,100 @@ describe("每日筆記", () => {
     const session = new VaultSession(dir, noop);
     expect(() => session.daily("16-07-2026")).toThrow(/非法日期/);
     expect(() => session.daily("2026-07-16")).toThrow(/非法路徑/);
+  });
+});
+
+describe("CRDT 持久化", () => {
+  it("關閉再開啟,CRDT 歷史延續,舊 replica 合併不重複", async () => {
+    const dir = makeVault();
+    const s1 = new VaultSession(dir, noop);
+    const replica = new Y.Doc();
+    Y.applyUpdate(replica, s1.openDoc("a.md"));
+    const text = replica.getText("md");
+    text.insert(text.length, "第一段編輯\n");
+    s1.pushUpdate("a.md", Y.encodeStateAsUpdate(replica));
+    await s1.destroy();
+
+    const s2 = new VaultSession(dir, noop);
+    Y.applyUpdate(replica, s2.openDoc("a.md"));
+    expect(replica.getText("md").toString()).toBe("# A\n第一段編輯\n");
+    await s2.destroy();
+  });
+
+  it("關檔期間的外部修改在重開時吸收,新舊 replica 都收斂到磁碟內容", async () => {
+    const dir = makeVault();
+    const s1 = new VaultSession(dir, noop);
+    const replica = new Y.Doc();
+    Y.applyUpdate(replica, s1.openDoc("a.md"));
+    replica.getText("md").insert(replica.getText("md").length, "編輯\n");
+    s1.pushUpdate("a.md", Y.encodeStateAsUpdate(replica));
+    await s1.destroy();
+    appendFileSync(path.join(dir, "a.md"), "外部追加\n");
+
+    const s2 = new VaultSession(dir, noop);
+    const snapshot = s2.openDoc("a.md");
+    const fresh = new Y.Doc();
+    Y.applyUpdate(fresh, snapshot);
+    expect(fresh.getText("md").toString()).toBe("# A\n編輯\n外部追加\n");
+    Y.applyUpdate(replica, snapshot);
+    expect(replica.getText("md").toString()).toBe("# A\n編輯\n外部追加\n");
+    await s2.destroy();
+  });
+
+  it("改名保留 CRDT 歷史", async () => {
+    const dir = makeVault();
+    const session = new VaultSession(dir, noop);
+    const replica = new Y.Doc();
+    Y.applyUpdate(replica, session.openDoc("a.md"));
+    replica.getText("md").insert(replica.getText("md").length, "編輯\n");
+    session.pushUpdate("a.md", Y.encodeStateAsUpdate(replica));
+    const newRel = await session.rename("a.md", "改名後");
+    Y.applyUpdate(replica, session.openDoc(newRel));
+    expect(replica.getText("md").toString()).toBe("# A\n編輯\n");
+    await session.destroy();
+  });
+
+  it("刪除筆記清掉持久化狀態", async () => {
+    const dir = makeVault();
+    const session = new VaultSession(dir, noop);
+    session.openDoc("a.md");
+    await session.delete("a.md");
+    await session.destroy();
+    const manifest = JSON.parse(readFileSync(path.join(dir, ".stele", "docs.json"), "utf8")) as {
+      docs: Record<string, string>;
+    };
+    expect(manifest.docs).not.toHaveProperty("a.md");
+  });
+
+  it(".ybin 損毀時不拋錯,改由磁碟內容重播種", async () => {
+    const dir = makeVault();
+    const s1 = new VaultSession(dir, noop);
+    s1.openDoc("a.md");
+    await s1.destroy();
+    const manifest = JSON.parse(readFileSync(path.join(dir, ".stele", "docs.json"), "utf8")) as {
+      docs: Record<string, string>;
+    };
+    writeFileSync(path.join(dir, ".stele", "docs", `${manifest.docs["a.md"]!}.ybin`), Buffer.from([255, 254, 253]));
+
+    const s2 = new VaultSession(dir, noop);
+    const fresh = new Y.Doc();
+    Y.applyUpdate(fresh, s2.openDoc("a.md"));
+    expect(fresh.getText("md").toString()).toBe("# A\n");
+    await s2.destroy();
+  });
+
+  it("刪掉 .stele 之後 vault 仍可開,重新播種", async () => {
+    const dir = makeVault();
+    const s1 = new VaultSession(dir, noop);
+    s1.openDoc("a.md");
+    await s1.destroy();
+    rmSync(path.join(dir, ".stele"), { recursive: true, force: true });
+
+    const s2 = new VaultSession(dir, noop);
+    const fresh = new Y.Doc();
+    Y.applyUpdate(fresh, s2.openDoc("a.md"));
+    expect(fresh.getText("md").toString()).toBe("# A\n");
+    await s2.destroy();
   });
 });
 

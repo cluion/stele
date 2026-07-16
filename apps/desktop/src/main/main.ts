@@ -128,6 +128,7 @@ void app.whenReady().then(async () => {
     for (const junk of ["未命名.md", "未命名 2.md", "煙霧改名.md", "煙霧測試新檔.md", "Obsidian.md"]) {
       rmSync(path.join(FIXTURES_VAULT, junk), { force: true });
     }
+    rmSync(path.join(FIXTURES_VAULT, ".stele"), { recursive: true, force: true });
     await sleep(1800);
     const mounted = await win.webContents.executeJavaScript(
       `!!document.querySelector("#editor .ProseMirror") && document.querySelector("#editor .ProseMirror").textContent.length > 0`,
@@ -456,6 +457,10 @@ void app.whenReady().then(async () => {
     }
     rmSync(tmpVault, { recursive: true, force: true });
 
+    // CRDT 持久化:這輪的編輯應已在 vault 內留下狀態;驗完清掉,fixtures 保持乾淨
+    const persistedOk = existsSync(path.join(FIXTURES_VAULT, ".stele", "docs.json"));
+    rmSync(path.join(FIXTURES_VAULT, ".stele"), { recursive: true, force: true });
+
     console.log(mounted ? "SMOKE ✅ 編輯器掛載且有內容" : "SMOKE ❌ 編輯器未就緒");
     console.log(mirrored ? "SMOKE ✅ 鍵盤輸入與 Enter 切段已鏡像到磁碟" : "SMOKE ❌ 輸入未寫回磁碟");
     console.log(navigated && createdOk ? "SMOKE ✅ 點擊 wikilink 建檔並跳轉" : "SMOKE ❌ wikilink 導航失敗");
@@ -471,8 +476,9 @@ void app.whenReady().then(async () => {
     console.log(renameOk ? "SMOKE ✅ 改名搬移檔案" : "SMOKE ❌ 改名失敗");
     console.log(deleteOk ? "SMOKE ✅ 刪除筆記進回收桶" : "SMOKE ❌ 刪除失敗");
     console.log(vaultSwitched ? "SMOKE ✅ 換 vault session 生滅正常" : "SMOKE ❌ 換 vault 失敗");
+    console.log(persistedOk ? "SMOKE ✅ CRDT 狀態持久化到 .stele" : "SMOKE ❌ CRDT 狀態未落盤");
     app.exit(
-      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && dailyOk && searchOk && autocompleteOk && contextCreated && renameOk && deleteOk && vaultSwitched
+      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && dailyOk && searchOk && autocompleteOk && contextCreated && renameOk && deleteOk && vaultSwitched && persistedOk
         ? 0
         : 1,
     );

@@ -6,8 +6,22 @@ import { writeFile, rename } from "node:fs/promises";
 import path from "node:path";
 import { extractWikilinks, resolveWikilink, rewriteWikilinks, type WikilinkRef } from "@stele/editor-core";
 import { SearchIndex } from "./search-index.ts";
+import { DocStore, type DocPersistence } from "./doc-store.ts";
 
-const MIRROR_DEBOUNCE_MS = 120;
+const FLUSH_DEBOUNCE_MS = 120;
+
+/** 先在探針文件上試套,避免損毀的狀態半套進正式文件 */
+function isValidUpdate(state: Uint8Array): boolean {
+  const probe = new Y.Doc();
+  try {
+    Y.applyUpdate(probe, state);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    probe.destroy();
+  }
+}
 /** awaitWriteFinish:避免在外部程式 truncate+write 的中途讀到半成品檔案 */
 const WATCH_STABILITY = { stabilityThreshold: 80, pollInterval: 20 };
 
@@ -18,25 +32,51 @@ export interface SessionCallbacks {
   trash(absPath: string): Promise<void>;
 }
 
-/** 單一筆記的主端文件:唯一寫入者,負責鏡像寫回與外部修改吸收 */
+/** 單一筆記的主端文件:唯一寫入者,負責鏡像寫回、外部修改吸收與 CRDT 狀態持久化 */
 class DocHost {
   readonly ydoc = new Y.Doc();
   private readonly ytext = this.ydoc.getText("md");
   private readonly file: string;
+  private readonly persistence: DocPersistence;
   private lastMirrored: string;
-  private mirrorTimer: NodeJS.Timeout | undefined;
+  private dirtyMirror = false;
+  private dirtyState = false;
+  private flushTimer: NodeJS.Timeout | undefined;
+  private flushInFlight: Promise<void> = Promise.resolve();
   private readonly watcher: FSWatcher;
 
-  constructor(readonly rel: string, file: string, broadcast: (rel: string, update: Uint8Array) => void) {
+  constructor(
+    readonly rel: string,
+    file: string,
+    broadcast: (rel: string, update: Uint8Array) => void,
+    persistence: DocPersistence,
+  ) {
     this.file = file;
-    const initial = readFileSync(this.file, "utf8");
-    this.ytext.insert(0, initial);
-    this.lastMirrored = initial;
+    this.persistence = persistence;
+    const onDisk = readFileSync(this.file, "utf8");
+    let persisted = persistence.load();
+    if (persisted && !isValidUpdate(persisted)) {
+      console.error(`CRDT 狀態損毀,改由磁碟內容重播種 ${rel}`);
+      persisted = undefined;
+    }
+    if (persisted) {
+      // 歷史延續:載入舊狀態,關檔期間的外部修改再以 diff 吸收
+      Y.applyUpdate(this.ydoc, persisted, "load");
+    } else {
+      this.ytext.insert(0, onDisk);
+      this.dirtyState = true;
+    }
+    this.lastMirrored = this.ytext.toString();
 
     this.ydoc.on("update", (update: Uint8Array, origin: unknown) => {
       broadcast(rel, update);
-      if (origin !== "external-file") this.scheduleMirror();
+      this.dirtyState = true;
+      if (origin !== "external-file") this.dirtyMirror = true;
+      this.scheduleFlush();
     });
+
+    if (persisted && this.lastMirrored !== onDisk) this.absorbContent(onDisk);
+    if (this.dirtyState) this.scheduleFlush();
 
     this.watcher = chokidar.watch(this.file, {
       ignoreInitial: true,
@@ -53,23 +93,37 @@ class DocHost {
     Y.applyUpdate(this.ydoc, update, "renderer");
   }
 
-  private scheduleMirror(): void {
-    clearTimeout(this.mirrorTimer);
-    this.mirrorTimer = setTimeout(() => {
-      this.mirrorTimer = undefined;
-      void this.flush();
-    }, MIRROR_DEBOUNCE_MS);
+  private scheduleFlush(): void {
+    clearTimeout(this.flushTimer);
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = undefined;
+      // 串在前一次之後:flush 不並行,destroy 也才有單一 promise 可等
+      this.flushInFlight = this.flushInFlight.then(() => this.flush());
+    }, FLUSH_DEBOUNCE_MS);
   }
 
   private async flush(): Promise<void> {
-    const content = this.ytext.toString();
-    this.lastMirrored = content;
-    const tmp = this.file + ".tmp";
-    try {
-      await writeFile(tmp, content);
-      await rename(tmp, this.file);
-    } catch (err) {
-      console.error(`鏡像寫回失敗 ${this.rel}:`, err);
+    const wantMirror = this.dirtyMirror;
+    const wantState = this.dirtyState;
+    this.dirtyMirror = false;
+    this.dirtyState = false;
+    if (wantMirror) {
+      const content = this.ytext.toString();
+      this.lastMirrored = content;
+      const tmp = this.file + ".tmp";
+      try {
+        await writeFile(tmp, content);
+        await rename(tmp, this.file);
+      } catch (err) {
+        console.error(`鏡像寫回失敗 ${this.rel}:`, err);
+      }
+    }
+    if (wantState) {
+      try {
+        await this.persistence.save(Y.encodeStateAsUpdate(this.ydoc));
+      } catch (err) {
+        console.error(`CRDT 狀態落盤失敗 ${this.rel}:`, err);
+      }
     }
   }
 
@@ -82,6 +136,10 @@ class DocHost {
       return;
     }
     if (onDisk === this.lastMirrored) return;
+    this.absorbContent(onDisk);
+  }
+
+  private absorbContent(onDisk: string): void {
     this.ydoc.transact(() => {
       let pos = 0;
       for (const [kind, text] of diff(this.ytext.toString(), onDisk)) {
@@ -97,12 +155,14 @@ class DocHost {
   }
 
   async destroy(): Promise<void> {
-    // debounce 中的鏡像必須先落盤,否則最後 120ms 的編輯會無聲消失
-    if (this.mirrorTimer !== undefined) {
-      clearTimeout(this.mirrorTimer);
-      this.mirrorTimer = undefined;
-      await this.flush();
+    // debounce 中的鏡像與狀態必須先落盤,否則最後 120ms 的編輯會無聲消失
+    if (this.flushTimer !== undefined) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = undefined;
     }
+    // 已觸發但 I/O 未完成的 flush 也要等完,否則 rename/delete 後舊路徑會被復活
+    await this.flushInFlight;
+    if (this.dirtyMirror || this.dirtyState) await this.flush();
     await this.watcher.close();
     this.ydoc.destroy();
   }
@@ -191,6 +251,7 @@ export class VaultSession {
   private readonly hosts = new Map<string, DocHost>();
   private readonly index: LinkIndex;
   private readonly searchIndex = new SearchIndex();
+  private readonly docStore: DocStore;
   private readonly watcher: FSWatcher;
 
   /** dir 不存在或不是資料夾時建構即拋錯,呼叫端保留原 session */
@@ -198,6 +259,7 @@ export class VaultSession {
     this.root = realpathSync(dir);
     if (!statSync(this.root).isDirectory()) throw new Error(`不是資料夾:${dir}`);
 
+    this.docStore = new DocStore(this.root);
     this.index = new LinkIndex(this.root);
     for (const rel of listMarkdown(this.root)) this.refreshFile(rel);
 
@@ -209,6 +271,7 @@ export class VaultSession {
       if (!file.endsWith(".md")) return;
       const rel = path.relative(this.root, file);
       if (event === "unlink") {
+        // 外部刪除不清 CRDT 狀態:git 切分支會暫時 unlink,檔案回來時歷史才接得上
         this.index.removeFile(rel);
         this.searchIndex.remove(rel);
       } else if (event === "add" || event === "change") this.refreshFile(rel);
@@ -270,7 +333,10 @@ export class VaultSession {
     const file = this.resolveFile(rel);
     let host = this.hosts.get(rel);
     if (!host) {
-      host = new DocHost(rel, file, (r, u) => this.callbacks.broadcastDoc(r, u));
+      host = new DocHost(rel, file, (r, u) => this.callbacks.broadcastDoc(r, u), {
+        load: () => this.docStore.load(rel),
+        save: (state) => this.docStore.save(rel, state),
+      });
       this.hosts.set(rel, host);
     }
     return host.snapshot();
@@ -323,6 +389,7 @@ export class VaultSession {
     }
     mkdirSync(path.dirname(newAbs), { recursive: true });
     renameSync(oldFile, newAbs);
+    this.docStore.rename(oldRelRaw, newRel);
 
     const newBase = newRel.replace(/\.md$/, "");
     const shouldRename = (target: string): string | null => {
@@ -359,6 +426,7 @@ export class VaultSession {
       await host.destroy();
     }
     await this.callbacks.trash(file);
+    this.docStore.remove(relRaw);
     this.index.removeFile(relRaw);
     this.searchIndex.remove(relRaw);
     this.callbacks.notifyIndexUpdated();
