@@ -2,6 +2,27 @@
 
 本專案的所有重要變更都記錄於此。格式依循 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/),版本遵循 [Semantic Versioning](https://semver.org/lang/zh-TW/)。
 
+## [0.3.0] - 2026-07-17
+
+分享連結:把單一筆記唯讀分享到瀏覽器,伺服器仍全盲。
+
+### 新增
+
+- **唯讀分享連結**:右鍵任一筆記即可建立分享連結,對方用瀏覽器就能開,免安裝、免帳號。桌面對話框含複製連結與撤銷清單。
+- **網頁檢視器**(新 `apps/viewer`):與桌面同一套 editor-core schema 唯讀渲染,連結、表格、callout 呈現一致。伺服器同埠掛靜態頁,`shareId` 只在前端解析。
+- **端對端加密延伸到分享**:每則分享匯出「單一 doc 金鑰」(HKDF 單向,vault 主金鑰不外洩),金鑰只走 URL fragment(`#` 之後)不進伺服器;伺服器新增 shares 表管理作用域與撤銷,唯讀連線鎖定單一 doc 且拒所有寫入型訊息。
+
+### 修正
+
+- **撤銷即時生效**:撤銷分享會當場切斷既有連線,撤銷後的內容一個字都拿不到(原本只擋新連線,已連上的可續讀);且撤銷嚴格綁 vault,猜中他人 `shareId` 也踢不掉對方連線。
+- **連結 href 淨化**:編輯器與檢視器只放行 `http`/`https`/`mailto` 與相對連結,`javascript:`/`data:` 等一律剝除(貼上 HTML 會繞過 markdown-it 的內建過濾,渲染器主世界有 IPC 面,不能只靠上游解析器設定)。
+- **檢視器安全標頭**:分享頁補上 CSP(`default-src 'none'`、腳本只信同源、`frame-ancestors 'none'`)、`nosniff`、`no-referrer`;`frame-ancestors` 下在 HTTP header,`<meta>` 版另備為自架保底。
+
+### 品質
+
+- 分享全鏈測試:金鑰匯出/單 doc 解密、協議往返、伺服器作用域與權限、撤銷即時與跨 vault 隔離、桌面「建立→列出→撤銷」真實往返(驗證 fragment 金鑰可還原且不落伺服器)、檢視器連結解析。
+- 桌面 smoke 增至 17 項,新增分享對話框開啟/建立/關閉全鏈。
+
 ## [0.2.0] - 2026-07-17
 
 即時多人協作:加密的在場指示與遠端游標。
@@ -41,5 +62,6 @@
 - 16 項 smoke 測試涵蓋桌面全鏈。
 - CI:lint、typecheck、test、授權政策檢查、smoke。
 
+[0.3.0]: https://github.com/cluion/stele/releases/tag/v0.3.0
 [0.2.0]: https://github.com/cluion/stele/releases/tag/v0.2.0
 [0.1.0]: https://github.com/cluion/stele/releases/tag/v0.1.0
