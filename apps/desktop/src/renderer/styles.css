@@ -342,6 +342,75 @@ body {
 }
 .switcher li button.selected { background: var(--accent-subtle); color: var(--accent); }
 
+/* 分享對話框:沿用 switcher 卡片骨架,額外補內距與唯讀連結列 */
+.switcher.share { padding: var(--sp-4); }
+.switcher.share h2 { font-size: var(--fs-lg); margin: 0 0 var(--sp-2); }
+.switcher.share .placeholder { padding: 0; margin: 0 0 var(--sp-3); color: var(--text-muted); font-size: var(--fs-sm); }
+.switcher.share .share-heading {
+  font-size: var(--fs-sm);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: var(--sp-4) 0 var(--sp-2);
+}
+.switcher.share .error { margin: var(--sp-2) 0 0; }
+.switcher.share ul { padding: 0; }
+.switcher.share button.primary {
+  border: 0;
+  background: var(--accent);
+  color: var(--accent-text);
+  font: inherit;
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+.switcher.share button.primary:hover { background: var(--accent-hover); }
+.switcher.share button.primary:disabled { opacity: 0.6; cursor: default; }
+.switcher.share button.create { width: 100%; }
+.share-link { display: flex; gap: var(--sp-2); }
+.share-link input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: var(--sp-2) var(--sp-3);
+  outline: none;
+}
+.share-link button.primary { white-space: nowrap; }
+.share-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
+}
+.share-row code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.share-row button.danger {
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--err);
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.share-row button.danger:hover { background: var(--err); color: #fff; }
+
 .backlinks {
   width: 260px;
   flex-shrink: 0;

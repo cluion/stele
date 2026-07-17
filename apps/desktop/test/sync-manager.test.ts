@@ -56,6 +56,7 @@ describe("SyncManager 桌面端對端", () => {
       pushDebounceMs: 20,
       cipher,
       onPresence: (rel, list) => presence.set(rel, list),
+      exportDocKey: cipher ? (docId) => cipher.exportDocKey(docId) : undefined,
     });
     manager.start();
     const device = { dir, session, manager, presence };
@@ -217,6 +218,44 @@ describe("SyncManager 桌面端對端", () => {
     // 受害端沒有因此多出任何檔案/文件(loose 池為私有,以行為驗證:vault 仍空、無崩潰)
     expect(victim.session.list().files).toHaveLength(0);
     raw.close();
+  });
+
+  it("分享連結:建立→列出→撤銷的真實往返,連結金鑰在 fragment 且不進伺服器", async () => {
+    const vaultId = "v-分享";
+    const cipher = new VaultCipher(await deriveVaultKey("分享密語", vaultId, 12));
+    const a = makeDevice(vaultId, "devA", { "要分享.md": "# 要分享\n內文\n" }, cipher);
+    await sleep(150);
+
+    const link = await a.manager.createShareLink("要分享.md", "read");
+    // 連結形如 http://host/s/<id>#k=<base64url 金鑰>
+    const m = /^https?:\/\/[^/]+\/s\/([^#]+)#k=(.+)$/.exec(link.url);
+    expect(m, `連結格式非預期:${link.url}`).not.toBeNull();
+    expect(m![1]).toBe(link.shareId);
+    // fragment 的金鑰要能還原成該 doc 的匯出金鑰(檢視器據此解密)
+    const docId = a.session.peekDocId("要分享.md")!;
+    const expected = Buffer.from(await cipher.exportDocKey(docId)).toString("base64url");
+    expect(m![2]).toBe(expected);
+
+    // 列出:含這一則、rel 正確反查、未撤銷
+    const listed = await a.manager.listShares();
+    const entry = listed.find((s) => s.shareId === link.shareId);
+    expect(entry).toMatchObject({ rel: "要分享.md", permission: "read", revoked: false });
+
+    // 撤銷:回傳的清單裡這一則轉為 revoked
+    const after = await a.manager.revokeShare(link.shareId);
+    expect(after.find((s) => s.shareId === link.shareId)?.revoked).toBe(true);
+
+    // 伺服器端絕不持有 fragment 金鑰:掃全部 share 相關儲存都不含該金鑰位元組
+    const keyBytes = await cipher.exportDocKey(docId);
+    for (const u of store.updatesSince(vaultId, docId, 0)) {
+      expect(Buffer.from(u.payload).includes(Buffer.from(keyBytes))).toBe(false);
+    }
+  });
+
+  it("未啟用 E2EE 的 vault 不能建立分享連結", async () => {
+    const a = makeDevice("v-無加密分享", "devA", { "檔.md": "內容\n" }); // 不傳 cipher
+    await sleep(100);
+    await expect(a.manager.createShareLink("檔.md", "read")).rejects.toThrow();
   });
 
   it("在場:甲開某篇筆記,乙看到甲在場;甲切走後乙的在場清空", async () => {

@@ -11,7 +11,7 @@ import { createSourceView, topBlockCM, scrollToBlockCM, type SourceView } from "
 import { encodeCursor, participantCursor, throttle, type RemoteCursor } from "./remote-cursors.ts";
 import { remoteCursorPlugin, remoteCursorKey, type BlockCursor } from "./wysiwyg-cursors.ts";
 import { GraphView } from "./graph-view.tsx";
-import type { SteleApi, BacklinkItem, VaultInfo, Participant } from "../main/preload.ts";
+import type { SteleApi, BacklinkItem, VaultInfo, Participant, ShareEntry } from "../main/preload.ts";
 
 type EditorMode = "wysiwyg" | "source";
 
@@ -546,6 +546,101 @@ function Welcome({ onChoose }: { onChoose: () => void }) {
   );
 }
 
+/** 唯讀分享對話框:建立連結、複製、撤銷。可編輯分享後端已備但無消費端,故此處只做唯讀 */
+function ShareDialog({ rel, onClose }: { rel: string; onClose: () => void }) {
+  const { t } = useTranslation();
+  const name = rel.replace(/\.md$/, "");
+  const [shares, setShares] = useState<ShareEntry[]>([]);
+  const [link, setLink] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  // 載入本篇既有連結(排除已撤銷);live flag 防元件卸載後 setState
+  useEffect(() => {
+    let live = true;
+    void window.stele.listShares().then((all) => {
+      if (live) setShares(all.filter((s) => s.rel === rel && !s.revoked));
+    });
+    return () => {
+      live = false;
+    };
+  }, [rel]);
+
+  // Esc 關閉,與其他浮層一致
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const create = (): void => {
+    setBusy(true);
+    setFailed(false);
+    void window.stele
+      .createShare(rel, "read")
+      .then((created) => {
+        setLink(created.url);
+        return window.stele.listShares();
+      })
+      .then((all) => setShares(all.filter((s) => s.rel === rel && !s.revoked)))
+      .catch(() => setFailed(true))
+      .finally(() => setBusy(false));
+  };
+
+  const copy = (url: string): void => {
+    void navigator.clipboard.writeText(url).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  const revoke = (shareId: string): void => {
+    void window.stele.revokeShare(shareId).then((all) => {
+      setShares(all.filter((s) => s.rel === rel && !s.revoked));
+    });
+  };
+
+  return (
+    <div className="switcher-backdrop" onClick={onClose}>
+      <div className="switcher share" onClick={(e) => e.stopPropagation()}>
+        <h2>{t("share.title", { name })}</h2>
+        <p className="placeholder">{t("share.subtitle")}</p>
+        {link ? (
+          <div className="share-link">
+            <input readOnly value={link} onFocus={(e) => e.currentTarget.select()} />
+            <button className="primary" onClick={() => copy(link)}>
+              {copied ? t("share.copied") : t("share.copy")}
+            </button>
+          </div>
+        ) : (
+          <button className="primary create" disabled={busy} onClick={create}>
+            {busy ? t("share.creating") : t("share.create")}
+          </button>
+        )}
+        {failed && <p className="error">{t("share.failed")}</p>}
+        <h3 className="share-heading">{t("share.existing")}</h3>
+        {shares.length === 0 ? (
+          <p className="placeholder">{t("share.empty")}</p>
+        ) : (
+          <ul>
+            {shares.map((s) => (
+              <li key={s.shareId} className="share-row">
+                <code>{s.shareId}</code>
+                <button className="danger" onClick={() => revoke(s.shareId)}>
+                  {t("share.revoke")}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const { t } = useTranslation();
   // undefined = 啟動查詢中,null = 尚未開啟 vault(歡迎畫面)
@@ -557,6 +652,7 @@ function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number; folder: string; rel?: string } | null>(null);
   const [renaming, setRenaming] = useState<{ rel: string; value: string; failed?: string } | null>(null);
+  const [shareRel, setShareRel] = useState<string | null>(null);
   // 每篇筆記各自記住模式,session 內有效,預設 WYSIWYG
   const [modes, setModes] = useState<ReadonlyMap<string, EditorMode>>(new Map());
   // "off" = 這個 vault 沒設定同步,指示燈隱藏
@@ -803,6 +899,14 @@ function App() {
                   {t("contextmenu.rename")}
                 </button>
                 <button
+                  onClick={() => {
+                    setShareRel(menu.rel!);
+                    setMenu(null);
+                  }}
+                >
+                  {t("contextmenu.share")}
+                </button>
+                <button
                   className="danger"
                   onClick={() => {
                     const rel = menu.rel!;
@@ -873,6 +977,7 @@ function App() {
           onClose={() => setSwitcherOpen(false)}
         />
       )}
+      {shareRel && <ShareDialog rel={shareRel} onClose={() => setShareRel(null)} />}
     </div>
   );
 }
