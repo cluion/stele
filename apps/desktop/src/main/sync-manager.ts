@@ -35,7 +35,6 @@ interface PersistedDocState {
   lastSeq: number;
   counter: number;
   syncedSv?: string;
-  ackedDiffHash?: string;
 }
 
 const SAVE_DEBOUNCE_MS = 200;
@@ -232,7 +231,6 @@ export class SyncManager {
           lastSeq: s.lastSeq,
           counter: s.counter,
           syncedSv: s.syncedSv === undefined ? undefined : Uint8Array.from(Buffer.from(s.syncedSv, "base64")),
-          ackedDiffHash: s.ackedDiffHash,
         });
       }
     } catch {
@@ -252,7 +250,6 @@ export class SyncManager {
         lastSeq: s.lastSeq,
         counter: s.counter,
         syncedSv: s.syncedSv === undefined ? undefined : Buffer.from(s.syncedSv).toString("base64"),
-        ackedDiffHash: s.ackedDiffHash,
       };
     }
     try {

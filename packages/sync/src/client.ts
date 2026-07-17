@@ -6,7 +6,19 @@ import {
   type ServerMessage,
   type DocHead,
 } from "./protocol.ts";
-import { identityCipher, digest, type Cipher } from "./cipher.ts";
+import { identityCipher, type Cipher } from "./cipher.ts";
+
+/**
+ * 空 Yjs update 的位元組:沒有任何 struct 也沒有任何刪除
+ * 用來判斷 diff 是否真的沒東西可推;不能用 state vector 比對,因為 SV 不記錄刪除
+ */
+const EMPTY_UPDATE = Y.encodeStateAsUpdate(new Y.Doc());
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
 
 /**
  * client 同步引擎:每 doc 一個狀態機
@@ -18,7 +30,6 @@ export interface SyncDocState {
   lastSeq: number;
   counter: number;
   syncedSv?: Uint8Array;
-  ackedDiffHash?: string;
 }
 
 export interface SyncHost {
@@ -203,9 +214,8 @@ export class SyncClient {
         const rt = this.runtimes.get(msg.docId);
         if (!rt) return;
         rt.pushing = false;
-        // 記下「此刻重推會長什麼樣」的指紋:基準前移後差分位元組會變,存 push 時的雜湊擋不住重連重推
-        const nextDiffHash = await digest(Y.encodeStateAsUpdate(rt.doc, rt.pushedSv));
-        rt.state = { ...rt.state, syncedSv: rt.pushedSv, ackedDiffHash: nextDiffHash };
+        // syncedSv 前移到剛送出那一刻的 state vector:之後只有更新的 op 才會被推
+        rt.state = { ...rt.state, syncedSv: rt.pushedSv };
         if (msg.seq === rt.state.lastSeq + 1) rt.state = { ...rt.state, lastSeq: msg.seq };
         else if (msg.seq > rt.state.lastSeq + 1) this.send({ type: "pull", docId: msg.docId, fromSeq: rt.state.lastSeq });
         this.opts.host.saveState(msg.docId, rt.state);
@@ -276,8 +286,10 @@ export class SyncClient {
       return;
     }
     rt.dirty = false;
+    // 只有真的有新 op(含刪除)才推:diff 為空 update 就沒東西可送
+    // 不用 state vector 比對,因為 SV 不涵蓋刪除,會把刪除當成無變更吞掉
     const diff = Y.encodeStateAsUpdate(rt.doc, rt.state.syncedSv);
-    if ((await digest(diff)) === rt.state.ackedDiffHash) return;
+    if (bytesEqual(diff, EMPTY_UPDATE)) return;
     rt.pushedSv = Y.encodeStateVector(rt.doc);
     rt.pushing = true;
     // counter 先落盤再送,重啟後不重用號碼,伺服器去重才不會誤傷不同內容
