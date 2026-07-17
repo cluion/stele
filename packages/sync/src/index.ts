@@ -16,4 +16,5 @@ export {
   type SyncHost,
   type SocketLike,
   type SyncStatus,
+  type AwarenessState,
 } from "./client.ts";

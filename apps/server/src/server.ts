@@ -77,6 +77,13 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
       send({ type: "authOk", docs: opts.store.headSeqs(vaultId) });
     };
 
+    const relayToPeers = (vault: string, msg: ServerMessage): void => {
+      const frame = encodeServerMessage(msg);
+      for (const peer of vaults.get(vault) ?? []) {
+        if (peer !== ws && peer.readyState === WebSocket.OPEN) peer.send(frame);
+      }
+    };
+
     const handle = (vault: string, msg: Exclude<ClientMessage, { type: "auth" }>): void => {
       if (!validId(msg.docId) || (msg.type === "push" && !validId(msg.deviceId))) {
         refuse("bad-message", "非法 id");
@@ -86,10 +93,12 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         case "push": {
           const seq = opts.store.appendUpdate(vault, msg.docId, msg.deviceId, msg.counter, msg.payload);
           send({ type: "ack", docId: msg.docId, counter: msg.counter, seq });
-          const broadcast = encodeServerMessage({ type: "update", docId: msg.docId, seq, payload: msg.payload });
-          for (const peer of vaults.get(vault) ?? []) {
-            if (peer !== ws && peer.readyState === WebSocket.OPEN) peer.send(broadcast);
-          }
+          relayToPeers(vault, { type: "update", docId: msg.docId, seq, payload: msg.payload });
+          break;
+        }
+        case "awareness": {
+          // ephemeral:只轉發給同 vault 其他連線,不落盤、不配 seq
+          relayToPeers(vault, { type: "awareness", docId: msg.docId, payload: msg.payload });
           break;
         }
         case "pull": {

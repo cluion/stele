@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import path from "node:path";
 import {
   SyncClient,
+  type AwarenessState,
   type Cipher,
   type SocketLike,
   type SyncDocState,
@@ -29,6 +30,25 @@ export interface SyncSettings {
   token: string;
   vaultId: string;
   deviceId: string;
+  /** 顯示在協作者游標旁的名字;未設時由 deviceId 衍生 */
+  displayName?: string;
+}
+
+/** 一位在場協作者(已排除自己) */
+export interface Participant {
+  clientId: number;
+  deviceId: string;
+  name: string;
+  color: string;
+  state: AwarenessState;
+}
+
+/** 從 deviceId 穩定衍生一個好看的色相,同一裝置每次同色 */
+const PRESENCE_COLORS = ["#0e7b93", "#d99a3d", "#b5485d", "#5b8c5a", "#7d5ba6", "#c56b2d", "#2c7da0"];
+function colorFor(deviceId: string): string {
+  let h = 0;
+  for (const ch of deviceId) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return PRESENCE_COLORS[h % PRESENCE_COLORS.length]!;
 }
 
 interface PersistedDocState {
@@ -50,16 +70,31 @@ export class SyncManager {
   private readonly stateFile: string;
   private metaTimer: NodeJS.Timeout | undefined;
   private stateTimer: NodeJS.Timeout | undefined;
+  private onPresence: ((rel: string, participants: Participant[]) => void) | undefined;
   /** 檔案系統操作依序執行,遠端 meta 變更不互相踩腳 */
   private fsOps: Promise<void> = Promise.resolve();
   status: SyncStatus = "offline";
+  private readonly self: { deviceId: string; name: string; color: string };
+  /** 目前開著的筆記:切換時把在場宣告從舊 doc 移到新 doc */
+  private activeRel: string | undefined;
 
   constructor(
     private readonly session: VaultSession,
     settings: SyncSettings,
     private readonly onStatus?: (status: SyncStatus) => void,
-    tuning?: { pushDebounceMs?: number; snapshotThreshold?: number; cipher?: Cipher },
+    tuning?: {
+      pushDebounceMs?: number;
+      snapshotThreshold?: number;
+      cipher?: Cipher;
+      onPresence?: (rel: string, participants: Participant[]) => void;
+    },
   ) {
+    this.self = {
+      deviceId: settings.deviceId,
+      name: settings.displayName ?? `訪客-${settings.deviceId.slice(0, 4)}`,
+      color: colorFor(settings.deviceId),
+    };
+    this.onPresence = tuning?.onPresence;
     this.metaFile = path.join(session.root, ".stele", "meta.ybin");
     this.stateFile = path.join(session.root, ".stele", "sync-state.json");
     this.paths = this.meta.getMap("paths");
@@ -82,6 +117,7 @@ export class SyncManager {
         this.status = status;
         this.onStatus?.(status);
       },
+      onAwareness: (docId, states) => this.emitPresence(docId, states),
       pushDebounceMs: tuning?.pushDebounceMs,
       snapshotThreshold: tuning?.snapshotThreshold,
       cipher: tuning?.cipher,
@@ -92,6 +128,50 @@ export class SyncManager {
   start(): void {
     this.reconcileStartup();
     this.client.start();
+  }
+
+  /** 使用者切換到某篇筆記(或關閉):在該 doc 上宣告在場,舊 doc 撤除 */
+  setActiveNote(rel: string | undefined): void {
+    if (rel === this.activeRel) return;
+    if (this.activeRel !== undefined) {
+      const prevId = this.session.peekDocId(this.activeRel);
+      if (prevId) this.client.setLocalAwareness(prevId, null);
+    }
+    this.activeRel = rel;
+    if (rel !== undefined) {
+      const id = this.session.peekDocId(rel) ?? this.session.docId(rel);
+      this.client.setLocalAwareness(id, { deviceId: this.self.deviceId, name: this.self.name, color: this.self.color });
+    }
+  }
+
+  /** 更新本地游標/選取(疊加在在場狀態上);唯有 activeRel 相符才送 */
+  setCursor(rel: string, cursor: AwarenessState | null): void {
+    if (rel !== this.activeRel) return;
+    const id = this.session.peekDocId(rel);
+    if (!id) return;
+    this.client.setLocalAwareness(id, {
+      deviceId: this.self.deviceId,
+      name: this.self.name,
+      color: this.self.color,
+      ...(cursor ?? {}),
+    });
+  }
+
+  private emitPresence(docId: string, states: Map<number, AwarenessState>): void {
+    const rel = docId === META_DOC_ID ? undefined : this.session.relForDocId(docId);
+    if (rel === undefined || !this.onPresence) return;
+    const participants: Participant[] = [];
+    for (const [clientId, state] of states) {
+      if (state["deviceId"] === this.self.deviceId) continue; // 排除自己
+      participants.push({
+        clientId,
+        deviceId: typeof state["deviceId"] === "string" ? state["deviceId"] : "",
+        name: typeof state["name"] === "string" ? state["name"] : "訪客",
+        color: typeof state["color"] === "string" ? state["color"] : "#888",
+        state,
+      });
+    }
+    this.onPresence(rel, participants);
   }
 
   async stop(): Promise<void> {
@@ -113,6 +193,9 @@ export class SyncManager {
         if (docId === META_DOC_ID) return Promise.resolve(this.meta);
         const rel = this.session.relForDocId(docId);
         if (rel) return Promise.resolve(this.session.docFor(rel));
+        // 未知 docId 必須是合法 UUID 才承接(可能是 meta 還沒到的遠端新 doc)
+        // 否則任何有 token 的連線可用垃圾 docId 灌爆 loose 池與 awareness 計時器
+        if (!NOTE_DOC_ID.test(docId)) return Promise.resolve(undefined);
         let doc = this.loose.get(docId);
         if (!doc) {
           doc = new Y.Doc();

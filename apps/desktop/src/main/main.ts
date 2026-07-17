@@ -91,7 +91,14 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
   const syncSettings = SMOKE ? undefined : loadSyncSettings(next.root);
   if (syncSettings) {
     const cipher = new VaultCipher(await deriveVaultKey(syncSettings.passphrase, syncSettings.vaultId));
-    syncManager = new SyncManager(next, syncSettings, broadcastSyncStatus, { cipher });
+    syncManager = new SyncManager(next, syncSettings, broadcastSyncStatus, {
+      cipher,
+      onPresence: (rel, participants) => {
+        for (const w of windows) {
+          if (!w.isDestroyed()) w.webContents.send("presence:update", rel, participants);
+        }
+      },
+    });
     syncManager.start();
   } else {
     broadcastSyncStatus("off");
@@ -119,6 +126,10 @@ function initialVaultDir(): string | undefined {
 ipcMain.handle("vault:list", () => session?.list() ?? null);
 
 ipcMain.handle("sync:status", () => syncManager?.status ?? "off");
+
+ipcMain.on("presence:active", (_e, rel: unknown) => {
+  syncManager?.setActiveNote(typeof rel === "string" ? rel : undefined);
+});
 
 ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {
   if (typeof rel !== "string") throw new Error("非法參數");

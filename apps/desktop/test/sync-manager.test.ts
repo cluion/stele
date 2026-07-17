@@ -6,7 +6,7 @@ import * as Y from "yjs";
 import { startServer, SyncStore, type RunningServer } from "@stele/server";
 import { deriveVaultKey, VaultCipher } from "@stele/sync";
 import { VaultSession } from "../src/main/vault-session.ts";
-import { SyncManager, type SyncSettings } from "../src/main/sync-manager.ts";
+import { SyncManager, type SyncSettings, type Participant } from "../src/main/sync-manager.ts";
 
 const TOKEN = "桌面整合-token-1234567890";
 
@@ -33,6 +33,7 @@ interface Device {
   dir: string;
   session: VaultSession;
   manager: SyncManager;
+  presence: Map<string, Participant[]>;
 }
 
 describe("SyncManager 桌面端對端", () => {
@@ -50,9 +51,14 @@ describe("SyncManager 桌面端對端", () => {
     for (const [rel, content] of Object.entries(seedFiles)) writeFileSync(path.join(dir, rel), content);
     const session = new VaultSession(dir, noop);
     const settings: SyncSettings = { url: `ws://127.0.0.1:${server.port}`, token: TOKEN, vaultId, deviceId };
-    const manager = new SyncManager(session, settings, undefined, { pushDebounceMs: 20, cipher });
+    const presence = new Map<string, Participant[]>();
+    const manager = new SyncManager(session, settings, undefined, {
+      pushDebounceMs: 20,
+      cipher,
+      onPresence: (rel, list) => presence.set(rel, list),
+    });
     manager.start();
-    const device = { dir, session, manager };
+    const device = { dir, session, manager, presence };
     devices.push(device);
     return device;
   }
@@ -139,7 +145,7 @@ describe("SyncManager 桌面端對端", () => {
     };
     const manager2 = new SyncManager(b.session, settings, undefined, { pushDebounceMs: 20 });
     manager2.start();
-    devices.push({ dir: b.dir, session: b.session, manager: manager2 });
+    devices.push({ dir: b.dir, session: b.session, manager: manager2, presence: new Map() });
 
     await until(() => read(b, "共筆.md").includes("乙不在時寫的"), "乙補齊離線編輯");
   });
@@ -190,5 +196,44 @@ describe("SyncManager 桌面端對端", () => {
     await until(() => store.updatesSince(vaultId, a.session.allDocIds()[0]!, 0).length > 0, "甲已上傳");
     await sleep(300);
     expect(b.session.list().files).toHaveLength(0);
+  });
+
+  it("非法 docId 的 awareness 被拒:不建 loose doc、不建計時器", async () => {
+    const vaultId = "v-垃圾id";
+    const cipher = new VaultCipher(await deriveVaultKey("同密語", vaultId, 12));
+    const victim = makeDevice(vaultId, "devV", {}, cipher);
+    await sleep(150);
+
+    // 用原生連線直接灌一則非 UUID docId 的 awareness(伺服器只轉發,受害端須自行拒絕)
+    const { default: WebSocket } = await import("ws");
+    const { encodeClientMessage } = await import("@stele/sync");
+    const raw = new WebSocket(`ws://127.0.0.1:${server.port}`);
+    await new Promise((r) => raw.on("open", r));
+    raw.send(encodeClientMessage({ type: "auth", token: TOKEN, vaultId }));
+    await sleep(50);
+    raw.send(encodeClientMessage({ type: "awareness", docId: "../../垃圾", payload: new Uint8Array([1, 2, 3]) }));
+    await sleep(300);
+
+    // 受害端沒有因此多出任何檔案/文件(loose 池為私有,以行為驗證:vault 仍空、無崩潰)
+    expect(victim.session.list().files).toHaveLength(0);
+    raw.close();
+  });
+
+  it("在場:甲開某篇筆記,乙看到甲在場;甲切走後乙的在場清空", async () => {
+    const vaultId = "v-在場";
+    const cipherA = new VaultCipher(await deriveVaultKey("同密語", vaultId, 12));
+    const cipherB = new VaultCipher(await deriveVaultKey("同密語", vaultId, 12));
+    const a = makeDevice(vaultId, "devA", { "共讀.md": "# 共讀\n" }, cipherA);
+    const b = makeDevice(vaultId, "devB", {}, cipherB);
+    await until(() => content(b, "共讀.md") === "# 共讀\n", "乙物化共讀");
+
+    a.manager.setActiveNote("共讀.md");
+    await until(() => (b.presence.get("共讀.md")?.length ?? 0) === 1, "乙看到甲在場");
+    const seen = b.presence.get("共讀.md")![0]!;
+    expect(seen.deviceId).toBe("devA");
+    expect(b.presence.get("共讀.md")!.every((p) => p.deviceId !== "devB")).toBe(true); // 不含自己
+
+    a.manager.setActiveNote(undefined);
+    await until(() => (b.presence.get("共讀.md")?.length ?? 0) === 0, "甲切走後乙在場清空");
   });
 });

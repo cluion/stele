@@ -39,6 +39,18 @@ export interface SteleApi {
   syncStatus(): Promise<string>;
   /** 回傳退訂函式 */
   onSyncStatus(cb: (status: string) => void): () => void;
+  /** 宣告目前開著的筆記(或 null 關閉),用於協作在場 */
+  setActiveNote(rel: string | null): void;
+  /** 在場協作者變化;回傳退訂函式 */
+  onPresence(cb: (rel: string, participants: Participant[]) => void): () => void;
+}
+
+export interface Participant {
+  clientId: number;
+  deviceId: string;
+  name: string;
+  color: string;
+  state: Record<string, unknown>;
 }
 
 const api: SteleApi = {
@@ -68,6 +80,12 @@ const api: SteleApi = {
     const handler = (_e: IpcRendererEvent, status: string) => cb(status);
     ipcRenderer.on("sync:status", handler);
     return () => ipcRenderer.off("sync:status", handler);
+  },
+  setActiveNote: (rel) => ipcRenderer.send("presence:active", rel),
+  onPresence: (cb) => {
+    const handler = (_e: IpcRendererEvent, rel: string, participants: Participant[]) => cb(rel, participants);
+    ipcRenderer.on("presence:update", handler);
+    return () => ipcRenderer.off("presence:update", handler);
   },
 };
 

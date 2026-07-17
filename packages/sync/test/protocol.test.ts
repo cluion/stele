@@ -16,6 +16,7 @@ const clientCases: ClientMessage[] = [
   { type: "pull", docId: "中文檔名也是合法 id", fromSeq: 123456789 },
   { type: "snapshotPush", docId: "doc-2", uptoSeq: 7, payload: new Uint8Array(1024).fill(9) },
   { type: "snapshotPull", docId: "doc-2" },
+  { type: "awareness", docId: "doc-1", payload: new Uint8Array([3, 1, 4, 1, 5]) },
 ];
 
 const serverCases: ServerMessage[] = [
@@ -33,6 +34,7 @@ const serverCases: ServerMessage[] = [
   { type: "snapshot", docId: "沒有快照", uptoSeq: 0, payload: new Uint8Array() },
   { type: "snapshotAck", docId: "doc-2", uptoSeq: 7 },
   { type: "error", code: "bad-token", message: "token 錯誤" },
+  { type: "awareness", docId: "doc-1", payload: new Uint8Array([9, 8, 7]) },
 ];
 
 describe("同步協議編解碼", () => {

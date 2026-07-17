@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import * as awarenessProtocol from "y-protocols/awareness";
 import {
   encodeClientMessage,
   decodeServerMessage,
@@ -7,6 +8,12 @@ import {
   type DocHead,
 } from "./protocol.ts";
 import { identityCipher, type Cipher } from "./cipher.ts";
+
+/** awareness 狀態:游標/選取/使用者資訊等,JSON 可序列化 */
+export type AwarenessState = Record<string, unknown>;
+
+/** 週期重播本地 awareness:讓新加入者看得到,並刷新對端的過期計時 */
+const AWARENESS_REFRESH_MS = 10_000;
 
 /**
  * 空 Yjs update 的位元組:沒有任何 struct 也沒有任何刪除
@@ -62,9 +69,16 @@ export interface SyncClientOptions {
   createSocket(url: string): SocketLike;
   cipher?: Cipher;
   onStatus?(status: SyncStatus): void;
+  /** 某 doc 的 awareness 狀態集變化(含遠端加入/離開);states 的 key 是 Yjs clientID */
+  onAwareness?(docId: string, states: Map<number, AwarenessState>): void;
   pushDebounceMs?: number;
   /** 增量日誌超過快照點多少筆就上傳新快照 */
   snapshotThreshold?: number;
+}
+
+interface AwarenessEntry {
+  aw: awarenessProtocol.Awareness;
+  onUpdate: (changes: { added: number[]; updated: number[]; removed: number[] }, origin: unknown) => void;
 }
 
 interface DocRuntime {
@@ -92,6 +106,8 @@ export class SyncClient {
   private backoff = RECONNECT_MIN_MS;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly runtimes = new Map<string, DocRuntime>();
+  private readonly awareness = new Map<string, AwarenessEntry>();
+  private awarenessTimer: ReturnType<typeof setInterval> | undefined;
   private serverHeads = new Map<string, DocHead>();
   /** 訊息依到達順序處理,避免非同步解密造成亂序套用 */
   private rx: Promise<void> = Promise.resolve();
@@ -102,23 +118,39 @@ export class SyncClient {
 
   start(): void {
     this.stopped = false;
+    this.awarenessTimer = setInterval(() => this.refreshAwareness(), AWARENESS_REFRESH_MS);
     this.connect();
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
     clearTimeout(this.reconnectTimer);
+    if (this.awarenessTimer !== undefined) clearInterval(this.awarenessTimer);
+    // 趁連線還在,主動告知對端本地離場,對端據此即時清掉游標(否則要等逾時)
+    await this.announceLeave();
     for (const rt of this.runtimes.values()) {
       clearTimeout(rt.pushTimer);
       rt.doc.off("update", rt.onUpdate);
     }
     this.runtimes.clear();
+    for (const { aw, onUpdate } of this.awareness.values()) {
+      aw.off("update", onUpdate);
+      aw.destroy();
+    }
+    this.awareness.clear();
     const socket = this.socket;
     this.socket = undefined;
     socket?.close();
     this.online = false;
     this.setStatus("offline");
     await this.rx;
+  }
+
+  /** UI 設定本地 awareness(游標/選取/在線);null = 清除本地狀態 */
+  setLocalAwareness(docId: string, state: AwarenessState | null): void {
+    void this.ensureAwareness(docId)
+      .then((entry) => entry?.aw.setLocalState(state))
+      .catch((err: unknown) => console.error(`設定 awareness 失敗 ${docId}:`, err));
   }
 
   private connect(): void {
@@ -152,8 +184,14 @@ export class SyncClient {
     };
   }
 
-  /** doc 已刪除:卸下狀態機,之後同名 docId 的訊息會重新建立 */
+  /** doc 已刪除:卸下狀態機與 awareness,之後同名 docId 的訊息會重新建立 */
   forget(docId: string): void {
+    const entry = this.awareness.get(docId);
+    if (entry) {
+      entry.aw.off("update", entry.onUpdate);
+      entry.aw.destroy();
+      this.awareness.delete(docId);
+    }
     const rt = this.runtimes.get(docId);
     if (!rt) return;
     clearTimeout(rt.pushTimer);
@@ -181,6 +219,7 @@ export class SyncClient {
         for (const docId of new Set([...local, ...this.serverHeads.keys()])) {
           await this.reconcile(docId);
         }
+        this.refreshAwareness(); // 重連後立刻重播本地 awareness,讓在場者重新看到我
         break;
       }
       case "update": {
@@ -225,9 +264,73 @@ export class SyncClient {
       }
       case "snapshotAck":
         break;
+      case "awareness": {
+        const entry = await this.ensureAwareness(msg.docId);
+        if (!entry) return;
+        // 解密失敗(密語錯)由 rx 的 catch 吞掉,對端就是看不到,不影響同步
+        const update = await this.cipher.decrypt(msg.docId, msg.payload);
+        awarenessProtocol.applyAwarenessUpdate(entry.aw, update, "remote");
+        break;
+      }
       case "error":
         console.error(`同步伺服器回報錯誤:${msg.code} ${msg.message}`);
         break;
+    }
+  }
+
+  private async ensureAwareness(docId: string): Promise<AwarenessEntry | undefined> {
+    const existing = this.awareness.get(docId);
+    if (existing) return existing;
+    const doc = await this.opts.host.openDoc(docId);
+    // stop() 可能在 await 期間跑完並清空 map:此時不能再建實例,否則帶計時器的 Awareness 永不回收
+    if (!doc || this.stopped) return undefined;
+    const raced = this.awareness.get(docId);
+    if (raced) return raced;
+    const aw = new awarenessProtocol.Awareness(doc);
+    aw.setLocalState(null); // 開場不宣告在場,等 UI 設定狀態才廣播
+    const onUpdate = (
+      { added, updated, removed }: { added: number[]; updated: number[]; removed: number[] },
+      origin: unknown,
+    ): void => {
+      this.opts.onAwareness?.(docId, new Map(aw.getStates() as Map<number, AwarenessState>));
+      if (origin === "remote") return; // 遠端來的不回廣播,避免迴圈
+      this.sendAwareness(docId, aw, [...added, ...updated, ...removed]);
+    };
+    aw.on("update", onUpdate);
+    const entry: AwarenessEntry = { aw, onUpdate };
+    this.awareness.set(docId, entry);
+    return entry;
+  }
+
+  private sendAwareness(docId: string, aw: awarenessProtocol.Awareness, clients: number[]): void {
+    if (!this.online || clients.length === 0) return;
+    const update = awarenessProtocol.encodeAwarenessUpdate(aw, clients);
+    void this.cipher
+      .encrypt(docId, update)
+      .then((payload) => this.send({ type: "awareness", docId, payload }))
+      .catch((err: unknown) => console.error(`awareness 廣播失敗 ${docId}:`, err));
+  }
+
+  /** 週期重播本地非空 awareness:讓新加入者看到、刷新對端過期計時 */
+  private refreshAwareness(): void {
+    if (!this.online) return;
+    for (const [docId, { aw }] of this.awareness) {
+      if (aw.getLocalState() !== null) this.sendAwareness(docId, aw, [aw.clientID]);
+    }
+  }
+
+  private async announceLeave(): Promise<void> {
+    if (!this.online) return;
+    for (const [docId, { aw }] of this.awareness) {
+      if (aw.getLocalState() === null) continue;
+      const clients = [aw.clientID];
+      awarenessProtocol.removeAwarenessStates(aw, clients, "local"); // clock 前進、state=null
+      try {
+        const payload = await this.cipher.encrypt(docId, awarenessProtocol.encodeAwarenessUpdate(aw, clients));
+        this.socket?.send(encodeClientMessage({ type: "awareness", docId, payload }));
+      } catch (err) {
+        console.error(`awareness 離場廣播失敗 ${docId}:`, err);
+      }
     }
   }
 
@@ -248,7 +351,8 @@ export class SyncClient {
     const existing = this.runtimes.get(docId);
     if (existing) return existing;
     const doc = await this.opts.host.openDoc(docId);
-    if (!doc) return undefined;
+    // stop() 可能在 await 期間跑完並清空 runtimes:此時不能再掛 update listener
+    if (!doc || this.stopped) return undefined;
     const raced = this.runtimes.get(docId);
     if (raced) return raced;
     const rt: DocRuntime = {

@@ -11,7 +11,9 @@ export type ClientMessage =
   | { type: "push"; docId: string; deviceId: string; counter: number; payload: Uint8Array }
   | { type: "pull"; docId: string; fromSeq: number }
   | { type: "snapshotPush"; docId: string; uptoSeq: number; payload: Uint8Array }
-  | { type: "snapshotPull"; docId: string };
+  | { type: "snapshotPull"; docId: string }
+  // awareness:游標/選取/在線,加密後轉發不落盤(ephemeral),伺服器只轉不存
+  | { type: "awareness"; docId: string; payload: Uint8Array };
 
 export interface DocHead {
   docId: string;
@@ -25,10 +27,12 @@ export type ServerMessage =
   | { type: "ack"; docId: string; counter: number; seq: number }
   | { type: "snapshot"; docId: string; uptoSeq: number; payload: Uint8Array }
   | { type: "snapshotAck"; docId: string; uptoSeq: number }
-  | { type: "error"; code: string; message: string };
+  | { type: "error"; code: string; message: string }
+  // 轉發自其他參與者的加密 awareness
+  | { type: "awareness"; docId: string; payload: Uint8Array };
 
-const CLIENT_TAG = { auth: 0, push: 1, pull: 2, snapshotPush: 3, snapshotPull: 4 } as const;
-const SERVER_TAG = { authOk: 0, update: 1, ack: 2, snapshot: 3, snapshotAck: 4, error: 5 } as const;
+const CLIENT_TAG = { auth: 0, push: 1, pull: 2, snapshotPush: 3, snapshotPull: 4, awareness: 5 } as const;
+const SERVER_TAG = { authOk: 0, update: 1, ack: 2, snapshot: 3, snapshotAck: 4, error: 5, awareness: 6 } as const;
 
 export function encodeClientMessage(msg: ClientMessage): Uint8Array {
   const enc = encoding.createEncoder();
@@ -55,6 +59,10 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
       break;
     case "snapshotPull":
       encoding.writeVarString(enc, msg.docId);
+      break;
+    case "awareness":
+      encoding.writeVarString(enc, msg.docId);
+      encoding.writeVarUint8Array(enc, msg.payload);
       break;
   }
   return encoding.toUint8Array(enc);
@@ -85,6 +93,8 @@ export function decodeClientMessage(data: Uint8Array): ClientMessage {
       };
     case CLIENT_TAG.snapshotPull:
       return { type: "snapshotPull", docId: decoding.readVarString(dec) };
+    case CLIENT_TAG.awareness:
+      return { type: "awareness", docId: decoding.readVarString(dec), payload: readPayload(dec) };
     default:
       throw new Error(`未知的 client 訊息類型:${tag}`);
   }
@@ -124,6 +134,10 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
     case "error":
       encoding.writeVarString(enc, msg.code);
       encoding.writeVarString(enc, msg.message);
+      break;
+    case "awareness":
+      encoding.writeVarString(enc, msg.docId);
+      encoding.writeVarUint8Array(enc, msg.payload);
       break;
   }
   return encoding.toUint8Array(enc);
@@ -170,6 +184,8 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
       return { type: "snapshotAck", docId: decoding.readVarString(dec), uptoSeq: decoding.readVarUint(dec) };
     case SERVER_TAG.error:
       return { type: "error", code: decoding.readVarString(dec), message: decoding.readVarString(dec) };
+    case SERVER_TAG.awareness:
+      return { type: "awareness", docId: decoding.readVarString(dec), payload: readPayload(dec) };
     default:
       throw new Error(`未知的 server 訊息類型:${tag}`);
   }

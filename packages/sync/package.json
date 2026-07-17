@@ -14,7 +14,8 @@
   "dependencies": {
     "@noble/hashes": "^2.0.1",
     "lib0": "^0.2.114",
-    "yjs": "latest"
+    "yjs": "latest",
+    "y-protocols": "^1.0.6"
   },
   "devDependencies": {
     "@types/node": "latest",

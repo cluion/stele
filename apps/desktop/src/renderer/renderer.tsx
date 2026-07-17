@@ -8,7 +8,7 @@ import { EditorView } from "prosemirror-view";
 import { SteleBinding, resolveWikilink, rankFiles } from "@stele/editor-core";
 import { createSourceView, topBlockCM, scrollToBlockCM } from "./source-editor.ts";
 import { GraphView } from "./graph-view.tsx";
-import type { SteleApi, BacklinkItem, VaultInfo } from "../main/preload.ts";
+import type { SteleApi, BacklinkItem, VaultInfo, Participant } from "../main/preload.ts";
 
 type EditorMode = "wysiwyg" | "source";
 
@@ -504,11 +504,26 @@ function App() {
   const [modes, setModes] = useState<ReadonlyMap<string, EditorMode>>(new Map());
   // "off" = 這個 vault 沒設定同步,指示燈隱藏
   const [syncState, setSyncState] = useState("off");
+  // 各筆記的在場協作者(不含自己);以 rel 為 key,切換筆記只是讀不同 key
+  const [presenceByRel, setPresenceByRel] = useState<Record<string, Participant[]>>({});
 
   useEffect(() => {
     void window.stele.syncStatus().then(setSyncState);
     return window.stele.onSyncStatus(setSyncState);
   }, [vaultInfo?.root]);
+
+  useEffect(() => {
+    return window.stele.onPresence((rel, list) => {
+      setPresenceByRel((prev) => ({ ...prev, [rel]: list }));
+    });
+  }, []);
+
+  // 切換筆記時通知主行程更新在場宣告
+  useEffect(() => {
+    window.stele.setActiveNote(active ?? null);
+  }, [active]);
+
+  const participants = active ? (presenceByRel[active] ?? []) : [];
 
   useEffect(() => {
     void window.stele.listVault().then((info) => {
@@ -604,6 +619,7 @@ function App() {
         setActive(info.files[0]);
         setRecent([]);
         setModes(new Map()); // rel 在不同 vault 可能撞名,一併重置
+        setPresenceByRel({}); // 同理,舊 vault 的在場清單不能沿用到新 vault
         setSwitcherOpen(false);
       })
       .catch((err: unknown) => console.error("換 vault 失敗:", err));
@@ -686,6 +702,15 @@ function App() {
         />
       ) : active ? (
         <>
+          {participants.length > 0 && (
+            <div className="presence-bar">
+              {participants.map((p) => (
+                <span key={p.clientId} className="presence-avatar" style={{ background: p.color }} title={p.name}>
+                  {[...p.name][0] ?? "?"}
+                </span>
+              ))}
+            </div>
+          )}
           <Editor
             key={`${vaultInfo.root}:${active}`}
             rel={active}
