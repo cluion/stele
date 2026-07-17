@@ -131,6 +131,11 @@ ipcMain.on("presence:active", (_e, rel: unknown) => {
   syncManager?.setActiveNote(typeof rel === "string" ? rel : undefined);
 });
 
+ipcMain.on("presence:cursor", (_e, rel: unknown, cursor: unknown) => {
+  if (typeof rel !== "string") return;
+  syncManager?.setCursor(rel, cursor && typeof cursor === "object" ? { cur: cursor } : null);
+});
+
 ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {
   if (typeof rel !== "string") throw new Error("非法參數");
   return requireSession().backlinks(rel);

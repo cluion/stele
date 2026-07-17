@@ -3,14 +3,67 @@
  * 真相仍是 Y.Text,CM 的編輯自動成為 Y.Doc 更新,走既有 IPC → 鏡像鏈
  */
 import * as Y from "yjs";
-import { EditorState } from "@codemirror/state";
-import { EditorView, keymap } from "@codemirror/view";
+import { EditorState, StateEffect, StateField } from "@codemirror/state";
+import { EditorView, keymap, Decoration, WidgetType, type DecorationSet } from "@codemirror/view";
 import { defaultKeymap } from "@codemirror/commands";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { markdown } from "@codemirror/lang-markdown";
 import { tags } from "@lezer/highlight";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import { splitBlocks, findBlocksInRange } from "@stele/editor-core";
+import type { RemoteCursor } from "./remote-cursors.ts";
+
+/** 遠端游標的插入符 widget:一根彩色細線,hover 顯示名字 */
+class CaretWidget extends WidgetType {
+  constructor(
+    private readonly color: string,
+    private readonly name: string,
+  ) {
+    super();
+  }
+  eq(other: CaretWidget): boolean {
+    return other.color === this.color && other.name === this.name;
+  }
+  toDOM(): HTMLElement {
+    const el = document.createElement("span");
+    el.className = "remote-caret";
+    el.style.borderColor = this.color;
+    el.setAttribute("data-name", this.name);
+    el.style.setProperty("--caret-color", this.color);
+    return el;
+  }
+}
+
+const setRemoteCursors = StateEffect.define<RemoteCursor[]>();
+
+const remoteCursorField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    let next = deco.map(tr.changes);
+    for (const e of tr.effects) {
+      if (!e.is(setRemoteCursors)) continue;
+      const len = tr.state.doc.length;
+      const ranges = [];
+      for (const c of e.value) {
+        const from = Math.min(Math.max(0, Math.min(c.anchor, c.head)), len);
+        const to = Math.min(Math.max(0, Math.max(c.anchor, c.head)), len);
+        if (to > from) {
+          ranges.push(
+            Decoration.mark({ class: "remote-selection", attributes: { style: `background:${c.color}33` } }).range(
+              from,
+              to,
+            ),
+          );
+        }
+        const caretAt = Math.min(Math.max(0, c.head), len);
+        ranges.push(Decoration.widget({ widget: new CaretWidget(c.color, c.name), side: 1 }).range(caretAt));
+      }
+      next = Decoration.set(ranges, true); // 第二參數 sort=true,交給 RangeSet 排序
+    }
+    return next;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
 
 /** Markdown 語法高亮,顏色全走 design tokens */
 const mdHighlight = HighlightStyle.define([
@@ -29,11 +82,17 @@ const mdHighlight = HighlightStyle.define([
 
 export interface SourceView {
   view: EditorView;
+  /** 推入遠端游標(呼叫端已解析成 Y.Text offset) */
+  setRemoteCursors(cursors: RemoteCursor[]): void;
   /** view 與 undoManager 必須一起銷毀:UndoManager 在共享的 Y.Doc 上掛有 afterTransaction listener */
   destroy(): void;
 }
 
-export function createSourceView(parent: HTMLElement, ytext: Y.Text): SourceView {
+export function createSourceView(
+  parent: HTMLElement,
+  ytext: Y.Text,
+  onCursor?: (anchor: number, head: number) => void,
+): SourceView {
   const undoManager = new Y.UndoManager(ytext);
   const view = new EditorView({
     parent,
@@ -45,11 +104,21 @@ export function createSourceView(parent: HTMLElement, ytext: Y.Text): SourceView
         EditorView.lineWrapping,
         syntaxHighlighting(mdHighlight),
         yCollab(ytext, null, { undoManager }),
+        remoteCursorField,
+        EditorView.updateListener.of((u) => {
+          if (onCursor && (u.selectionSet || u.focusChanged)) {
+            const sel = u.state.selection.main;
+            onCursor(sel.anchor, sel.head);
+          }
+        }),
       ],
     }),
   });
   return {
     view,
+    setRemoteCursors(cursors) {
+      view.dispatch({ effects: setRemoteCursors.of(cursors) });
+    },
     destroy() {
       view.destroy();
       undoManager.destroy();

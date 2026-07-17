@@ -41,6 +41,8 @@ export interface SteleApi {
   onSyncStatus(cb: (status: string) => void): () => void;
   /** 宣告目前開著的筆記(或 null 關閉),用於協作在場 */
   setActiveNote(rel: string | null): void;
+  /** 回報本地游標/選取(疊在在場狀態上),用於他人渲染我的游標 */
+  setCursor(rel: string, cursor: Record<string, unknown> | null): void;
   /** 在場協作者變化;回傳退訂函式 */
   onPresence(cb: (rel: string, participants: Participant[]) => void): () => void;
 }
@@ -82,6 +84,7 @@ const api: SteleApi = {
     return () => ipcRenderer.off("sync:status", handler);
   },
   setActiveNote: (rel) => ipcRenderer.send("presence:active", rel),
+  setCursor: (rel, cursor) => ipcRenderer.send("presence:cursor", rel, cursor),
   onPresence: (cb) => {
     const handler = (_e: IpcRendererEvent, rel: string, participants: Participant[]) => cb(rel, participants);
     ipcRenderer.on("presence:update", handler);

@@ -79,6 +79,35 @@ body {
   text-transform: uppercase;
   user-select: none;
 }
+
+/* 遠端協作者游標:一根彩色細線,hover 顯示名字 */
+.remote-caret {
+  position: relative;
+  display: inline-block;
+  width: 0;
+  border-left: 2px solid var(--caret-color, currentColor);
+  margin-left: -1px;
+  height: 1.2em;
+  vertical-align: text-bottom;
+  pointer-events: none;
+}
+.remote-caret::after {
+  content: attr(data-name);
+  position: absolute;
+  top: -1.3em;
+  left: -1px;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 0 4px;
+  border-radius: 3px 3px 3px 0;
+  background: var(--caret-color, currentColor);
+  color: #fff;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.remote-caret:hover::after { opacity: 1; }
+.remote-selection { border-radius: 2px; }
 @keyframes sync-pulse {
   50% { opacity: 0.3; }
 }

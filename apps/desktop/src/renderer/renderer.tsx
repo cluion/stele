@@ -6,7 +6,8 @@ import { useTranslation } from "react-i18next";
 import * as Y from "yjs";
 import { EditorView } from "prosemirror-view";
 import { SteleBinding, resolveWikilink, rankFiles } from "@stele/editor-core";
-import { createSourceView, topBlockCM, scrollToBlockCM } from "./source-editor.ts";
+import { createSourceView, topBlockCM, scrollToBlockCM, type SourceView } from "./source-editor.ts";
+import { encodeCursor, participantCursor, throttle, type RemoteCursor } from "./remote-cursors.ts";
 import { GraphView } from "./graph-view.tsx";
 import type { SteleApi, BacklinkItem, VaultInfo, Participant } from "../main/preload.ts";
 
@@ -61,12 +62,14 @@ function Editor({
   rel,
   mode,
   files,
+  participants,
   onNavigate,
   onToggleMode,
 }: {
   rel: string;
   mode: EditorMode;
   files: string[];
+  participants: Participant[];
   onNavigate: (target: string) => void;
   onToggleMode: () => void;
 }) {
@@ -74,6 +77,8 @@ function Editor({
   const paneRef = useRef<HTMLDivElement>(null);
   const ref = useRef<HTMLDivElement>(null);
   const [ytext, setYtext] = useState<Y.Text | undefined>();
+  const ydocRef = useRef<Y.Doc | undefined>(undefined);
+  const sourceRef = useRef<SourceView | undefined>(undefined);
   /** 模式切換時傳遞可見頂部區塊索引,塊級近似保持捲動位置 */
   const scrollBlock = useRef(0);
   const onNavigateRef = useRef(onNavigate);
@@ -138,6 +143,7 @@ function Editor({
     void window.stele.openDoc(rel).then((snapshot) => {
       if (cancelled) return;
       ydoc = new Y.Doc();
+      ydocRef.current = ydoc;
       Y.applyUpdate(ydoc, snapshot, "main");
 
       // 本地變更推給 main;main 廣播回來的以 origin "main" 套用,不再回推
@@ -211,13 +217,33 @@ function Editor({
       };
     }
 
-    const source = createSourceView(host, ytext);
+    // 游標回報節流:打字期間每按鍵都會觸發 selectionSet,合併後 ~90ms 送一次
+    const cursorSend = throttle((anchor: number, head: number) => {
+      window.stele.setCursor(rel, encodeCursor(ytext, anchor, head));
+    }, 90);
+    const source = createSourceView(host, ytext, cursorSend.call);
+    sourceRef.current = source;
     scrollToBlockCM(source.view, ytext.toString(), scrollBlock.current);
     return () => {
       scrollBlock.current = topBlockCM(source.view, pane, ytext.toString());
+      sourceRef.current = undefined;
+      cursorSend.cancel();
       source.destroy();
     };
-  }, [ytext, mode]);
+  }, [ytext, mode, rel]);
+
+  // 遠端游標:participants 變動時解析 relative position 並推進當前投影
+  useEffect(() => {
+    const doc = ydocRef.current;
+    if (!ytext || !doc) return;
+    const cursors: RemoteCursor[] = [];
+    for (const p of participants) {
+      const c = participantCursor(doc, ytext, p);
+      if (c) cursors.push(c);
+    }
+    sourceRef.current?.setRemoteCursors(cursors);
+    // WYSIWYG 的遠端游標渲染於下一刀
+  }, [participants, ytext, mode]);
 
   return (
     <div className="editor-pane" ref={paneRef}>
@@ -716,6 +742,7 @@ function App() {
             rel={active}
             mode={modes.get(active) ?? "wysiwyg"}
             files={files}
+            participants={participants}
             onNavigate={navigate}
             onToggleMode={() =>
               setModes((m) => {
