@@ -4,10 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useTranslation } from "react-i18next";
 import * as Y from "yjs";
+import type { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import { SteleBinding, resolveWikilink, rankFiles } from "@stele/editor-core";
 import { createSourceView, topBlockCM, scrollToBlockCM, type SourceView } from "./source-editor.ts";
 import { encodeCursor, participantCursor, throttle, type RemoteCursor } from "./remote-cursors.ts";
+import { remoteCursorPlugin, remoteCursorKey, type BlockCursor } from "./wysiwyg-cursors.ts";
 import { GraphView } from "./graph-view.tsx";
 import type { SteleApi, BacklinkItem, VaultInfo, Participant } from "../main/preload.ts";
 
@@ -79,6 +81,7 @@ function Editor({
   const [ytext, setYtext] = useState<Y.Text | undefined>();
   const ydocRef = useRef<Y.Doc | undefined>(undefined);
   const sourceRef = useRef<SourceView | undefined>(undefined);
+  const bindingRef = useRef<SteleBinding | undefined>(undefined);
   /** 模式切換時傳遞可見頂部區塊索引,塊級近似保持捲動位置 */
   const scrollBlock = useRef(0);
   const onNavigateRef = useRef(onNavigate);
@@ -173,9 +176,22 @@ function Editor({
 
     if (mode === "wysiwyg") {
       const binding = new SteleBinding(ytext);
+      // 掛遠端游標 plugin;meta-only 更新走 binding.dispatch 不觸發 writeBack
+      binding.state = binding.state.reconfigure({ plugins: [...binding.state.plugins, remoteCursorPlugin()] });
+      // WYSIWYG 本地游標:塊級,回報所在段落的 block.from(source 端會顯示為段首 caret)
+      const pmCursorSend = throttle((offset: number) => {
+        window.stele.setCursor(rel, encodeCursor(ytext, offset, offset));
+      }, 90);
+      const reportPmCursor = (state: EditorState) => {
+        // 用 binding 已增量維護的 blocks,不在每次按鍵整份重 parse
+        pmCursorSend.call(binding.blockStart(state.selection.$head.index(0)));
+      };
       const view = new EditorView(host, {
         state: binding.state,
-        dispatchTransaction: (tr) => binding.dispatch(tr),
+        dispatchTransaction: (tr) => {
+          binding.dispatch(tr);
+          if (tr.selectionSet || tr.docChanged) reportPmCursor(binding.state);
+        },
         handleClickOn: (_view, _pos, node) => {
           if (node.type.name === "wikilink") {
             onNavigateRef.current(String(node.attrs["target"]));
@@ -203,6 +219,7 @@ function Editor({
         },
       });
       viewRef.current = view;
+      bindingRef.current = binding;
       binding.onStateChange = (state) => {
         view.updateState(state);
         refreshSuggest(view);
@@ -211,7 +228,9 @@ function Editor({
       return () => {
         scrollBlock.current = topBlockPM(view, pane);
         viewRef.current = undefined;
+        bindingRef.current = undefined;
         setSuggest(null);
+        pmCursorSend.cancel();
         binding.destroy();
         view.destroy();
       };
@@ -241,8 +260,20 @@ function Editor({
       const c = participantCursor(doc, ytext, p);
       if (c) cursors.push(c);
     }
-    sourceRef.current?.setRemoteCursors(cursors);
-    // WYSIWYG 的遠端游標渲染於下一刀
+    if (mode === "source") {
+      sourceRef.current?.setRemoteCursors(cursors);
+    } else {
+      const view = viewRef.current;
+      const binding = bindingRef.current;
+      if (!view || !binding) return;
+      const blockCursors: BlockCursor[] = cursors.map((c) => ({
+        clientId: c.clientId,
+        block: binding.blockIndexAt(c.head), // 用 binding 增量 blocks,免整份重 parse
+        color: c.color,
+        name: c.name,
+      }));
+      view.dispatch(view.state.tr.setMeta(remoteCursorKey, blockCursors));
+    }
   }, [participants, ytext, mode]);
 
   return (

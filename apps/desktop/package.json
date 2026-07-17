@@ -32,7 +32,8 @@
     "react-dom": "latest",
     "react-i18next": "latest",
     "y-codemirror.next": "^0.3.5",
-    "yjs": "latest"
+    "yjs": "latest",
+    "prosemirror-model": "^1.25.11"
   },
   "devDependencies": {
     "@stele/server": "workspace:*",

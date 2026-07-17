@@ -62,6 +62,9 @@ importers:
       minisearch:
         specifier: ^7.2.0
         version: 7.2.0
+      prosemirror-model:
+        specifier: ^1.25.11
+        version: 1.25.11
       prosemirror-state:
         specifier: latest
         version: 1.4.4

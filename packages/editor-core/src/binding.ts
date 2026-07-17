@@ -11,7 +11,7 @@ import { splitListItem, sinkListItem, liftListItem } from "prosemirror-schema-li
 import { markdownInputRules } from "./input-rules.ts";
 import { downOutOfTrailingCode } from "./commands.ts";
 import { steleSchema } from "./schema.ts";
-import { splitBlocks, type Block } from "./blocks.ts";
+import { splitBlocks, findBlocksInRange, type Block } from "./blocks.ts";
 import { applyRangeEdit } from "./apply.ts";
 import { parseDoc, serializeBlock } from "./convert.ts";
 
@@ -93,6 +93,16 @@ export class SteleBinding {
       if (tr.origin !== this) this.onRemoteChange();
     };
     ytext.observe(this.observer);
+  }
+
+  /** 頂層子節點 index → 其在 Y.Text 的起始 offset(協作游標塊級定位;用已增量維護的 blocks,免整份重 parse) */
+  blockStart(index: number): number {
+    return this.blocks[index]?.from ?? 0;
+  }
+
+  /** Y.Text offset 落在第幾個頂層區塊 */
+  blockIndexAt(offset: number): number {
+    return findBlocksInRange(this.blocks, offset, offset)[0] ?? 0;
   }
 
   /** 套用本地 transaction,必要時寫回 Y.Text,回傳新 state */
