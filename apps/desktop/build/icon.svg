@@ -1,0 +1,17 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Stele app icon:立石意象,夜燭石底 + 石英碑身 + 琥珀刻線;純色填充,跨渲染器穩定 -->
+  <!-- 圓角方底:暖石棕 -->
+  <rect width="1024" height="1024" rx="228" fill="#2a2118"/>
+
+  <!-- 碑身:圓拱頂的直立石板 -->
+  <path d="M354 796 L354 368 Q354 224 512 224 Q670 224 670 368 L670 796 Z" fill="#e7e0d2"/>
+  <!-- 碑身左緣陰影,給一點立體 -->
+  <path d="M354 796 L354 368 Q354 224 512 224 L512 796 Z" fill="#d4ccbb"/>
+  <!-- 碑座 -->
+  <rect x="312" y="796" width="400" height="60" rx="16" fill="#b3aa98"/>
+
+  <!-- 琥珀刻線:三道題字凹槽,漸短如碑文起首 -->
+  <rect x="430" y="392" width="164" height="30" rx="15" fill="#d99a3d"/>
+  <rect x="430" y="470" width="164" height="30" rx="15" fill="#c98a2f"/>
+  <rect x="430" y="548" width="108" height="30" rx="15" fill="#b97c26"/>
+</svg>

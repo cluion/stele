@@ -3,3 +3,4 @@ node_modules/
 dist/
 prototypes/shell/tmp-vault/
 prototypes/mirror/fixtures/vault/.stele/
+apps/desktop/release/

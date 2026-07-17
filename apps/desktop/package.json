@@ -5,11 +5,53 @@
   "type": "module",
   "main": "dist/main.cjs",
   "license": "MIT",
+  "description": "Stele — 本地優先、端對端加密、可自架的知識庫",
+  "author": "Hugo <hugo@cluion.com>",
+  "homepage": "https://github.com/cluion/stele",
   "scripts": {
     "build": "node scripts/build.mjs",
     "start": "pnpm build && electron . --no-sandbox",
     "smoke": "pnpm build && electron . --no-sandbox --smoke",
+    "dist": "pnpm build && electron-builder",
     "test": "vitest run"
+  },
+  "build": {
+    "appId": "com.cluion.stele",
+    "productName": "Stele",
+    "executableName": "stele",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json",
+      "!node_modules/**/*"
+    ],
+    "asar": true,
+    "npmRebuild": false,
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "linux": {
+      "category": "Office",
+      "icon": "build/icon.png",
+      "artifactName": "Stele-${version}-${arch}.${ext}",
+      "target": [
+        "AppImage",
+        "deb"
+      ]
+    }
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.4",
@@ -22,26 +64,27 @@
     "@stele/sync": "workspace:*",
     "@stele/ui": "workspace:*",
     "chokidar": "latest",
-    "ws": "^8.21.1",
     "fast-diff": "latest",
     "i18next": "latest",
     "minisearch": "^7.2.0",
+    "prosemirror-model": "^1.25.11",
     "prosemirror-state": "latest",
     "prosemirror-view": "latest",
     "react": "latest",
     "react-dom": "latest",
     "react-i18next": "latest",
+    "ws": "^8.21.1",
     "y-codemirror.next": "^0.3.5",
-    "yjs": "latest",
-    "prosemirror-model": "^1.25.11"
+    "yjs": "latest"
   },
   "devDependencies": {
     "@stele/server": "workspace:*",
     "@types/node": "latest",
     "@types/react": "latest",
-    "@types/ws": "latest",
     "@types/react-dom": "latest",
+    "@types/ws": "latest",
     "electron": "latest",
+    "electron-builder": "^26.15.3",
     "esbuild": "latest",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10"

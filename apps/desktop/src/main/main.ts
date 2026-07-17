@@ -204,7 +204,7 @@ void app.whenReady().then(async () => {
   });
   windows.add(win);
   win.on("closed", () => windows.delete(win));
-  await win.loadFile(path.join(__dirname, "..", "src", "renderer", "index.html"));
+  await win.loadFile(path.join(__dirname, "index.html"));
 
   if (SMOKE) {
     try {
