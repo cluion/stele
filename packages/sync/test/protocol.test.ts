@@ -17,6 +17,11 @@ const clientCases: ClientMessage[] = [
   { type: "snapshotPush", docId: "doc-2", uptoSeq: 7, payload: new Uint8Array(1024).fill(9) },
   { type: "snapshotPull", docId: "doc-2" },
   { type: "awareness", docId: "doc-1", payload: new Uint8Array([3, 1, 4, 1, 5]) },
+  { type: "shareCreate", reqId: 1, docId: "doc-1", permission: "read" },
+  { type: "shareCreate", reqId: 99, docId: "doc-2", permission: "write" },
+  { type: "shareList", reqId: 2 },
+  { type: "shareRevoke", reqId: 3, shareId: "AbC123xyz" },
+  { type: "shareAuth", shareId: "AbC123xyz" },
 ];
 
 const serverCases: ServerMessage[] = [
@@ -35,6 +40,18 @@ const serverCases: ServerMessage[] = [
   { type: "snapshotAck", docId: "doc-2", uptoSeq: 7 },
   { type: "error", code: "bad-token", message: "token 錯誤" },
   { type: "awareness", docId: "doc-1", payload: new Uint8Array([9, 8, 7]) },
+  { type: "shareCreated", reqId: 1, shareId: "AbC123xyz" },
+  { type: "shareCatalog", reqId: 2, shares: [] },
+  {
+    type: "shareCatalog",
+    reqId: 2,
+    shares: [
+      { shareId: "s1", docId: "doc-1", permission: "read", revoked: false },
+      { shareId: "s2", docId: "doc-2", permission: "write", revoked: true },
+    ],
+  },
+  { type: "shareAuthOk", docId: "doc-1", permission: "read", headSeq: 5, snapshotSeq: 3 },
+  { type: "shareAuthOk", docId: "doc-2", permission: "write", headSeq: 0, snapshotSeq: 0 },
 ];
 
 describe("同步協議編解碼", () => {

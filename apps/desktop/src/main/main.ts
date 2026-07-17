@@ -93,6 +93,7 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
     const cipher = new VaultCipher(await deriveVaultKey(syncSettings.passphrase, syncSettings.vaultId));
     syncManager = new SyncManager(next, syncSettings, broadcastSyncStatus, {
       cipher,
+      exportDocKey: (docId) => cipher.exportDocKey(docId),
       onPresence: (rel, participants) => {
         for (const w of windows) {
           if (!w.isDestroyed()) w.webContents.send("presence:update", rel, participants);
@@ -134,6 +135,19 @@ ipcMain.on("presence:active", (_e, rel: unknown) => {
 ipcMain.on("presence:cursor", (_e, rel: unknown, cursor: unknown) => {
   if (typeof rel !== "string") return;
   syncManager?.setCursor(rel, cursor && typeof cursor === "object" ? { cur: cursor } : null);
+});
+
+ipcMain.handle("share:create", (_e, rel: unknown, permission: unknown) => {
+  if (!syncManager) throw new Error("同步未啟用,無法建立分享");
+  if (typeof rel !== "string") throw new Error("非法 rel");
+  return syncManager.createShareLink(rel, permission === "write" ? "write" : "read");
+});
+
+ipcMain.handle("share:list", () => syncManager?.listShares() ?? []);
+
+ipcMain.handle("share:revoke", (_e, shareId: unknown) => {
+  if (!syncManager || typeof shareId !== "string") throw new Error("非法請求");
+  return syncManager.revokeShare(shareId);
 });
 
 ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {

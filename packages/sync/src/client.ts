@@ -6,6 +6,8 @@ import {
   type ClientMessage,
   type ServerMessage,
   type DocHead,
+  type ShareInfo,
+  type SharePermission,
 } from "./protocol.ts";
 import { identityCipher, type Cipher } from "./cipher.ts";
 
@@ -109,6 +111,9 @@ export class SyncClient {
   private readonly awareness = new Map<string, AwarenessEntry>();
   private awarenessTimer: ReturnType<typeof setInterval> | undefined;
   private serverHeads = new Map<string, DocHead>();
+  /** 分享管理請求以 reqId 對應回覆 */
+  private readonly pendingShare = new Map<number, { resolve: (value: unknown) => void; reject: (err: Error) => void }>();
+  private shareReqId = 0;
   /** 訊息依到達順序處理,避免非同步解密造成亂序套用 */
   private rx: Promise<void> = Promise.resolve();
 
@@ -143,7 +148,37 @@ export class SyncClient {
     socket?.close();
     this.online = false;
     this.setStatus("offline");
+    this.rejectPendingShares();
     await this.rx;
+  }
+
+  private rejectPendingShares(): void {
+    for (const { reject } of this.pendingShare.values()) reject(new Error("連線已關閉"));
+    this.pendingShare.clear();
+  }
+
+  /** 為某 doc 建立分享,回傳伺服器產生的 shareId(URL 與金鑰由呼叫端組) */
+  createShare(docId: string, permission: SharePermission): Promise<string> {
+    return this.shareRequest((reqId) => ({ type: "shareCreate", reqId, docId, permission }));
+  }
+
+  /** 列出本 vault 全部分享(含已撤銷) */
+  listShares(): Promise<ShareInfo[]> {
+    return this.shareRequest((reqId) => ({ type: "shareList", reqId }));
+  }
+
+  /** 撤銷分享,回傳撤銷後的分享清單 */
+  revokeShare(shareId: string): Promise<ShareInfo[]> {
+    return this.shareRequest((reqId) => ({ type: "shareRevoke", reqId, shareId }));
+  }
+
+  private shareRequest<T>(build: (reqId: number) => ClientMessage): Promise<T> {
+    if (!this.online) return Promise.reject(new Error("離線,無法管理分享"));
+    const reqId = ++this.shareReqId;
+    return new Promise<T>((resolve, reject) => {
+      this.pendingShare.set(reqId, { resolve: resolve as (value: unknown) => void, reject });
+      this.send(build(reqId));
+    });
   }
 
   /** UI 設定本地 awareness(游標/選取/在線);null = 清除本地狀態 */
@@ -180,6 +215,7 @@ export class SyncClient {
       this.socket = undefined;
       this.online = false;
       this.setStatus("offline");
+      this.rejectPendingShares(); // 未回覆的分享請求不留懸空 promise
       this.scheduleReconnect();
     };
   }
@@ -270,6 +306,16 @@ export class SyncClient {
         // 解密失敗(密語錯)由 rx 的 catch 吞掉,對端就是看不到,不影響同步
         const update = await this.cipher.decrypt(msg.docId, msg.payload);
         awarenessProtocol.applyAwarenessUpdate(entry.aw, update, "remote");
+        break;
+      }
+      case "shareCreated": {
+        this.pendingShare.get(msg.reqId)?.resolve(msg.shareId);
+        this.pendingShare.delete(msg.reqId);
+        break;
+      }
+      case "shareCatalog": {
+        this.pendingShare.get(msg.reqId)?.resolve(msg.shares);
+        this.pendingShare.delete(msg.reqId);
         break;
       }
       case "error":

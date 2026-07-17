@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Stele 分享</title>
+    <style>
+      :root {
+        --bg: #faf8f3;
+        --fg: #2b2620;
+        --muted: #8a8175;
+        --rule: #e6e0d4;
+        --accent: #0e7b93;
+        --maxw: 42rem;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1a1712;
+          --fg: #e8e2d6;
+          --muted: #9a9184;
+          --rule: #332e26;
+          --accent: #57c2d6;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.7 -apple-system, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+      }
+      header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 1rem;
+        max-width: var(--maxw);
+        margin: 0 auto;
+        padding: 1rem 1.25rem;
+        border-bottom: 1px solid var(--rule);
+      }
+      .brand { font-weight: 700; letter-spacing: 0.02em; }
+      .brand span { color: var(--muted); font-weight: 400; margin-left: 0.5rem; font-size: 0.85em; }
+      #status { color: var(--muted); font-size: 0.85rem; }
+      main { max-width: var(--maxw); margin: 0 auto; padding: 1.5rem 1.25rem 6rem; }
+      #error {
+        max-width: var(--maxw);
+        margin: 3rem auto;
+        padding: 1.25rem 1.5rem;
+        border: 1px solid var(--rule);
+        border-radius: 0.5rem;
+        color: var(--muted);
+        text-align: center;
+      }
+      #content h1, #content h2, #content h3 { line-height: 1.3; margin: 1.6em 0 0.6em; }
+      #content h1 { font-size: 1.7rem; }
+      #content h2 { font-size: 1.35rem; }
+      #content h3 { font-size: 1.1rem; }
+      #content p { margin: 0.9em 0; }
+      #content a { color: var(--accent); }
+      #content code {
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        font-size: 0.9em;
+        background: color-mix(in srgb, var(--rule) 55%, transparent);
+        padding: 0.12em 0.35em;
+        border-radius: 0.25em;
+      }
+      #content pre {
+        background: color-mix(in srgb, var(--rule) 40%, transparent);
+        padding: 0.9rem 1rem;
+        border-radius: 0.5rem;
+        overflow-x: auto;
+      }
+      #content pre code { background: none; padding: 0; }
+      #content blockquote {
+        margin: 1em 0;
+        padding-left: 1rem;
+        border-left: 3px solid var(--rule);
+        color: var(--muted);
+      }
+      #content ul, #content ol { padding-left: 1.4rem; }
+      #content table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+      #content th, #content td { border: 1px solid var(--rule); padding: 0.4rem 0.6rem; }
+      #content .wikilink { color: var(--accent); text-decoration: none; border-bottom: 1px dashed currentColor; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="brand">Stele<span>唯讀分享</span></div>
+      <div id="status">連線中…</div>
+    </header>
+    <main>
+      <div id="error" hidden></div>
+      <article id="content"></article>
+    </main>
+    <script src="/viewer.js"></script>
+  </body>
+</html>

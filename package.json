@@ -9,7 +9,7 @@
   },
   "scripts": {
     "lint": "eslint .",
-    "typecheck": "pnpm --filter @stele/editor-core exec tsc --noEmit && pnpm --filter @stele/desktop exec tsc --noEmit && pnpm --filter @stele/sync exec tsc --noEmit && pnpm --filter @stele/server exec tsc --noEmit",
+    "typecheck": "pnpm --filter @stele/editor-core exec tsc --noEmit && pnpm --filter @stele/desktop exec tsc --noEmit && pnpm --filter @stele/sync exec tsc --noEmit && pnpm --filter @stele/server exec tsc --noEmit && pnpm --filter @stele/viewer exec tsc --noEmit",
     "test": "pnpm -r test",
     "licenses:check": "node scripts/check-licenses.mjs",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm licenses:check"

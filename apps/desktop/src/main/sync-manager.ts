@@ -6,6 +6,8 @@ import {
   SyncClient,
   type AwarenessState,
   type Cipher,
+  type ShareInfo,
+  type SharePermission,
   type SocketLike,
   type SyncDocState,
   type SyncHost,
@@ -34,6 +36,11 @@ export interface SyncSettings {
   displayName?: string;
 }
 
+/** 一則分享連結(供 UI 呈現與撤銷);rel 由 docId 反查,遠端未物化的 doc 可能為 undefined */
+export interface ShareEntry extends ShareInfo {
+  rel: string | undefined;
+}
+
 /** 一位在場協作者(已排除自己) */
 export interface Participant {
   clientId: number;
@@ -49,6 +56,17 @@ function colorFor(deviceId: string): string {
   let h = 0;
   for (const ch of deviceId) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return PRESENCE_COLORS[h % PRESENCE_COLORS.length]!;
+}
+
+/** 由 ws(s) 同步網址推導檢視器的 http(s) 基底;分享頁與 WS 同一台伺服器同一埠 */
+function httpBaseFrom(wsUrl: string): string {
+  try {
+    const u = new URL(wsUrl);
+    const scheme = u.protocol === "wss:" ? "https:" : "http:";
+    return `${scheme}//${u.host}`;
+  } catch {
+    return "";
+  }
 }
 
 interface PersistedDocState {
@@ -75,6 +93,8 @@ export class SyncManager {
   private fsOps: Promise<void> = Promise.resolve();
   status: SyncStatus = "offline";
   private readonly self: { deviceId: string; name: string; color: string };
+  private exportDocKey: ((docId: string) => Promise<Uint8Array>) | undefined;
+  private readonly shareBase: string;
   /** 目前開著的筆記:切換時把在場宣告從舊 doc 移到新 doc */
   private activeRel: string | undefined;
 
@@ -87,6 +107,8 @@ export class SyncManager {
       snapshotThreshold?: number;
       cipher?: Cipher;
       onPresence?: (rel: string, participants: Participant[]) => void;
+      /** 匯出某 doc 的原始金鑰,供分享連結放進 URL fragment;未提供則無法建立分享 */
+      exportDocKey?: (docId: string) => Promise<Uint8Array>;
     },
   ) {
     this.self = {
@@ -95,6 +117,8 @@ export class SyncManager {
       color: colorFor(settings.deviceId),
     };
     this.onPresence = tuning?.onPresence;
+    this.exportDocKey = tuning?.exportDocKey;
+    this.shareBase = httpBaseFrom(settings.url);
     this.metaFile = path.join(session.root, ".stele", "meta.ybin");
     this.stateFile = path.join(session.root, ".stele", "sync-state.json");
     this.paths = this.meta.getMap("paths");
@@ -155,6 +179,28 @@ export class SyncManager {
       color: this.self.color,
       ...(cursor ?? {}),
     });
+  }
+
+  /** 為某篇筆記建立分享連結:金鑰放進 URL fragment(不進伺服器),回傳完整連結 */
+  async createShareLink(rel: string, permission: SharePermission): Promise<{ shareId: string; url: string; permission: SharePermission }> {
+    if (!this.exportDocKey) throw new Error("此 vault 未啟用 E2EE,無法建立分享");
+    if (!this.shareBase) throw new Error("同步網址無效,無法組出分享連結");
+    const docId = this.session.peekDocId(rel) ?? this.session.docId(rel);
+    const shareId = await this.client.createShare(docId, permission);
+    const key = await this.exportDocKey(docId);
+    const url = `${this.shareBase}/s/${shareId}#k=${Buffer.from(key).toString("base64url")}`;
+    return { shareId, url, permission };
+  }
+
+  /** 列出本 vault 全部分享,附上可讀的相對路徑 */
+  async listShares(): Promise<ShareEntry[]> {
+    const shares = await this.client.listShares();
+    return shares.map((s) => ({ ...s, rel: this.session.relForDocId(s.docId) }));
+  }
+
+  async revokeShare(shareId: string): Promise<ShareEntry[]> {
+    const shares = await this.client.revokeShare(shareId);
+    return shares.map((s) => ({ ...s, rel: this.session.relForDocId(s.docId) }));
   }
 
   private emitPresence(docId: string, states: Map<number, AwarenessState>): void {

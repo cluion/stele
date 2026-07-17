@@ -45,6 +45,27 @@ export interface SteleApi {
   setCursor(rel: string, cursor: Record<string, unknown> | null): void;
   /** 在場協作者變化;回傳退訂函式 */
   onPresence(cb: (rel: string, participants: Participant[]) => void): () => void;
+  /** 為某篇筆記建立分享連結(唯讀/可編輯);金鑰在 fragment 不進伺服器 */
+  createShare(rel: string, permission: SharePermission): Promise<ShareLink>;
+  /** 列出本 vault 全部分享(含已撤銷) */
+  listShares(): Promise<ShareEntry[]>;
+  revokeShare(shareId: string): Promise<ShareEntry[]>;
+}
+
+export type SharePermission = "read" | "write";
+
+export interface ShareLink {
+  shareId: string;
+  url: string;
+  permission: SharePermission;
+}
+
+export interface ShareEntry {
+  shareId: string;
+  docId: string;
+  permission: SharePermission;
+  revoked: boolean;
+  rel: string | undefined;
 }
 
 export interface Participant {
@@ -90,6 +111,9 @@ const api: SteleApi = {
     ipcRenderer.on("presence:update", handler);
     return () => ipcRenderer.off("presence:update", handler);
   },
+  createShare: (rel, permission) => ipcRenderer.invoke("share:create", rel, permission),
+  listShares: () => ipcRenderer.invoke("share:list"),
+  revokeShare: (shareId) => ipcRenderer.invoke("share:revoke", shareId),
 };
 
 contextBridge.exposeInMainWorld("stele", api);

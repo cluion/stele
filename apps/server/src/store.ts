@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import type { SharePermission, ShareInfo } from "@stele/sync";
 
 /**
  * 加密 blob 儲存層:伺服器只見 doc id 與密文,不解讀內容
@@ -33,6 +34,16 @@ CREATE TABLE IF NOT EXISTS snapshots (
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   PRIMARY KEY (vault_id, doc_id)
 );
+CREATE TABLE IF NOT EXISTS shares (
+  share_id TEXT PRIMARY KEY,
+  vault_id TEXT NOT NULL,
+  doc_id TEXT NOT NULL,
+  permission TEXT NOT NULL,
+  revoked INTEGER NOT NULL DEFAULT 0,
+  expires_at INTEGER,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS shares_by_vault ON shares (vault_id);
 `;
 
 export interface StoredUpdate {
@@ -43,6 +54,13 @@ export interface StoredUpdate {
 export interface StoredSnapshot {
   uptoSeq: number;
   payload: Uint8Array;
+}
+
+/** 分享一經解析出的作用域:連線被鎖定在這個 vault 的單一 doc 與權限 */
+export interface ShareScope {
+  vaultId: string;
+  docId: string;
+  permission: SharePermission;
 }
 
 export class SyncStore {
@@ -116,6 +134,37 @@ export class SyncStore {
       )
       .all(vaultId) as Array<{ docId: string; headSeq: number; snapshotSeq: number }>;
     return rows;
+  }
+
+  /** 建立分享:shareId 由伺服器產生的不可猜亂數,擁有者的憑證(可否分享)由 vault 認證把關 */
+  createShare(shareId: string, vaultId: string, docId: string, permission: SharePermission, expiresAt?: number): void {
+    this.db
+      .prepare("INSERT INTO shares (share_id, vault_id, doc_id, permission, expires_at) VALUES (?, ?, ?, ?, ?)")
+      .run(shareId, vaultId, docId, permission, expiresAt ?? null);
+  }
+
+  /** 解析分享作用域;已撤銷或已過期一律視為不存在,收件人得到的是查無此分享 */
+  resolveShare(shareId: string): ShareScope | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT vault_id, doc_id, permission FROM shares " +
+          "WHERE share_id = ? AND revoked = 0 AND (expires_at IS NULL OR expires_at > unixepoch())",
+      )
+      .get(shareId) as { vault_id: string; doc_id: string; permission: SharePermission } | undefined;
+    return row && { vaultId: row.vault_id, docId: row.doc_id, permission: row.permission };
+  }
+
+  /** 撤銷分享;限本 vault,避免猜到他人 shareId 就能撤銷 */
+  revokeShare(vaultId: string, shareId: string): void {
+    this.db.prepare("UPDATE shares SET revoked = 1 WHERE share_id = ? AND vault_id = ?").run(shareId, vaultId);
+  }
+
+  /** 列出某 vault 的所有分享(含已撤銷,擁有者需看得到歷史) */
+  listShares(vaultId: string): ShareInfo[] {
+    const rows = this.db
+      .prepare("SELECT share_id, doc_id, permission, revoked FROM shares WHERE vault_id = ? ORDER BY created_at DESC")
+      .all(vaultId) as Array<{ share_id: string; doc_id: string; permission: SharePermission; revoked: number }>;
+    return rows.map((r) => ({ shareId: r.share_id, docId: r.doc_id, permission: r.permission, revoked: r.revoked === 1 }));
   }
 
   close(): void {

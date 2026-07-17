@@ -152,6 +152,37 @@ importers:
         specifier: latest
         version: 13.6.31
 
+  apps/viewer:
+    dependencies:
+      '@stele/editor-core':
+        specifier: workspace:*
+        version: link:../../packages/editor-core
+      '@stele/sync':
+        specifier: workspace:*
+        version: link:../../packages/sync
+      '@stele/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
+      prosemirror-model:
+        specifier: ^1.25.11
+        version: 1.25.11
+      yjs:
+        specifier: latest
+        version: 13.6.31
+    devDependencies:
+      '@types/node':
+        specifier: latest
+        version: 26.1.1
+      esbuild:
+        specifier: latest
+        version: 0.28.1
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@26.1.1)(vite@8.1.4(@types/node@26.1.1)(esbuild@0.28.1))
+
   packages/editor-core:
     dependencies:
       '@types/markdown-it':

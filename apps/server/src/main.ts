@@ -8,8 +8,9 @@ async function main(): Promise<void> {
   const config = loadConfig();
   mkdirSync(path.dirname(config.dbFile), { recursive: true });
   const store = new SyncStore(config.dbFile);
-  const server = await startServer({ port: config.port, token: config.token, store });
+  const server = await startServer({ port: config.port, token: config.token, store, viewerDir: config.viewerDir });
   console.log(`Stele 同步伺服器啟動,port ${server.port},資料庫 ${config.dbFile}`);
+  console.log(`分享檢視器靜態目錄:${config.viewerDir}(唯讀分享頁 /s/<id>)`);
 
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => {

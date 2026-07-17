@@ -6,9 +6,11 @@ export {
   type ClientMessage,
   type ServerMessage,
   type DocHead,
+  type SharePermission,
+  type ShareInfo,
 } from "./protocol.ts";
 export { identityCipher, digest, type Cipher } from "./cipher.ts";
-export { deriveVaultKey, VaultCipher } from "./crypto.ts";
+export { deriveVaultKey, VaultCipher, ShareCipher } from "./crypto.ts";
 export {
   SyncClient,
   type SyncClientOptions,
@@ -18,3 +20,4 @@ export {
   type SyncStatus,
   type AwarenessState,
 } from "./client.ts";
+export { ShareClient, type ShareClientOptions } from "./share-client.ts";
