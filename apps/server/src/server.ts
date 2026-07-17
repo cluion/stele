@@ -209,13 +209,14 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         refuse("bad-message", "非法 id");
         return;
       }
-      // share 連線鎖定單一 doc:別的 doc 一律拒;唯讀分享不得寫入
+      // share 連線鎖定單一 doc:別的 doc 一律拒;唯讀分享只准讀取類訊息
       if (scope !== undefined) {
         if (msg.docId !== scope.docId) {
           refuse("forbidden", "超出分享範圍");
           return;
         }
-        if (msg.type === "push" && scope.permission !== "write") {
+        // 白名單:唯讀作用域只放行 pull/snapshotPull/awareness,push 與 snapshotPush 等寫入型一律拒
+        if (scope.permission !== "write" && msg.type !== "pull" && msg.type !== "snapshotPull" && msg.type !== "awareness") {
           refuse("forbidden", "唯讀分享不得寫入");
           return;
         }

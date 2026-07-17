@@ -114,6 +114,17 @@ describe("分享連結", () => {
     owner.close();
   });
 
+  it("唯讀分享:snapshotPush 也被拒,不得覆寫快照或截斷增量", async () => {
+    const { owner, shareId } = await makeShare("vault-唯讀快照", "doc-唯讀快照", "read");
+    const guest = new Client(server.port);
+    await guest.shareAuth(shareId);
+    // snapshotPush 會呼叫 saveSnapshot 覆寫並截斷,是寫入操作,唯讀連線必須擋
+    guest.send({ type: "snapshotPush", docId: "doc-唯讀快照", uptoSeq: 1, payload: new Uint8Array([0, 0]) });
+    expect((await guest.next("error")).code).toBe("forbidden");
+    await guest.closed;
+    owner.close();
+  });
+
   it("可編輯分享:收件人推送被接受,owner 收到廣播", async () => {
     const { owner, shareId } = await makeShare("vault-可編輯", "doc-可編輯", "write");
     const guest = new Client(server.port);
