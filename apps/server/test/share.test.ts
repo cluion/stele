@@ -204,6 +204,69 @@ describe("分享連結", () => {
     owner.close();
   });
 
+  it("撤銷立即踢掉既有連線,撤銷後的內容一個字都拿不到", async () => {
+    const { owner, shareId } = await makeShare("vault-撤銷即時", "doc-撤銷即時", "read");
+    const guest = new Client(server.port);
+    await guest.shareAuth(shareId);
+
+    owner.send({ type: "shareRevoke", reqId: 2, shareId });
+    await owner.next("shareCatalog");
+
+    // 收件人應收到與「分享不存在」相同的錯誤,ShareClient 據此停止且不重連
+    expect((await guest.next("error")).code).toBe("no-share");
+    await guest.closed;
+
+    // 撤銷後 owner 續寫:已被踢的連線不可能再收到任何更新
+    owner.send({ type: "push", docId: "doc-撤銷即時", deviceId: "owner", counter: 2, payload: new Uint8Array([7]) });
+    await owner.next("ack");
+    expect(guest.peekInbox().some((m) => m.type === "update")).toBe(false);
+    owner.close();
+  });
+
+  it("撤銷只踢該分享的連線,同 vault 的其他連線不受影響", async () => {
+    const { owner, shareId } = await makeShare("vault-撤銷隔離", "doc-撤銷隔離", "read");
+    owner.send({ type: "shareCreate", reqId: 8, docId: "doc-撤銷隔離", permission: "read" });
+    const other = (await owner.next("shareCreated")).shareId;
+
+    const victim = new Client(server.port);
+    await victim.shareAuth(shareId);
+    const bystander = new Client(server.port);
+    await bystander.shareAuth(other);
+
+    owner.send({ type: "shareRevoke", reqId: 9, shareId });
+    await owner.next("shareCatalog");
+    await victim.closed;
+
+    // 另一則分享仍活著:續寫仍收得到
+    owner.send({ type: "push", docId: "doc-撤銷隔離", deviceId: "owner", counter: 2, payload: new Uint8Array([5]) });
+    await owner.next("ack");
+    const update = await bystander.next("update");
+    expect(Array.from(update.payload)).toEqual([5]);
+    bystander.close();
+    owner.close();
+  });
+
+  it("撤銷不跨 vault:猜中他人 shareId 也踢不掉對方的連線", async () => {
+    const { owner: victimOwner, shareId } = await makeShare("vault-受害", "doc-受害", "read");
+    const guest = new Client(server.port);
+    await guest.shareAuth(shareId);
+
+    // 別的 vault 的 owner 拿著猜到的 shareId 撤銷:DB 因 vault 不符不會動,連線也不該被踢
+    const attacker = new Client(server.port);
+    await attacker.auth("vault-攻擊者");
+    attacker.send({ type: "shareRevoke", reqId: 3, shareId });
+    await attacker.next("shareCatalog");
+    await new Promise((r) => setTimeout(r, 150));
+
+    victimOwner.send({ type: "push", docId: "doc-受害", deviceId: "owner", counter: 2, payload: new Uint8Array([6]) });
+    await victimOwner.next("ack");
+    const update = await guest.next("update");
+    expect(Array.from(update.payload)).toEqual([6]);
+    guest.close();
+    attacker.close();
+    victimOwner.close();
+  });
+
   it("查無此分享:亂猜 shareId 認證被拒", async () => {
     const guest = new Client(server.port);
     await guest.open();

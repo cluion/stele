@@ -93,6 +93,8 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
   const alive = new WeakSet<WebSocket>();
   // 分享連線的 doc 作用域:值為受限 docId 時,只收得到該 doc 的廣播;owner 連線不入此表(全收)
   const restrictedDoc = new WeakMap<WebSocket, string>();
+  // shareId → 以它認證的連線:撤銷要能即時踢人,否則作用域只在認證當下查一次,已連線者可續讀到天荒地老
+  const shareConns = new Map<string, Set<WebSocket>>();
   const genShareId = (): string => randomBytes(16).toString("base64url");
 
   // 死連線偵測:兩輪沒回 pong 就終止,避免 vaults 累積殭屍連線
@@ -111,6 +113,7 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
     // vaultId 是連線所屬 vault;share 連線 scope 非 undefined,被鎖在單一 doc 與權限
     let vaultId: string | undefined;
     let scope: ShareScope | undefined;
+    let shareId: string | undefined;
     const authTimer = setTimeout(() => ws.close(4401, "未認證"), AUTH_TIMEOUT_MS);
     alive.add(ws);
     ws.on("pong", () => alive.add(ws));
@@ -169,7 +172,11 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
       }
       scope = resolved;
       vaultId = resolved.vaultId;
+      shareId = msg.shareId;
       restrictedDoc.set(ws, resolved.docId);
+      const conns = shareConns.get(msg.shareId) ?? new Set<WebSocket>();
+      conns.add(ws);
+      shareConns.set(msg.shareId, conns);
       clearTimeout(authTimer);
       joinVault(vaultId);
       const head = opts.store.headSeqs(vaultId).find((d) => d.docId === resolved.docId);
@@ -208,10 +215,20 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         case "shareList":
           send({ type: "shareCatalog", reqId: msg.reqId, shares: opts.store.listShares(vault) });
           break;
-        case "shareRevoke":
-          opts.store.revokeShare(vault, msg.shareId);
+        case "shareRevoke": {
+          // 只有真的撤銷到(shareId 確實屬於此 vault)才踢連線,否則猜中他人 shareId 就能跨 vault 誤踢
+          if (opts.store.revokeShare(vault, msg.shareId)) {
+            // 落盤撤銷只擋新連線;既有連線得當場切斷,否則撤銷形同虛設
+            for (const peer of shareConns.get(msg.shareId) ?? []) {
+              if (peer.readyState !== WebSocket.OPEN) continue;
+              peer.send(encodeServerMessage({ type: "error", code: "no-share", message: "分享不存在或已失效" }));
+              peer.close();
+            }
+            shareConns.delete(msg.shareId);
+          }
           send({ type: "shareCatalog", reqId: msg.reqId, shares: opts.store.listShares(vault) });
           break;
+        }
       }
     };
 
@@ -293,6 +310,11 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
     ws.on("close", () => {
       clearTimeout(authTimer);
       restrictedDoc.delete(ws);
+      if (shareId !== undefined) {
+        const conns = shareConns.get(shareId);
+        conns?.delete(ws);
+        if (conns && conns.size === 0) shareConns.delete(shareId); // 不留空 Set,shareConns 是強引用 Map
+      }
       if (vaultId === undefined) return;
       const peers = vaults.get(vaultId);
       peers?.delete(ws);

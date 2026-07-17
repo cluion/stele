@@ -155,8 +155,10 @@ export class SyncStore {
   }
 
   /** 撤銷分享;限本 vault,避免猜到他人 shareId 就能撤銷 */
-  revokeShare(vaultId: string, shareId: string): void {
-    this.db.prepare("UPDATE shares SET revoked = 1 WHERE share_id = ? AND vault_id = ?").run(shareId, vaultId);
+  /** 回傳是否真的撤銷到:vault 不符時為 false,呼叫端據此決定要不要踢連線,免得跨 vault 誤踢 */
+  revokeShare(vaultId: string, shareId: string): boolean {
+    const info = this.db.prepare("UPDATE shares SET revoked = 1 WHERE share_id = ? AND vault_id = ?").run(shareId, vaultId);
+    return info.changes > 0;
   }
 
   /** 列出某 vault 的所有分享(含已撤銷,擁有者需看得到歷史) */
