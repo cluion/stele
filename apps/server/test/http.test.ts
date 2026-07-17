@@ -8,12 +8,15 @@ import { startServer, type RunningServer } from "../src/server.ts";
 
 const TOKEN = "測試用-token-1234567890";
 
-function fetchText(port: number, path: string): Promise<{ status: number; body: string }> {
+function fetchText(
+  port: number,
+  path: string,
+): Promise<{ status: number; body: string; headers: Record<string, string | string[] | undefined> }> {
   return new Promise((resolve, reject) => {
     get({ host: "127.0.0.1", port, path }, (res) => {
       let body = "";
       res.on("data", (c) => (body += c));
-      res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, body, headers: res.headers }));
     }).on("error", reject);
   });
 }
@@ -54,6 +57,22 @@ describe("分享檢視器靜態服務", () => {
     const res = await fetchText(server.port, "/viewer.js");
     expect(res.status).toBe(200);
     expect(res.body).toContain("viewer");
+  });
+
+  it("分享頁帶 CSP:預設全擋、腳本只信同源、不可被內嵌", async () => {
+    const csp = String((await fetchText(server.port, "/s/AbC123")).headers["content-security-policy"] ?? "");
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("script-src 'self'"); // 沒有 unsafe-inline/unsafe-eval
+    expect(csp).not.toContain("unsafe-eval");
+    expect(csp).toContain("connect-src 'self'"); // ws 回同源伺服器
+    expect(csp).toContain("frame-ancestors 'none'"); // meta 版會被忽略,故下在 header
+    expect(csp).toContain("base-uri 'none'");
+    expect(csp).toContain("form-action 'none'");
+  });
+
+  it("靜態回應帶 nosniff", async () => {
+    const res = await fetchText(server.port, "/viewer.js");
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
   });
 
   it("未知路徑回 404,不吃使用者路徑", async () => {

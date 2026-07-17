@@ -23,6 +23,22 @@ const CONTENT_TYPE: Record<string, string> = {
   "viewer.js.map": "application/json; charset=utf-8",
 };
 
+/**
+ * 檢視器渲染的是別人的筆記,CSP 是內容層淨化之外的第二道防線
+ * 下在 header 而非 <meta>:frame-ancestors 在 meta 版會被瀏覽器忽略
+ * connect-src 'self' 涵蓋回同源伺服器的 ws/wss;style 走 index.html 的 inline <style>
+ */
+const CSP = [
+  "default-src 'none'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: https:",
+  "connect-src 'self'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+].join("; ");
+
 /** 靜態檔案只認允許清單,不吃使用者路徑,天然免於路徑穿越 */
 function makeRequestHandler(viewerDir: string | undefined) {
   return (req: IncomingMessage, res: ServerResponse): void => {
@@ -51,6 +67,9 @@ function makeRequestHandler(viewerDir: string | undefined) {
       res.writeHead(200, {
         "content-type": CONTENT_TYPE[file] ?? "application/octet-stream",
         "cache-control": file === "index.html" ? "no-cache" : "public, max-age=3600",
+        "content-security-policy": CSP,
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer", // 金鑰在 fragment,但外連圖片/連結一律不帶 referrer
       });
       res.end(body);
     } catch {

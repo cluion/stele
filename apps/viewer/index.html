@@ -4,6 +4,15 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex" />
+    <!--
+      縱深防禦:伺服器已下同名 header(且含 meta 版會被忽略的 frame-ancestors),
+      這份是自行托管靜態檔、繞過 Stele 伺服器時的保底。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="referrer" content="no-referrer" />
     <title>Stele 分享</title>
     <style>
       :root {
