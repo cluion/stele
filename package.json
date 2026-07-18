@@ -4,6 +4,7 @@
   "version": "0.4.0",
   "description": "Local-first knowledge base. Carved to last.",
   "license": "MIT",
+  "packageManager": "pnpm@10.29.3",
   "engines": {
     "node": ">=24"
   },
