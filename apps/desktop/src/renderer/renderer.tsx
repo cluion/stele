@@ -11,7 +11,7 @@ import { createSourceView, topBlockCM, scrollToBlockCM, type SourceView } from "
 import { encodeCursor, participantCursor, throttle, type RemoteCursor } from "./remote-cursors.ts";
 import { remoteCursorPlugin, remoteCursorKey, type BlockCursor } from "./wysiwyg-cursors.ts";
 import { GraphView } from "./graph-view.tsx";
-import type { SteleApi, BacklinkItem, VaultInfo, Participant, ShareEntry } from "../main/preload.ts";
+import type { SteleApi, BacklinkItem, VaultInfo, Participant, ShareEntry, SharePermission } from "../main/preload.ts";
 
 type EditorMode = "wysiwyg" | "source";
 
@@ -535,13 +535,17 @@ function SearchModal({ onPick, onClose }: { onPick: (rel: string) => void; onClo
   );
 }
 
-function Welcome({ onChoose }: { onChoose: () => void }) {
+function Welcome({ onChoose, onOpenShare }: { onChoose: () => void; onOpenShare: () => void }) {
   const { t } = useTranslation();
   return (
     <div className="welcome">
       <h1>Stele</h1>
       <p>{t("welcome.tagline")}</p>
       <button onClick={onChoose}>{t("welcome.open")}</button>
+      {/* 沒有 vault 的純消費者也能貼分享連結開臨時協作 */}
+      <button className="welcome-secondary" onClick={onOpenShare}>
+        {t("open.shared")}
+      </button>
     </div>
   );
 }
@@ -641,6 +645,147 @@ function ShareDialog({ rel, onClose }: { rel: string; onClose: () => void }) {
   );
 }
 
+interface SharedState {
+  status: string;
+  permission?: SharePermission;
+  synced: boolean;
+  closed?: string;
+}
+
+/** 共享筆記編輯器:綁定 main 端臨時協作 doc(shared:* IPC),唯讀時關閉輸入 */
+function SharedEditor({ readOnly }: { readOnly: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [ytext, setYtext] = useState<Y.Text | undefined>();
+
+  useEffect(() => {
+    let cancelled = false;
+    const ydoc = new Y.Doc();
+    // 先訂閱再取快照:bootstrap 串流的任何空窗都由 CRDT 冪等套用補上
+    ydoc.on("update", (update: Uint8Array, origin: unknown) => {
+      if (origin !== "main") window.stele.pushShared(update);
+    });
+    const unsubscribe = window.stele.onSharedUpdate((update) => Y.applyUpdate(ydoc, update, "main"));
+    void window.stele.openShared().then((snapshot) => {
+      if (cancelled) return;
+      if (snapshot) Y.applyUpdate(ydoc, snapshot, "main");
+      setYtext(ydoc.getText("md"));
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      ydoc.destroy();
+      setYtext(undefined);
+    };
+  }, []);
+
+  useEffect(() => {
+    const host = ref.current;
+    if (!ytext || !host) return;
+    const binding = new SteleBinding(ytext);
+    const view = new EditorView(host, {
+      state: binding.state,
+      editable: () => !readOnly,
+      dispatchTransaction: (tr) => binding.dispatch(tr),
+    });
+    binding.onStateChange = (state) => view.updateState(state);
+    return () => {
+      binding.destroy();
+      view.destroy();
+    };
+  }, [ytext, readOnly]);
+
+  return (
+    <div className="editor-pane">
+      <div id="editor" ref={ref} />
+    </div>
+  );
+}
+
+/** 貼上分享連結對話框:消費可編輯/唯讀連結,開臨時協作視窗 */
+function ConsumeDialog({ onOpen, onClose }: { onOpen: (url: string) => Promise<boolean>; onClose: () => void }) {
+  const { t } = useTranslation();
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const submit = (): void => {
+    if (!url.trim()) return;
+    setBusy(true);
+    setFailed(false);
+    void onOpen(url.trim()).then((ok) => {
+      if (!ok) {
+        setFailed(true);
+        setBusy(false);
+      }
+    });
+  };
+
+  return (
+    <div className="switcher-backdrop" onClick={onClose}>
+      <div className="switcher share consume" onClick={(e) => e.stopPropagation()}>
+        <h2>{t("consume.title")}</h2>
+        <p className="placeholder">{t("consume.hint")}</p>
+        <div className="share-link">
+          <input
+            autoFocus
+            placeholder={t("consume.placeholder")}
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return;
+              if (e.key === "Enter") {
+                e.preventDefault();
+                submit();
+              }
+            }}
+          />
+          <button className="primary" disabled={busy} onClick={submit}>
+            {busy ? t("consume.opening") : t("consume.open")}
+          </button>
+        </div>
+        {failed && <p className="error">{t("consume.failed")}</p>}
+      </div>
+    </div>
+  );
+}
+
+/** 共享協作全螢幕視窗:橫幅(權限/連線狀態/關閉)+ 共享編輯器 */
+function SharedView({ state, onClose }: { state: SharedState; onClose: () => void }) {
+  const { t } = useTranslation();
+  const statusKey = state.status === "online" || state.status === "offline" ? state.status : "connecting";
+  return (
+    <div className="shared-overlay">
+      <header className="shared-bar">
+        <span className="shared-title">{t("shared.title")}</span>
+        {state.permission && (
+          <span className={`shared-badge ${state.permission}`}>
+            {t(state.permission === "write" ? "shared.writable" : "shared.readonly")}
+          </span>
+        )}
+        <span className="shared-status">{t(`shared.${statusKey}`)}</span>
+        <button className="shared-close" onClick={onClose}>
+          {t("shared.close")}
+        </button>
+      </header>
+      {state.closed ? (
+        <p className="placeholder shared-revoked">{t("shared.revoked")}</p>
+      ) : !state.synced ? (
+        <p className="placeholder">{t("editor.loading")}</p>
+      ) : (
+        <SharedEditor readOnly={state.permission !== "write"} />
+      )}
+    </div>
+  );
+}
+
 function App() {
   const { t } = useTranslation();
   // undefined = 啟動查詢中,null = 尚未開啟 vault(歡迎畫面)
@@ -659,6 +804,9 @@ function App() {
   const [syncState, setSyncState] = useState("off");
   // 各筆記的在場協作者(不含自己);以 rel 為 key,切換筆記只是讀不同 key
   const [presenceByRel, setPresenceByRel] = useState<Record<string, Participant[]>>({});
+  // 消費分享連結:null = 未開共享;貼上連結對話框開關
+  const [shared, setShared] = useState<SharedState | null>(null);
+  const [consumeOpen, setConsumeOpen] = useState(false);
 
   useEffect(() => {
     void window.stele.syncStatus().then(setSyncState);
@@ -670,6 +818,31 @@ function App() {
       setPresenceByRel((prev) => ({ ...prev, [rel]: list }));
     });
   }, []);
+
+  // 共享 session 事件:只在共享開著時(shared 非 null)更新
+  useEffect(() => {
+    const offs = [
+      window.stele.onSharedStatus((status) => setShared((p) => (p ? { ...p, status } : p))),
+      window.stele.onSharedPermission((permission) => setShared((p) => (p ? { ...p, permission } : p))),
+      window.stele.onSharedSynced(() => setShared((p) => (p ? { ...p, synced: true } : p))),
+      window.stele.onSharedClosed((closed) => setShared((p) => (p ? { ...p, closed } : p))),
+    ];
+    return () => offs.forEach((off) => off());
+  }, []);
+
+  const openShared = (url: string): Promise<boolean> =>
+    window.stele.consumeShare(url).then((res) => {
+      if (res.ok) {
+        setShared({ status: "connecting", synced: false });
+        setConsumeOpen(false);
+      }
+      return res.ok;
+    });
+
+  const exitShared = (): void => {
+    setShared(null);
+    void window.stele.closeShared();
+  };
 
   // 切換筆記時通知主行程更新在場宣告
   useEffect(() => {
@@ -709,6 +882,9 @@ function App() {
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d") {
         e.preventDefault();
         openDailyRef.current();
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "o") {
+        e.preventDefault();
+        setConsumeOpen(true);
       } else if (e.key === "Escape") {
         setGraphOpen(false);
         setMenu(null);
@@ -801,8 +977,22 @@ function App() {
     void createAndOpen(name).catch((err: unknown) => console.error(`wikilink 建檔失敗 ${name}:`, err));
   };
 
+  // 消費分享連結不需 vault,故浮層在任何 vault 狀態下都掛
+  const overlays = (
+    <>
+      {consumeOpen && <ConsumeDialog onOpen={openShared} onClose={() => setConsumeOpen(false)} />}
+      {shared && <SharedView state={shared} onClose={exitShared} />}
+    </>
+  );
+
   if (vaultInfo === undefined) return null; // 啟動查詢中,避免歡迎畫面閃現
-  if (vaultInfo === null) return <Welcome onChoose={chooseVault} />;
+  if (vaultInfo === null)
+    return (
+      <>
+        <Welcome onChoose={chooseVault} onOpenShare={() => setConsumeOpen(true)} />
+        {overlays}
+      </>
+    );
 
   return (
     <div className="app">
@@ -833,6 +1023,9 @@ function App() {
             onClick={() => setGraphOpen((open) => !open)}
           >
             ◉
+          </button>
+          <button className="vault-switch" title={t("open.shared")} aria-label={t("open.shared")} onClick={() => setConsumeOpen(true)}>
+            ⇲
           </button>
           <button className="vault-switch" title={t("vault.switch")} aria-label={t("vault.switch")} onClick={chooseVault}>
             ⇄
@@ -978,6 +1171,7 @@ function App() {
         />
       )}
       {shareRel && <ShareDialog rel={shareRel} onClose={() => setShareRel(null)} />}
+      {overlays}
     </div>
   );
 }

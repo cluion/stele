@@ -6,6 +6,8 @@ import path from "node:path";
 import { VaultSession, type SessionCallbacks } from "./vault-session.ts";
 import { deriveVaultKey, VaultCipher } from "@stele/sync";
 import { SyncManager, type SyncSettings } from "./sync-manager.ts";
+import { SharedSession } from "./shared-session.ts";
+import { parseConsumeLink } from "./share-link.ts";
 import { loadSettings, saveSettings } from "./settings.ts";
 
 const SMOKE = process.argv.includes("--smoke");
@@ -16,7 +18,15 @@ const FIXTURES_VAULT = path.resolve(__dirname, "..", "..", "..", "prototypes", "
 
 let session: VaultSession | undefined;
 let syncManager: SyncManager | undefined;
+let sharedSession: SharedSession | undefined;
 const windows = new Set<BrowserWindow>();
+
+/** 送訊息給所有存活的窗 */
+function sendAll(channel: string, ...args: unknown[]): void {
+  for (const w of windows) {
+    if (!w.isDestroyed()) w.webContents.send(channel, ...args);
+  }
+}
 
 /**
  * vault 內 .stele/sync.json 有 url+token+passphrase 才啟用同步;vaultId/deviceId 首次自動配發並寫回
@@ -152,6 +162,36 @@ ipcMain.handle("share:revoke", (_e, shareId: unknown) => {
   if (!syncManager || typeof shareId !== "string") throw new Error("非法請求");
   return syncManager.revokeShare(shareId);
 });
+
+async function closeSharedSession(): Promise<void> {
+  const s = sharedSession;
+  sharedSession = undefined;
+  if (s) await s.close().catch((err: unknown) => console.error("關閉共享 session 失敗:", err));
+}
+
+// 消費可編輯/唯讀分享連結:貼上完整連結 → 臨時協作 session(金鑰留 main,不進 renderer)
+ipcMain.handle("shared:consume", async (_e, url: unknown): Promise<{ ok: boolean; error?: string }> => {
+  const link = typeof url === "string" ? parseConsumeLink(url) : undefined;
+  if (!link) return { ok: false, error: "bad-link" };
+  await closeSharedSession();
+  sharedSession = new SharedSession(link, {
+    onStatus: (s) => sendAll("shared:status", s),
+    onPermission: (p) => sendAll("shared:permission", p),
+    onSynced: () => sendAll("shared:synced"),
+    onClosed: (code) => sendAll("shared:closed", code),
+    broadcast: (update) => sendAll("shared:update", update),
+  });
+  sharedSession.start();
+  return { ok: true };
+});
+
+ipcMain.handle("shared:open", () => sharedSession?.snapshot() ?? null);
+
+ipcMain.on("shared:push", (_e, update: unknown) => {
+  if (update instanceof Uint8Array) sharedSession?.applyFromRenderer(update);
+});
+
+ipcMain.handle("shared:close", () => closeSharedSession());
 
 ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {
   if (typeof rel !== "string") throw new Error("非法參數");
@@ -532,6 +572,33 @@ void app.whenReady().then(async () => {
       shareUiOk = opened && dialogShown && errorShown && closed;
     }
 
+    // 消費分享連結 UI:點側欄「開啟分享連結」→ 貼無效連結 → 顯示錯誤 → Esc 關閉(不需伺服器)
+    let consumeUiOk = false;
+    {
+      await win.webContents.executeJavaScript(
+        `[...document.querySelectorAll(".vault-header button")].find((b) => b.getAttribute("aria-label") === "開啟分享連結")?.click()`,
+      );
+      let dialogShown = false;
+      for (let waited = 0; waited < 5000 && !dialogShown; waited += 200) {
+        await sleep(200);
+        dialogShown = await win.webContents.executeJavaScript(`!!document.querySelector(".switcher.consume input")`);
+      }
+      await win.webContents.executeJavaScript(typeInSwitcher("不是分享連結"));
+      await sleep(100);
+      await win.webContents.executeJavaScript(`document.querySelector(".switcher.consume button.primary")?.click()`);
+      let errorShown = false;
+      for (let waited = 0; waited < 5000 && !errorShown; waited += 200) {
+        await sleep(200);
+        errorShown = await win.webContents.executeJavaScript(`!!document.querySelector(".switcher.consume .error")`);
+      }
+      await win.webContents.executeJavaScript(
+        `window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }))`,
+      );
+      await sleep(300);
+      const closed = await win.webContents.executeJavaScript(`!document.querySelector(".switcher.consume")`);
+      consumeUiOk = dialogShown && errorShown && closed;
+    }
+
     // 全文搜尋:Cmd+Shift+F → 中文 bigram 查詢 → Enter 開啟唯一命中
     await win.webContents.executeJavaScript(
       `window.dispatchEvent(new KeyboardEvent("keydown", { key: "f", metaKey: true, shiftKey: true, cancelable: true }))`,
@@ -594,10 +661,11 @@ void app.whenReady().then(async () => {
     console.log(renameOk ? "SMOKE ✅ 改名搬移檔案" : "SMOKE ❌ 改名失敗");
     console.log(deleteOk ? "SMOKE ✅ 刪除筆記進回收桶" : "SMOKE ❌ 刪除失敗");
     console.log(shareUiOk ? "SMOKE ✅ 分享對話框開啟建立與關閉" : "SMOKE ❌ 分享 UI 失敗");
+    console.log(consumeUiOk ? "SMOKE ✅ 貼上分享連結對話框開啟與錯誤處理" : "SMOKE ❌ 消費分享 UI 失敗");
     console.log(vaultSwitched ? "SMOKE ✅ 換 vault session 生滅正常" : "SMOKE ❌ 換 vault 失敗");
     console.log(persistedOk ? "SMOKE ✅ CRDT 狀態持久化到 .stele" : "SMOKE ❌ CRDT 狀態未落盤");
     app.exit(
-      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && dailyOk && searchOk && autocompleteOk && contextCreated && renameOk && deleteOk && shareUiOk && vaultSwitched && persistedOk
+      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && dailyOk && searchOk && autocompleteOk && contextCreated && renameOk && deleteOk && shareUiOk && consumeUiOk && vaultSwitched && persistedOk
         ? 0
         : 1,
     );

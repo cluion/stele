@@ -50,6 +50,22 @@ export interface SteleApi {
   /** 列出本 vault 全部分享(含已撤銷) */
   listShares(): Promise<ShareEntry[]>;
   revokeShare(shareId: string): Promise<ShareEntry[]>;
+  /** 消費一則分享連結,開臨時協作 session;連結無效回 { ok:false } */
+  consumeShare(url: string): Promise<{ ok: boolean; error?: string }>;
+  /** 取共享 doc 目前狀態(進入共享模式時);無 session 回 null */
+  openShared(): Promise<Uint8Array | null>;
+  pushShared(update: Uint8Array): void;
+  closeShared(): Promise<void>;
+  /** 回傳退訂函式 */
+  onSharedStatus(cb: (status: string) => void): () => void;
+  /** 伺服器回報的分享權限,決定共享編輯器是否唯讀;回傳退訂函式 */
+  onSharedPermission(cb: (permission: SharePermission) => void): () => void;
+  /** 共享 doc 首次追平;回傳退訂函式 */
+  onSharedSynced(cb: () => void): () => void;
+  /** 分享失效(撤銷/過期/不存在);回傳退訂函式 */
+  onSharedClosed(cb: (code: string) => void): () => void;
+  /** 共享 doc 遠端更新;回傳退訂函式 */
+  onSharedUpdate(cb: (update: Uint8Array) => void): () => void;
 }
 
 export type SharePermission = "read" | "write";
@@ -114,6 +130,35 @@ const api: SteleApi = {
   createShare: (rel, permission) => ipcRenderer.invoke("share:create", rel, permission),
   listShares: () => ipcRenderer.invoke("share:list"),
   revokeShare: (shareId) => ipcRenderer.invoke("share:revoke", shareId),
+  consumeShare: (url) => ipcRenderer.invoke("shared:consume", url),
+  openShared: () => ipcRenderer.invoke("shared:open"),
+  pushShared: (update) => ipcRenderer.send("shared:push", update),
+  closeShared: () => ipcRenderer.invoke("shared:close"),
+  onSharedStatus: (cb) => {
+    const handler = (_e: IpcRendererEvent, status: string) => cb(status);
+    ipcRenderer.on("shared:status", handler);
+    return () => ipcRenderer.off("shared:status", handler);
+  },
+  onSharedPermission: (cb) => {
+    const handler = (_e: IpcRendererEvent, permission: SharePermission) => cb(permission);
+    ipcRenderer.on("shared:permission", handler);
+    return () => ipcRenderer.off("shared:permission", handler);
+  },
+  onSharedSynced: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("shared:synced", handler);
+    return () => ipcRenderer.off("shared:synced", handler);
+  },
+  onSharedClosed: (cb) => {
+    const handler = (_e: IpcRendererEvent, code: string) => cb(code);
+    ipcRenderer.on("shared:closed", handler);
+    return () => ipcRenderer.off("shared:closed", handler);
+  },
+  onSharedUpdate: (cb) => {
+    const handler = (_e: IpcRendererEvent, update: Uint8Array) => cb(update);
+    ipcRenderer.on("shared:update", handler);
+    return () => ipcRenderer.off("shared:update", handler);
+  },
 };
 
 contextBridge.exposeInMainWorld("stele", api);
