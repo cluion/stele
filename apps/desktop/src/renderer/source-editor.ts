@@ -36,6 +36,36 @@ class CaretWidget extends WidgetType {
 
 const setRemoteCursors = StateEffect.define<RemoteCursor[]>();
 
+/** 留言錨定範圍(Y.Text offset);resolved 用較淡的樣式 */
+export interface CommentRange {
+  from: number;
+  to: number;
+  resolved: boolean;
+}
+const setCommentRanges = StateEffect.define<CommentRange[]>();
+
+const commentHighlightField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    let next = deco.map(tr.changes);
+    for (const e of tr.effects) {
+      if (!e.is(setCommentRanges)) continue;
+      const len = tr.state.doc.length;
+      const ranges = [];
+      for (const c of e.value) {
+        const from = Math.min(Math.max(0, c.from), len);
+        const to = Math.min(Math.max(0, c.to), len);
+        if (to > from) {
+          ranges.push(Decoration.mark({ class: c.resolved ? "comment-highlight resolved" : "comment-highlight" }).range(from, to));
+        }
+      }
+      next = Decoration.set(ranges, true);
+    }
+    return next;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
 const remoteCursorField = StateField.define<DecorationSet>({
   create: () => Decoration.none,
   update(deco, tr) {
@@ -84,6 +114,10 @@ export interface SourceView {
   view: EditorView;
   /** 推入遠端游標(呼叫端已解析成 Y.Text offset) */
   setRemoteCursors(cursors: RemoteCursor[]): void;
+  /** 推入留言錨定範圍高亮(字元級) */
+  setCommentRanges(ranges: CommentRange[]): void;
+  /** 捲動到某 Y.Text offset(點面板留言時定位) */
+  scrollToOffset(offset: number): void;
   /** view 與 undoManager 必須一起銷毀:UndoManager 在共享的 Y.Doc 上掛有 afterTransaction listener */
   destroy(): void;
 }
@@ -105,6 +139,7 @@ export function createSourceView(
         syntaxHighlighting(mdHighlight),
         yCollab(ytext, null, { undoManager }),
         remoteCursorField,
+        commentHighlightField,
         EditorView.updateListener.of((u) => {
           if (onCursor && (u.selectionSet || u.focusChanged)) {
             const sel = u.state.selection.main;
@@ -118,6 +153,13 @@ export function createSourceView(
     view,
     setRemoteCursors(cursors) {
       view.dispatch({ effects: setRemoteCursors.of(cursors) });
+    },
+    setCommentRanges(ranges) {
+      view.dispatch({ effects: setCommentRanges.of(ranges) });
+    },
+    scrollToOffset(offset) {
+      const at = Math.min(Math.max(0, offset), view.state.doc.length);
+      view.dispatch({ effects: EditorView.scrollIntoView(at, { y: "center" }) });
     },
     destroy() {
       view.destroy();

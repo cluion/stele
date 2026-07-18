@@ -105,6 +105,11 @@ export class SteleBinding {
     return findBlocksInRange(this.blocks, offset, offset)[0] ?? 0;
   }
 
+  /** 頂層子節點 index → 其在 Y.Text 的結尾 offset(塊級留言錨定整段) */
+  blockEnd(index: number): number {
+    return this.blocks[index]?.to ?? this.ytext.length;
+  }
+
   /** 套用本地 transaction,必要時寫回 Y.Text,回傳新 state */
   dispatch(tr: Transaction): EditorState {
     const oldDoc = this.state.doc;

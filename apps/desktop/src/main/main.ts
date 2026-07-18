@@ -612,6 +612,25 @@ void app.whenReady().then(async () => {
       consumeUiOk = dialogShown && errorShown && closed;
     }
 
+    // 留言面板:點編輯器 💬 鈕開面板 → 面板掛載(無同步時為空狀態)→ 關閉
+    let commentsUiOk = false;
+    {
+      await win.webContents.executeJavaScript(
+        `[...document.querySelectorAll(".mode-toggle")].find((b) => b.getAttribute("aria-label") === "留言")?.click()`,
+      );
+      let panelShown = false;
+      for (let waited = 0; waited < 5000 && !panelShown; waited += 200) {
+        await sleep(200);
+        panelShown = await win.webContents.executeJavaScript(
+          `!!document.querySelector(".comments-panel") && !!document.querySelector(".comments-compose textarea")`,
+        );
+      }
+      await win.webContents.executeJavaScript(`document.querySelector(".comments-close")?.click()`);
+      await sleep(300);
+      const closed = await win.webContents.executeJavaScript(`!document.querySelector(".comments-panel")`);
+      commentsUiOk = panelShown && closed;
+    }
+
     // 全文搜尋:Cmd+Shift+F → 中文 bigram 查詢 → Enter 開啟唯一命中
     await win.webContents.executeJavaScript(
       `window.dispatchEvent(new KeyboardEvent("keydown", { key: "f", metaKey: true, shiftKey: true, cancelable: true }))`,
@@ -675,10 +694,11 @@ void app.whenReady().then(async () => {
     console.log(deleteOk ? "SMOKE ✅ 刪除筆記進回收桶" : "SMOKE ❌ 刪除失敗");
     console.log(shareUiOk ? "SMOKE ✅ 分享對話框開啟建立與關閉" : "SMOKE ❌ 分享 UI 失敗");
     console.log(consumeUiOk ? "SMOKE ✅ 貼上分享連結對話框開啟與錯誤處理" : "SMOKE ❌ 消費分享 UI 失敗");
+    console.log(commentsUiOk ? "SMOKE ✅ 留言面板開啟與關閉" : "SMOKE ❌ 留言面板失敗");
     console.log(vaultSwitched ? "SMOKE ✅ 換 vault session 生滅正常" : "SMOKE ❌ 換 vault 失敗");
     console.log(persistedOk ? "SMOKE ✅ CRDT 狀態持久化到 .stele" : "SMOKE ❌ CRDT 狀態未落盤");
     app.exit(
-      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && dailyOk && searchOk && autocompleteOk && contextCreated && renameOk && deleteOk && shareUiOk && consumeUiOk && vaultSwitched && persistedOk
+      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && dailyOk && searchOk && autocompleteOk && contextCreated && renameOk && deleteOk && shareUiOk && consumeUiOk && commentsUiOk && vaultSwitched && persistedOk
         ? 0
         : 1,
     );

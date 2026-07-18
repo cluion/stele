@@ -6,12 +6,25 @@ import { useTranslation } from "react-i18next";
 import * as Y from "yjs";
 import type { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
-import { SteleBinding, resolveWikilink, rankFiles } from "@stele/editor-core";
+import {
+  SteleBinding,
+  resolveWikilink,
+  rankFiles,
+  encodeAnchor,
+  decodeAnchor,
+  addThread,
+  addReply,
+  setResolved,
+  deleteThread,
+  readThreads,
+  type Thread,
+} from "@stele/editor-core";
 import { createSourceView, topBlockCM, scrollToBlockCM, type SourceView } from "./source-editor.ts";
 import { encodeCursor, participantCursor, throttle, type RemoteCursor } from "./remote-cursors.ts";
 import { remoteCursorPlugin, remoteCursorKey, type BlockCursor } from "./wysiwyg-cursors.ts";
+import { commentMarkPlugin, commentMarkKey, type CommentBlock } from "./comment-marks.ts";
 import { GraphView } from "./graph-view.tsx";
-import type { SteleApi, BacklinkItem, VaultInfo, Participant, ShareEntry, SharePermission } from "../main/preload.ts";
+import type { SteleApi, BacklinkItem, VaultInfo, Participant, ShareEntry, SharePermission, CommentIdentity } from "../main/preload.ts";
 
 type EditorMode = "wysiwyg" | "source";
 
@@ -60,6 +73,130 @@ interface Suggest {
   y: number;
 }
 
+interface ThreadView {
+  t: Thread;
+  range: { from: number; to: number } | null;
+  quoted: string;
+}
+
+/** 留言面板:討論串列表、引用錨定原文、回覆、解決、刪除;新增以編輯器目前選取為錨 */
+function CommentsPanel({
+  views,
+  available,
+  canAdd,
+  onAdd,
+  onReply,
+  onResolve,
+  onDelete,
+  onScrollTo,
+  onClose,
+}: {
+  views: ThreadView[];
+  available: boolean;
+  canAdd: boolean;
+  onAdd: (body: string) => void;
+  onReply: (threadId: string, body: string) => void;
+  onResolve: (threadId: string, resolved: boolean) => void;
+  onDelete: (threadId: string) => void;
+  onScrollTo: (offset: number) => void;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const [draft, setDraft] = useState("");
+  const [replyText, setReplyText] = useState<Record<string, string>>({});
+
+  const submitAdd = (): void => {
+    if (!draft.trim()) return;
+    onAdd(draft.trim());
+    setDraft("");
+  };
+  const submitReply = (id: string): void => {
+    const body = (replyText[id] ?? "").trim();
+    if (!body) return;
+    onReply(id, body);
+    setReplyText((r) => ({ ...r, [id]: "" }));
+  };
+
+  return (
+    <aside className="comments-panel">
+      <div className="comments-head">
+        <h2>{t("comments.title")}</h2>
+        <button className="comments-close" onClick={onClose} aria-label={t("shared.close")}>
+          ×
+        </button>
+      </div>
+      {!available && <p className="placeholder comments-notice">{t("comments.needSync")}</p>}
+      <div className="comments-compose">
+        <textarea
+          placeholder={canAdd ? t("comments.placeholder") : t("comments.addHint")}
+          disabled={!canAdd}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing) return;
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              submitAdd();
+            }
+          }}
+        />
+        <button className="primary" disabled={!canAdd || !draft.trim()} onClick={submitAdd}>
+          {t("comments.add")}
+        </button>
+      </div>
+      {views.length === 0 ? (
+        <p className="placeholder">{t("comments.empty")}</p>
+      ) : (
+        <ul className="comments-list">
+          {views.map(({ t: thread, range, quoted }) => (
+            <li key={thread.id} className={thread.resolved ? "comment-thread resolved" : "comment-thread"}>
+              {range ? (
+                <button className="comment-quote" onClick={() => onScrollTo(range.from)} title={quoted}>
+                  “{quoted}”
+                </button>
+              ) : (
+                <span className="comment-quote orphaned">{t("comments.orphaned")}</span>
+              )}
+              <div className="comment-msg">
+                <span className="comment-author">{thread.name}</span>
+                <p>{thread.body}</p>
+              </div>
+              {thread.replies.map((r) => (
+                <div key={r.id} className="comment-msg reply">
+                  <span className="comment-author">{r.name}</span>
+                  <p>{r.body}</p>
+                </div>
+              ))}
+              <div className="comment-actions">
+                <button onClick={() => onResolve(thread.id, !thread.resolved)}>
+                  {thread.resolved ? t("comments.unresolve") : t("comments.resolve")}
+                </button>
+                <button className="danger" onClick={() => onDelete(thread.id)}>
+                  {t("comments.delete")}
+                </button>
+              </div>
+              <div className="comment-reply">
+                <input
+                  placeholder={t("comments.replyPlaceholder")}
+                  value={replyText[thread.id] ?? ""}
+                  onChange={(e) => setReplyText((rt) => ({ ...rt, [thread.id]: e.target.value }))}
+                  onKeyDown={(e) => {
+                    if (e.nativeEvent.isComposing) return;
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      submitReply(thread.id);
+                    }
+                  }}
+                />
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </aside>
+  );
+}
+
 function Editor({
   rel,
   mode,
@@ -88,6 +225,29 @@ function Editor({
   useEffect(() => {
     onNavigateRef.current = onNavigate;
   });
+
+  // ── 留言與討論 ──
+  const [threads, setThreads] = useState<Thread[]>([]);
+  const commentDocRef = useRef<Y.Doc | undefined>(undefined);
+  const meRef = useRef<CommentIdentity | undefined>(undefined);
+  /** 目前選取對應的 Y.Text 錨定範圍(source 為字元級、wysiwyg 為整段);null=無選取不能新增 */
+  const [selRange, setSelRange] = useState<{ from: number; to: number } | null>(null);
+  const [commentsOpen, setCommentsOpen] = useState(false);
+  const [threadViews, setThreadViews] = useState<ThreadView[]>([]);
+  /** 留言需要啟用同步(伴生 doc 由 SyncManager 管理);未啟用時面板提示而非靜默失效 */
+  const [commentsAvailable, setCommentsAvailable] = useState(true);
+
+  const mutateComments = (fn: (doc: Y.Doc) => void): void => {
+    const doc = commentDocRef.current;
+    if (doc) doc.transact(() => fn(doc), "local");
+  };
+  const addCommentFromSelection = (body: string): void => {
+    const doc = ydocRef.current;
+    const me = meRef.current;
+    if (!ytext || !doc || !me || !selRange) return;
+    const anchor = encodeAnchor(ytext, selRange.from, selRange.to);
+    mutateComments((c) => addThread(c, { id: crypto.randomUUID(), anchor, author: me.deviceId, name: me.name, body, createdAt: Date.now() }));
+  };
 
   // ── [[ 自動完成 ──
   const [suggest, setSuggest] = useState<Suggest | null>(null);
@@ -168,6 +328,44 @@ function Editor({
     };
   }, [rel]);
 
+  // 留言 doc 生命週期:投影 main 端伴生留言 doc,本地變更推回、遠端更新套用
+  useEffect(() => {
+    let cancelled = false;
+    let unsubscribe: (() => void) | undefined;
+    let cdoc: Y.Doc | undefined;
+    const refresh = () => {
+      if (cdoc) setThreads(readThreads(cdoc));
+    };
+    void window.stele.openComments(rel).then((res) => {
+      if (cancelled) return;
+      if (!res) {
+        setCommentsAvailable(false);
+        return;
+      }
+      setCommentsAvailable(true);
+      cdoc = new Y.Doc();
+      commentDocRef.current = cdoc;
+      meRef.current = res.me;
+      Y.applyUpdate(cdoc, res.snapshot, "remote");
+      cdoc.on("update", (update: Uint8Array, origin: unknown) => {
+        if (origin === "local") window.stele.pushComments(rel, update);
+        refresh();
+      });
+      unsubscribe = window.stele.onCommentsUpdate((updateRel, update) => {
+        if (updateRel === rel && cdoc) Y.applyUpdate(cdoc, update, "remote");
+      });
+      refresh();
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+      cdoc?.destroy();
+      commentDocRef.current = undefined;
+      setThreads([]);
+      setSelRange(null);
+    };
+  }, [rel]);
+
   // 投影生命週期:依模式掛 PM 或 CM,真相永遠是 ytext
   useEffect(() => {
     const host = ref.current;
@@ -176,8 +374,8 @@ function Editor({
 
     if (mode === "wysiwyg") {
       const binding = new SteleBinding(ytext);
-      // 掛遠端游標 plugin;meta-only 更新走 binding.dispatch 不觸發 writeBack
-      binding.state = binding.state.reconfigure({ plugins: [...binding.state.plugins, remoteCursorPlugin()] });
+      // 掛遠端游標 + 留言高亮 plugin;meta-only 更新走 binding.dispatch 不觸發 writeBack
+      binding.state = binding.state.reconfigure({ plugins: [...binding.state.plugins, remoteCursorPlugin(), commentMarkPlugin()] });
       // WYSIWYG 本地游標:塊級,回報所在段落的 block.from(source 端會顯示為段首 caret)
       const pmCursorSend = throttle((offset: number) => {
         window.stele.setCursor(rel, encodeCursor(ytext, offset, offset));
@@ -191,6 +389,13 @@ function Editor({
         dispatchTransaction: (tr) => {
           binding.dispatch(tr);
           if (tr.selectionSet || tr.docChanged) reportPmCursor(binding.state);
+          // 留言錨定:wysiwyg 為整段,選取非空時取所在段落的 Y.Text 範圍
+          const sel = binding.state.selection;
+          if (sel.empty) setSelRange(null);
+          else {
+            const i = sel.$head.index(0);
+            setSelRange({ from: binding.blockStart(i), to: binding.blockEnd(i) });
+          }
         },
         handleClickOn: (_view, _pos, node) => {
           if (node.type.name === "wikilink") {
@@ -240,7 +445,11 @@ function Editor({
     const cursorSend = throttle((anchor: number, head: number) => {
       window.stele.setCursor(rel, encodeCursor(ytext, anchor, head));
     }, 90);
-    const source = createSourceView(host, ytext, cursorSend.call);
+    const source = createSourceView(host, ytext, (anchor, head) => {
+      cursorSend.call(anchor, head);
+      // 留言錨定:source 為字元級,選取非空即可錨
+      setSelRange(anchor === head ? null : { from: Math.min(anchor, head), to: Math.max(anchor, head) });
+    });
     sourceRef.current = source;
     scrollToBlockCM(source.view, ytext.toString(), scrollBlock.current);
     return () => {
@@ -276,18 +485,71 @@ function Editor({
     }
   }, [participants, ytext, mode]);
 
+  // 留言高亮:threads 或筆記內容變動 → 把錨定範圍推給當前投影(source 字元級、wysiwyg 塊級)
+  useEffect(() => {
+    const doc = ydocRef.current;
+    if (!ytext || !doc) return;
+    const decoded = threads.map((th) => ({ th, r: decodeAnchor(doc, ytext, th.anchor) }));
+    const live = decoded.filter((d) => d.r && d.r.from < d.r.to);
+    if (mode === "source") {
+      sourceRef.current?.setCommentRanges(live.map((d) => ({ from: d.r!.from, to: d.r!.to, resolved: d.th.resolved })));
+    } else {
+      const view = viewRef.current;
+      const binding = bindingRef.current;
+      if (!view || !binding) return;
+      const blocks: CommentBlock[] = live.map((d) => ({ block: binding.blockIndexAt(d.r!.from), resolved: d.th.resolved }));
+      view.dispatch(view.state.tr.setMeta(commentMarkKey, blocks));
+    }
+  }, [threads, ytext, mode]);
+
+  // 面板用的討論串視圖:對筆記本體解錨,取引用原文;在 effect 內存取 ydocRef
+  useEffect(() => {
+    const doc = ydocRef.current;
+    if (!ytext || !doc) {
+      setThreadViews([]);
+      return;
+    }
+    setThreadViews(
+      threads.map((th) => {
+        const r = decodeAnchor(doc, ytext, th.anchor);
+        const range = r && r.from < r.to ? r : null;
+        return { t: th, range, quoted: range ? ytext.toString().slice(range.from, range.to) : "" };
+      }),
+    );
+  }, [threads, ytext]);
+
+  const scrollToAnchor = (offset: number): void => {
+    if (mode === "source") sourceRef.current?.scrollToOffset(offset);
+    else {
+      const view = viewRef.current;
+      const binding = bindingRef.current;
+      if (view && binding) scrollToBlockPM(view, binding.blockIndexAt(offset));
+    }
+  };
+
+  const unresolvedCount = threadViews.filter((v) => !v.t.resolved).length;
+
   return (
-    <div className="editor-pane" ref={paneRef}>
-      <div className="mode-toggle-wrap">
-        <button
-          className="mode-toggle"
-          title={t(mode === "wysiwyg" ? "editor.toSource" : "editor.toWysiwyg")}
-          aria-label={t(mode === "wysiwyg" ? "editor.toSource" : "editor.toWysiwyg")}
-          onClick={onToggleMode}
-        >
-          {mode === "wysiwyg" ? "</>" : "¶"}
-        </button>
-      </div>
+    <>
+      <div className="editor-pane" ref={paneRef}>
+        <div className="mode-toggle-wrap">
+          <button
+            className={commentsOpen ? "mode-toggle active" : "mode-toggle"}
+            title={t("comments.title")}
+            aria-label={t("comments.title")}
+            onClick={() => setCommentsOpen((o) => !o)}
+          >
+            💬{unresolvedCount > 0 ? ` ${unresolvedCount}` : ""}
+          </button>
+          <button
+            className="mode-toggle"
+            title={t(mode === "wysiwyg" ? "editor.toSource" : "editor.toWysiwyg")}
+            aria-label={t(mode === "wysiwyg" ? "editor.toSource" : "editor.toWysiwyg")}
+            onClick={onToggleMode}
+          >
+            {mode === "wysiwyg" ? "</>" : "¶"}
+          </button>
+        </div>
       {!ytext && <p className="placeholder">{t("editor.loading")}</p>}
       <div id="editor" ref={ref} />
       {suggest && suggestItems.length > 0 && (
@@ -308,7 +570,31 @@ function Editor({
           ))}
         </ul>
       )}
-    </div>
+      </div>
+      {commentsOpen && (
+        <CommentsPanel
+          views={threadViews}
+          available={commentsAvailable}
+          canAdd={commentsAvailable && selRange !== null}
+          onAdd={addCommentFromSelection}
+          onReply={(id, body) =>
+            mutateComments((c) =>
+              addReply(c, id, {
+                id: crypto.randomUUID(),
+                author: meRef.current?.deviceId ?? "",
+                name: meRef.current?.name ?? "",
+                body,
+                createdAt: Date.now(),
+              }),
+            )
+          }
+          onResolve={(id, r) => mutateComments((c) => setResolved(c, id, r))}
+          onDelete={(id) => mutateComments((c) => deleteThread(c, id))}
+          onScrollTo={scrollToAnchor}
+          onClose={() => setCommentsOpen(false)}
+        />
+      )}
+    </>
   );
 }
 
