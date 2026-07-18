@@ -6,3 +6,16 @@ export { fuzzyScore, rankFiles } from "./fuzzy.ts";
 export { extractWikilinks, rewriteWikilinks, type WikilinkRef } from "./links.ts";
 export { steleSchema } from "./schema.ts";
 export { parseBlock, serializeBlock, parseDoc, type ParsedBlock, type ParsedDoc } from "./convert.ts";
+export {
+  encodeAnchor,
+  decodeAnchor,
+  addThread,
+  addReply,
+  setResolved,
+  deleteThread,
+  readThreads,
+  type Anchor,
+  type Thread,
+  type Reply,
+  type NewThread,
+} from "./comments.ts";
