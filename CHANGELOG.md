@@ -2,6 +2,19 @@
 
 本專案的所有重要變更都記錄於此。格式依循 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/),版本遵循 [Semantic Versioning](https://semver.org/lang/zh-TW/)。
 
+## [0.4.0] - 2026-07-18
+
+桌面安裝檔與自動發版:一鍵下載的 dmg / AppImage / deb,推 tag 即自動打包並發佈。
+
+### 新增
+
+- **桌面安裝檔打包**:`apps/desktop` 接上 electron-builder,產出 macOS dmg(x64 + arm64 雙架構)、Linux AppImage 與 deb,附石碑應用圖示。產物走 esbuild 全 bundle,asar 只收 `dist/` 不含 node_modules,dmg 檔名帶架構後綴避免雙架構互相覆蓋。
+- **CI 自動發版**(新 `.github/workflows/release.yml`):push `v*` tag 觸發,`build` job 在 macOS 與 Linux runner 並行打包三平台安裝檔,`release` job 收齊產物後從 `CHANGELOG.md` 抽出對應版本節當 release notes,`gh release create` 一次帶齊安裝檔直接發佈;發佈前斷言 tag 版本與 `package.json` 一致,擋下忘記升版號的誤發。`workflow_dispatch` 另備只建置不發佈的 dry-run。
+
+### 品質
+
+- 發版流程全自動化,原本手動的跨平台打包與建 Release 交由 CI 完成;Linux 產物改由 Linux runner 實際打包,不再是 mac 上跨建。發版流程文件(`plan/RELEASE.md`)同步更新。
+
 ## [0.3.0] - 2026-07-17
 
 分享連結:把單一筆記唯讀分享到瀏覽器,伺服器仍全盲。
@@ -62,6 +75,7 @@
 - 16 項 smoke 測試涵蓋桌面全鏈。
 - CI:lint、typecheck、test、授權政策檢查、smoke。
 
+[0.4.0]: https://github.com/cluion/stele/releases/tag/v0.4.0
 [0.3.0]: https://github.com/cluion/stele/releases/tag/v0.3.0
 [0.2.0]: https://github.com/cluion/stele/releases/tag/v0.2.0
 [0.1.0]: https://github.com/cluion/stele/releases/tag/v0.1.0
