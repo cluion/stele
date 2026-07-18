@@ -221,6 +221,12 @@ export class SyncClient {
   }
 
   /** doc 已刪除:卸下狀態機與 awareness,之後同名 docId 的訊息會重新建立 */
+  /** 開始同步某 doc(mid-session 新建的本地 doc,如新筆記或留言 doc):建狀態機並補推/補拉 */
+  track(docId: string): void {
+    if (!this.online) return; // 離線時 reconnect 的 reconcile 會依 listDocIds 補上
+    void this.reconcile(docId).catch((err: unknown) => console.error(`追蹤 doc 失敗 ${docId}:`, err));
+  }
+
   forget(docId: string): void {
     const entry = this.awareness.get(docId);
     if (entry) {

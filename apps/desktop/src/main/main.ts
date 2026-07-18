@@ -112,6 +112,10 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
           if (!w.isDestroyed()) w.webContents.send("presence:update", rel, participants);
         }
       },
+      onCommentUpdate: (noteDocId, update) => {
+        const rel = next.relForDocId(noteDocId);
+        if (rel) sendAll("comments:update", rel, update);
+      },
     });
     syncManager.start();
   } else {
@@ -192,6 +196,15 @@ ipcMain.on("shared:push", (_e, update: unknown) => {
 });
 
 ipcMain.handle("shared:close", () => closeSharedSession());
+
+ipcMain.handle("comments:open", (_e, rel: unknown) => {
+  if (!syncManager || typeof rel !== "string") return null;
+  return { snapshot: syncManager.openCommentDoc(rel), me: syncManager.identity() };
+});
+
+ipcMain.on("comments:push", (_e, rel: unknown, update: unknown) => {
+  if (syncManager && typeof rel === "string" && update instanceof Uint8Array) syncManager.pushComment(rel, update);
+});
 
 ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {
   if (typeof rel !== "string") throw new Error("非法參數");

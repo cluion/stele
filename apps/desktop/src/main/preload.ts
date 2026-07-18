@@ -47,6 +47,11 @@ export interface SteleApi {
   onPresence(cb: (rel: string, participants: Participant[]) => void): () => void;
   /** 為某篇筆記建立分享連結(唯讀/可編輯);金鑰在 fragment 不進伺服器 */
   createShare(rel: string, permission: SharePermission): Promise<ShareLink>;
+  /** 開啟某筆記的留言 doc:回傳目前狀態快照 + 本地使用者身分;同步未啟用回 null */
+  openComments(rel: string): Promise<{ snapshot: Uint8Array; me: CommentIdentity } | null>;
+  pushComments(rel: string, update: Uint8Array): void;
+  /** 留言 doc 遠端更新(帶所屬筆記 rel);回傳退訂函式 */
+  onCommentsUpdate(cb: (rel: string, update: Uint8Array) => void): () => void;
   /** 列出本 vault 全部分享(含已撤銷) */
   listShares(): Promise<ShareEntry[]>;
   revokeShare(shareId: string): Promise<ShareEntry[]>;
@@ -66,6 +71,12 @@ export interface SteleApi {
   onSharedClosed(cb: (code: string) => void): () => void;
   /** 共享 doc 遠端更新;回傳退訂函式 */
   onSharedUpdate(cb: (update: Uint8Array) => void): () => void;
+}
+
+export interface CommentIdentity {
+  deviceId: string;
+  name: string;
+  color: string;
 }
 
 export type SharePermission = "read" | "write";
@@ -126,6 +137,13 @@ const api: SteleApi = {
     const handler = (_e: IpcRendererEvent, rel: string, participants: Participant[]) => cb(rel, participants);
     ipcRenderer.on("presence:update", handler);
     return () => ipcRenderer.off("presence:update", handler);
+  },
+  openComments: (rel) => ipcRenderer.invoke("comments:open", rel),
+  pushComments: (rel, update) => ipcRenderer.send("comments:push", rel, update),
+  onCommentsUpdate: (cb) => {
+    const handler = (_e: IpcRendererEvent, rel: string, update: Uint8Array) => cb(rel, update);
+    ipcRenderer.on("comments:update", handler);
+    return () => ipcRenderer.off("comments:update", handler);
   },
   createShare: (rel, permission) => ipcRenderer.invoke("share:create", rel, permission),
   listShares: () => ipcRenderer.invoke("share:list"),

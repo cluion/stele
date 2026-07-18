@@ -1,6 +1,7 @@
 import * as Y from "yjs";
 import WebSocket from "ws";
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   SyncClient,
@@ -58,6 +59,12 @@ function colorFor(deviceId: string): string {
   return PRESENCE_COLORS[h % PRESENCE_COLORS.length]!;
 }
 
+/** 由筆記 docId 決定性衍生留言伴生 docId(UUID 形狀);兩裝置各自算出同一個,免對照即可避免分裂 */
+function commentDocIdFor(noteDocId: string): string {
+  const h = createHash("sha256").update(`stele-comments:${noteDocId}`).digest("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
+
 /** 由 ws(s) 同步網址推導檢視器的 http(s) 基底;分享頁與 WS 同一台伺服器同一埠 */
 function httpBaseFrom(wsUrl: string): string {
   try {
@@ -80,6 +87,14 @@ const SAVE_DEBOUNCE_MS = 200;
 export class SyncManager {
   private readonly meta = new Y.Doc();
   private readonly paths: Y.Map<string>;
+  /** 留言登記表:筆記 docId → 伴生留言 docId,隨 meta 同步,讓留言 doc 的存在跨裝置傳播 */
+  private readonly comments: Y.Map<string>;
+  /** 伴生留言 doc(不鏡像磁碟,存 .stele/comments/<id>.ybin) */
+  private readonly commentDocs = new Map<string, Y.Doc>();
+  private readonly commentIds = new Set<string>();
+  private readonly commentSaveTimers = new Map<string, NodeJS.Timeout>();
+  private readonly commentsDir: string;
+  private onCommentUpdate: ((noteDocId: string, update: Uint8Array) => void) | undefined;
   private readonly loose = new Map<string, Y.Doc>();
   private readonly states = new Map<string, SyncDocState>();
   private readonly client: SyncClient;
@@ -109,6 +124,8 @@ export class SyncManager {
       onPresence?: (rel: string, participants: Participant[]) => void;
       /** 匯出某 doc 的原始金鑰,供分享連結放進 URL fragment;未提供則無法建立分享 */
       exportDocKey?: (docId: string) => Promise<Uint8Array>;
+      /** 伴生留言 doc 有遠端更新時通知(noteDocId + Y update),供 main 廣播給 renderer */
+      onCommentUpdate?: (noteDocId: string, update: Uint8Array) => void;
     },
   ) {
     this.self = {
@@ -121,13 +138,19 @@ export class SyncManager {
     this.shareBase = httpBaseFrom(settings.url);
     this.metaFile = path.join(session.root, ".stele", "meta.ybin");
     this.stateFile = path.join(session.root, ".stele", "sync-state.json");
+    this.commentsDir = path.join(session.root, ".stele", "comments");
     this.paths = this.meta.getMap("paths");
+    this.comments = this.meta.getMap("comments");
+    this.onCommentUpdate = tuning?.onCommentUpdate;
     this.loadMeta();
     this.loadStates();
 
     this.meta.on("update", () => this.scheduleMetaSave());
     this.paths.observe((event, tx) => {
       if (tx.origin === "sync") this.applyRemoteMeta(Array.from(event.keysChanged as Set<string>));
+    });
+    this.comments.observe((event, tx) => {
+      if (tx.origin === "sync") this.onRemoteComments(Array.from(event.keysChanged as Set<string>));
     });
 
     this.client = new SyncClient({
@@ -147,6 +170,10 @@ export class SyncManager {
       cipher: tuning?.cipher,
     });
     this.unsubscribeFiles = session.onFileEvent((event) => this.onLocalFile(event));
+    // client 就緒後,把既有留言 doc 讀進記憶體,才會進 listDocIds、連線後同步
+    for (const [noteDocId, commentDocId] of this.comments.entries()) {
+      if (NOTE_DOC_ID.test(commentDocId)) this.commentDocFor(commentDocId, noteDocId);
+    }
   }
 
   start(): void {
@@ -226,17 +253,109 @@ export class SyncManager {
     await this.fsOps;
     clearTimeout(this.metaTimer);
     clearTimeout(this.stateTimer);
+    for (const timer of this.commentSaveTimers.values()) clearTimeout(timer);
+    this.commentSaveTimers.clear();
     this.saveMetaNow();
     this.saveStatesNow();
+    for (const commentDocId of this.commentDocs.keys()) this.saveCommentNow(commentDocId);
     this.meta.destroy();
+    for (const doc of this.commentDocs.values()) doc.destroy();
+    this.commentDocs.clear();
+    this.commentIds.clear();
     for (const doc of this.loose.values()) doc.destroy();
     this.loose.clear();
+  }
+
+  /** 目前使用者身分,供 renderer 標記留言作者 */
+  identity(): { deviceId: string; name: string; color: string } {
+    return { ...this.self };
+  }
+
+  /** 開啟某筆記的留言 doc(必要時建立),回傳目前狀態快照供 renderer 投影 */
+  openCommentDoc(noteRel: string): Uint8Array {
+    const noteDocId = this.session.peekDocId(noteRel) ?? this.session.docId(noteRel);
+    return Y.encodeStateAsUpdate(this.ensureCommentDoc(noteDocId));
+  }
+
+  /** renderer 對留言 doc 的本地變更:origin "renderer" 讓 client 推同步、不回音給自己 */
+  pushComment(noteRel: string, update: Uint8Array): void {
+    const noteDocId = this.session.peekDocId(noteRel) ?? this.session.docId(noteRel);
+    Y.applyUpdate(this.ensureCommentDoc(noteDocId), update, "renderer");
+  }
+
+  private ensureCommentDoc(noteDocId: string): Y.Doc {
+    // 決定性 id:兩裝置由同一 noteDocId 各自算出同一個 commentDocId,避免併發開啟時分裂
+    const commentDocId = commentDocIdFor(noteDocId);
+    if (this.comments.get(noteDocId) !== commentDocId) {
+      this.meta.transact(() => this.comments.set(noteDocId, commentDocId), "local-meta");
+    }
+    return this.commentDocFor(commentDocId, noteDocId);
+  }
+
+  private commentDocFor(commentDocId: string, noteDocId: string): Y.Doc {
+    const cached = this.commentDocs.get(commentDocId);
+    if (cached) return cached;
+    // 沿用 loose 池同一物件(client runtime 可能已指向它),否則從 .ybin 載入
+    let doc = this.loose.get(commentDocId);
+    if (doc) this.loose.delete(commentDocId);
+    else doc = this.loadCommentDoc(commentDocId);
+    doc.on("update", (update: Uint8Array, origin: unknown) => {
+      this.scheduleCommentSave(commentDocId);
+      if (origin !== "renderer") this.onCommentUpdate?.(noteDocId, update);
+    });
+    this.commentDocs.set(commentDocId, doc);
+    this.commentIds.add(commentDocId);
+    this.client.track(commentDocId);
+    return doc;
+  }
+
+  /** 遠端 meta 帶來新的留言登記:materialize 伴生 doc 並開始同步 */
+  private onRemoteComments(noteDocIds: string[]): void {
+    for (const noteDocId of noteDocIds) {
+      const commentDocId = this.comments.get(noteDocId);
+      if (commentDocId && NOTE_DOC_ID.test(commentDocId) && !this.commentDocs.has(commentDocId)) {
+        const update = Y.encodeStateAsUpdate(this.commentDocFor(commentDocId, noteDocId));
+        this.onCommentUpdate?.(noteDocId, update); // 讓已開著該筆記的 renderer 立即收到既有留言
+      }
+    }
+  }
+
+  private loadCommentDoc(commentDocId: string): Y.Doc {
+    const doc = new Y.Doc();
+    try {
+      Y.applyUpdate(doc, readFileSync(path.join(this.commentsDir, `${commentDocId}.ybin`)), "load");
+    } catch {
+      // 首次:空 doc
+    }
+    return doc;
+  }
+
+  private scheduleCommentSave(commentDocId: string): void {
+    clearTimeout(this.commentSaveTimers.get(commentDocId));
+    this.commentSaveTimers.set(
+      commentDocId,
+      setTimeout(() => this.saveCommentNow(commentDocId), SAVE_DEBOUNCE_MS),
+    );
+  }
+
+  private saveCommentNow(commentDocId: string): void {
+    const doc = this.commentDocs.get(commentDocId);
+    if (!doc) return;
+    try {
+      mkdirSync(this.commentsDir, { recursive: true });
+      const file = path.join(this.commentsDir, `${commentDocId}.ybin`);
+      writeFileSync(file + ".tmp", Y.encodeStateAsUpdate(doc));
+      renameSync(file + ".tmp", file);
+    } catch (err) {
+      console.error(`留言狀態落盤失敗 ${commentDocId}:`, err);
+    }
   }
 
   private makeHost(): SyncHost {
     return {
       openDoc: (docId) => {
         if (docId === META_DOC_ID) return Promise.resolve(this.meta);
+        if (this.commentIds.has(docId)) return Promise.resolve(this.commentDocs.get(docId));
         const rel = this.session.relForDocId(docId);
         if (rel) return Promise.resolve(this.session.docFor(rel));
         // 未知 docId 必須是合法 UUID 才承接(可能是 meta 還沒到的遠端新 doc)
@@ -249,7 +368,7 @@ export class SyncManager {
         }
         return Promise.resolve(doc);
       },
-      listDocIds: () => Promise.resolve([META_DOC_ID, ...this.session.allDocIds()]),
+      listDocIds: () => Promise.resolve([META_DOC_ID, ...this.session.allDocIds(), ...this.commentIds]),
       loadState: (docId) => this.states.get(docId),
       saveState: (docId, state) => {
         this.states.set(docId, state);

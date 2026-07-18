@@ -113,7 +113,7 @@ export function setResolved(doc: Y.Doc, threadId: string, resolved: boolean): vo
 export function deleteThread(doc: Y.Doc, threadId: string): void {
   const arr = threadsArray(doc);
   for (let i = 0; i < arr.length; i++) {
-    if (arr.get(i)!.get("id") === threadId) {
+    if (arr.get(i).get("id") === threadId) {
       arr.delete(i, 1);
       return;
     }
