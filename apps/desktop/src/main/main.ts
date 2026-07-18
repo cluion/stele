@@ -9,6 +9,9 @@ import { SyncManager, type SyncSettings } from "./sync-manager.ts";
 import { loadSettings, saveSettings } from "./settings.ts";
 
 const SMOKE = process.argv.includes("--smoke");
+// smoke 固定 zh-TW locale:CI runner 多為 en,navigator.language 會讓 i18n 走英文,
+// 令選單/檔名等中文斷言落空;正式執行不設,仍尊重使用者 OS locale
+if (SMOKE) app.commandLine.appendSwitch("lang", "zh-TW");
 const FIXTURES_VAULT = path.resolve(__dirname, "..", "..", "..", "prototypes", "mirror", "fixtures", "vault");
 
 let session: VaultSession | undefined;
