@@ -2,6 +2,23 @@
 
 本專案的所有重要變更都記錄於此。格式依循 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/),版本遵循 [Semantic Versioning](https://semver.org/lang/zh-TW/)。
 
+## [0.6.0] - 2026-07-18
+
+留言與討論:錨定到文字範圍的協作討論串,獨立資料型別、不污染筆記。
+
+### 新增
+
+- **留言與討論**:在編輯器選取文字即可留言,他人可回覆成討論串、可標記已解決或刪除。留言錨定到文字範圍(Yjs relative position),你我插字時錨點自動位移,原文被刪則標「原文已刪」。源碼模式字元級高亮、所見即所得模式整段高亮;留言面板列出全篇討論、點引用即捲到原文。
+- **留言是獨立的伴生資料**:每篇筆記的留言存在與筆記本體不同的 CRDT doc,**不進 .md 鏡像、不污染筆記歷史**;走同一條端對端加密同步,留言 doc 自得一把獨立子金鑰,伺服器仍全盲。留言 doc 的 id 由筆記 id 決定性衍生,兩裝置各自算出同一個,免對照表也不會併發分裂。
+
+### 品質
+
+- 留言全鏈測試:討論串模型與範圍錨定 6 例(含 CRDT 合併、錨點位移/塌縮)、伴生 doc 真伺服器端對端 2 例(跨裝置留言/回覆同步、對方解得出錨定、留言不進 .md);桌面 smoke 增至 19。以真 Electron 端對端驗證「選取文字→留言→同步到第二裝置→對方解出錨定」完整往返。
+
+### 已知限制
+
+- 留言需啟用加密同步(伴生 doc 由同步層管理);未啟用同步的 vault,留言面板會提示而非靜默失效。
+
 ## [0.5.0] - 2026-07-18
 
 可編輯分享閉環:貼上分享連結,在桌面開臨時協作視窗即時共編。
@@ -89,6 +106,7 @@
 - 16 項 smoke 測試涵蓋桌面全鏈。
 - CI:lint、typecheck、test、授權政策檢查、smoke。
 
+[0.6.0]: https://github.com/cluion/stele/releases/tag/v0.6.0
 [0.5.0]: https://github.com/cluion/stele/releases/tag/v0.5.0
 [0.4.0]: https://github.com/cluion/stele/releases/tag/v0.4.0
 [0.3.0]: https://github.com/cluion/stele/releases/tag/v0.3.0
