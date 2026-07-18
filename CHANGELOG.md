@@ -2,6 +2,20 @@
 
 本專案的所有重要變更都記錄於此。格式依循 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/),版本遵循 [Semantic Versioning](https://semver.org/lang/zh-TW/)。
 
+## [0.5.0] - 2026-07-18
+
+可編輯分享閉環:貼上分享連結,在桌面開臨時協作視窗即時共編。
+
+### 新增
+
+- **消費可編輯分享連結**:桌面貼上別人給的分享連結(側欄 ⇲ 鈕、歡迎畫面入口或 Cmd/Ctrl+Shift+O),即以「臨時協作視窗」開啟。可寫連結能即時編輯,內容即時同步回來源方 vault;唯讀連結以唯讀開啟。**消費者不需要自己的 vault**,關掉視窗即結束,本地不留檔。分享功能自此雙軌俱全:唯讀走瀏覽器檢視器,可編輯交桌面協作。
+- **端對端加密不打折**:金鑰只從連結 fragment 取得且留在桌面主行程(不進有 IPC 面的 renderer 主世界);伺服器仍全盲只中繼密文;唯讀權限由伺服器回報並在編輯器層鎖定輸入。
+
+### 品質
+
+- 新增消費端測試:連結解析 4 例、SharedSession 真伺服器端到端 3 例(可寫回寫來源磁碟、唯讀不外洩、撤銷即時失效);桌面 smoke 增至 18 項。以真 Electron 端到端驗證「貼連結→協作視窗打字→回寫來源磁碟」完整往返。
+- 修穩 CI:補 `packageManager` 讓 GitHub Actions 的 pnpm setup 認得版本、smoke 於 CI 固定 zh-TW locale,發版與 CI 兩條 workflow 皆綠。
+
 ## [0.4.0] - 2026-07-18
 
 桌面安裝檔與自動發版:一鍵下載的 dmg / AppImage / deb,推 tag 即自動打包並發佈。
@@ -75,6 +89,7 @@
 - 16 項 smoke 測試涵蓋桌面全鏈。
 - CI:lint、typecheck、test、授權政策檢查、smoke。
 
+[0.5.0]: https://github.com/cluion/stele/releases/tag/v0.5.0
 [0.4.0]: https://github.com/cluion/stele/releases/tag/v0.4.0
 [0.3.0]: https://github.com/cluion/stele/releases/tag/v0.3.0
 [0.2.0]: https://github.com/cluion/stele/releases/tag/v0.2.0
