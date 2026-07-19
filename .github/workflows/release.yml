@@ -69,3 +69,46 @@ jobs:
             --title "Stele ${GITHUB_REF_NAME#v}" \
             --notes-file RELEASE_NOTES.md \
             artifacts/*.dmg artifacts/*.AppImage artifacts/*.deb
+
+  # 發佈後自動更新 Homebrew Cask(cluion/homebrew-tap 的 Casks/stele.rb):
+  # 只改 version 與兩個 dmg 的 sha256,url 走 cask 內的 #{version} 自動跟隨。
+  # 需在本 repo 設 secret TAP_GITHUB_TOKEN(對 cluion/homebrew-tap 有 contents:write)。
+  update-cask:
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release dmgs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.dmg' --dir dmgs
+      - name: Checkout tap
+        uses: actions/checkout@v4
+        with:
+          repository: cluion/homebrew-tap
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: tap
+      - name: Bump cask version and sha256
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          ARM_SHA="$(sha256sum "dmgs/Stele-$VER-arm64.dmg" | cut -d' ' -f1)"
+          INTEL_SHA="$(sha256sum "dmgs/Stele-$VER-x64.dmg" | cut -d' ' -f1)"
+          sed -i -E \
+            -e "s/^( *version )\".*\"/\1\"$VER\"/" \
+            -e "s/^( *sha256 arm: *)\".*\",/\1\"$ARM_SHA\",/" \
+            -e "s/^( *intel: *)\".*\"/\1\"$INTEL_SHA\"/" \
+            tap/Casks/stele.rb
+      - name: Commit and push
+        run: |
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/stele.rb
+          if git diff --cached --quiet; then
+            echo "cask 無變更,略過"
+            exit 0
+          fi
+          git commit -m "stele ${GITHUB_REF_NAME#v}"
+          git push

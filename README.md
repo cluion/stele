@@ -28,6 +28,20 @@ Stele is a local-first, end-to-end-encrypted, self-hostable knowledge base. Your
 - Multi-device end-to-end encrypted sync, self-hosted server in one `docker run`
 - Built-in i18n (zh-TW / en)
 
+## Install
+
+### macOS (Homebrew)
+
+```bash
+brew install --cask cluion/tap/stele
+```
+
+Stele is not code-signed, so on first launch **right-click Stele.app → Open** to get past Gatekeeper (only needed once). To skip that step, install with `brew install --cask --no-quarantine cluion/tap/stele`.
+
+### Other platforms
+
+Download a `.dmg` (macOS), `.AppImage`, or `.deb` (Linux) from the [latest release](https://github.com/cluion/stele/releases/latest).
+
 ## Develop & run
 
 Requires Node ≥ 24 and pnpm.
