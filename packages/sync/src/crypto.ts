@@ -18,6 +18,13 @@ const DEFAULT_WORK_FACTOR = 18;
 
 const utf8 = (s: string) => new TextEncoder().encode(s);
 const DOC_KEY_SALT = utf8("stele-doc-key");
+const SPACE_KEY_SALT = utf8("stele-space-key");
+
+/**
+ * 預設空間的 id 哨兵:未指派筆記的落點。
+ * 其空間金鑰 = 主金鑰本身,故 HKDF(空間金鑰, docId) 與舊 HKDF(主金鑰, docId) 位元組相同 → 既有 vault 零遷移。
+ */
+export const DEFAULT_SPACE_ID = "default";
 
 /** salt 綁 vaultId:跨裝置同密語可重現,不同 vault 金鑰互異 */
 export async function deriveVaultKey(passphrase: string, vaultId: string, workFactor = DEFAULT_WORK_FACTOR): Promise<Uint8Array> {
@@ -27,6 +34,22 @@ export async function deriveVaultKey(passphrase: string, vaultId: string, workFa
     p: 1,
     dkLen: 32,
   });
+}
+
+/**
+ * 空間金鑰:「空間 = 帶金鑰單元」的根金鑰,再往下 HKDF(空間金鑰, docId) 衍生每篇筆記金鑰。
+ * 預設空間 → 主金鑰本身(零遷移);其餘空間 → 從主金鑰單向衍生,知其一不反推主金鑰或他空間。
+ * (團隊空間之後改由「隨機生成 + 成員公鑰包裝」取得,接同一條「空間金鑰 → 筆記金鑰」路徑,不動下游。)
+ */
+export async function deriveSpaceKey(masterKey: Uint8Array, spaceId: string): Promise<Uint8Array> {
+  if (spaceId === DEFAULT_SPACE_ID) return masterKey.slice();
+  const hkdf = await crypto.subtle.importKey("raw", masterKey as BufferSource, "HKDF", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "HKDF", hash: "SHA-256", salt: SPACE_KEY_SALT as BufferSource, info: utf8(spaceId) as BufferSource },
+    hkdf,
+    256,
+  );
+  return new Uint8Array(bits);
 }
 
 /** AES-GCM 封裝:[版本 1B][nonce 12B][ciphertext+tag],VaultCipher 與 ShareCipher 共用 */
@@ -112,5 +135,36 @@ export class ShareCipher implements Cipher {
 
   decrypt(_docId: string, data: Uint8Array): Promise<Uint8Array> {
     return this.key.then((key) => open(key, data));
+  }
+}
+
+/**
+ * 空間金鑰來源抽象:給一個 spaceId,取得那個空間的密碼器。
+ * Slice 1(個人 vault)只有「從主金鑰衍生」一種實作;Slice 2 團隊層再加「從成員包裝解出」實作,下游不動。
+ */
+export interface SpaceKeySource {
+  /** 該空間的原始根金鑰(32 bytes) */
+  spaceKey(spaceId: string): Promise<Uint8Array>;
+  /** 該空間的密碼器,內部再依 docId 衍生每篇筆記金鑰(可 exportDocKey 供分享連結用) */
+  cipher(spaceId: string): Promise<VaultCipher>;
+}
+
+/** Slice 1 實作:個人 vault,所有空間金鑰皆由主金鑰衍生(預設空間 = 主金鑰,零遷移) */
+export class MasterKeySpaces implements SpaceKeySource {
+  private readonly ciphers = new Map<string, Promise<VaultCipher>>();
+
+  constructor(private readonly masterKey: Uint8Array) {}
+
+  spaceKey(spaceId: string): Promise<Uint8Array> {
+    return deriveSpaceKey(this.masterKey, spaceId);
+  }
+
+  cipher(spaceId: string): Promise<VaultCipher> {
+    let c = this.ciphers.get(spaceId);
+    if (!c) {
+      c = this.spaceKey(spaceId).then((key) => new VaultCipher(key));
+      this.ciphers.set(spaceId, c);
+    }
+    return c;
   }
 }

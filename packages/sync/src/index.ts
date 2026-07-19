@@ -10,7 +10,8 @@ export {
   type ShareInfo,
 } from "./protocol.ts";
 export { identityCipher, digest, type Cipher } from "./cipher.ts";
-export { deriveVaultKey, VaultCipher, ShareCipher } from "./crypto.ts";
+export { deriveVaultKey, VaultCipher, ShareCipher, deriveSpaceKey, DEFAULT_SPACE_ID, MasterKeySpaces } from "./crypto.ts";
+export type { SpaceKeySource } from "./crypto.ts";
 export {
   SyncClient,
   type SyncClientOptions,
