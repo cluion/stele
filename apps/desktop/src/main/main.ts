@@ -4,7 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { VaultSession, type SessionCallbacks } from "./vault-session.ts";
-import { deriveVaultKey, VaultCipher } from "@stele/sync";
+import { deriveVaultKey, MasterKeySpaces } from "@stele/sync";
 import { SyncManager, type SyncSettings } from "./sync-manager.ts";
 import { SharedSession } from "./shared-session.ts";
 import { parseConsumeLink } from "./share-link.ts";
@@ -103,10 +103,9 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
   if (prev) await prev.destroy();
   const syncSettings = SMOKE ? undefined : loadSyncSettings(next.root);
   if (syncSettings) {
-    const cipher = new VaultCipher(await deriveVaultKey(syncSettings.passphrase, syncSettings.vaultId));
+    const spaces = new MasterKeySpaces(await deriveVaultKey(syncSettings.passphrase, syncSettings.vaultId));
     syncManager = new SyncManager(next, syncSettings, broadcastSyncStatus, {
-      cipher,
-      exportDocKey: (docId) => cipher.exportDocKey(docId),
+      spaces,
       onPresence: (rel, participants) => {
         for (const w of windows) {
           if (!w.isDestroyed()) w.webContents.send("presence:update", rel, participants);

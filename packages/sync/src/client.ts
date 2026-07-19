@@ -227,6 +227,38 @@ export class SyncClient {
     void this.reconcile(docId).catch((err: unknown) => console.error(`追蹤 doc 失敗 ${docId}:`, err));
   }
 
+  /**
+   * 以目前 cipher 重推一份全量快照,伺服器截斷該點之前的舊增量。
+   * 用於「筆記換空間」重新加密:讓該 docId 的伺服器 blob 全部改用新空間金鑰。
+   * uptoSeq 取 head+1 以越過現有快照點(同 seq 會被伺服器 saveSnapshot 忽略);需已與伺服器拉齊,
+   * 否則不覆蓋(不能用不完整的本地內容蓋掉伺服器)。回傳是否真的推了快照。
+   */
+  async rekey(docId: string): Promise<boolean> {
+    const rt = await this.ensure(docId);
+    if (!rt || !this.online) return false;
+    const knownHead = this.serverHeads.get(docId)?.headSeq ?? rt.state.lastSeq;
+    if (rt.state.lastSeq < knownHead) return false; // 未拉齊
+    const uptoSeq = knownHead + 1;
+    const payload = await this.cipher.encrypt(docId, Y.encodeStateAsUpdate(rt.doc));
+    this.send({ type: "snapshotPush", docId, uptoSeq, payload });
+    rt.state = { ...rt.state, lastSeq: uptoSeq };
+    this.opts.host.saveState(docId, rt.state);
+    this.serverHeads.set(docId, { docId, headSeq: uptoSeq, snapshotSeq: uptoSeq });
+    return true;
+  }
+
+  /**
+   * 強制重新抓取某 doc 的最新快照(以目前 cipher 解密)。
+   * 用於另一裝置得知某筆記換了空間(金鑰改變)後,重新以新空間金鑰解出——
+   * 不倚賴可能過期的 serverHeads,直接請伺服器回快照。
+   */
+  repull(docId: string): void {
+    if (!this.online) return;
+    void this.ensure(docId).then((rt) => {
+      if (rt) this.send({ type: "snapshotPull", docId });
+    });
+  }
+
   forget(docId: string): void {
     const entry = this.awareness.get(docId);
     if (entry) {

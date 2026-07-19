@@ -1,15 +1,25 @@
 import * as Y from "yjs";
 import WebSocket from "ws";
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import {
   SyncClient,
+  readSpaces,
+  spaceOf,
+  readAudit,
+  createSpace as createSpaceModel,
+  renameSpace as renameSpaceModel,
+  moveNote as moveNoteModel,
+  DOC_SPACES_MAP,
   type AwarenessState,
   type Cipher,
   type ShareInfo,
   type SharePermission,
   type SocketLike,
+  type Space,
+  type SpaceAuditEvent,
+  type SpaceKeySource,
   type SyncDocState,
   type SyncHost,
   type SyncStatus,
@@ -110,6 +120,12 @@ export class SyncManager {
   private readonly self: { deviceId: string; name: string; color: string };
   private exportDocKey: ((docId: string) => Promise<Uint8Array>) | undefined;
   private readonly shareBase: string;
+  /** 空間金鑰來源(提供時啟用「空間=帶金鑰單元」路由;預設空間走 master 相容路徑) */
+  private readonly spaces: SpaceKeySource | undefined;
+  /** 筆記歸屬 Y.Map(docId → spaceId),在 meta doc 上;遠端變更觸發 repull 以新金鑰重解 */
+  private readonly docSpaces: Y.Map<string>;
+  /** 移動當下離線而未能重推快照的筆記;上線後補推,避免舊金鑰增量卡住其他裝置 */
+  private readonly pendingRekey = new Set<string>();
   /** 目前開著的筆記:切換時把在場宣告從舊 doc 移到新 doc */
   private activeRel: string | undefined;
 
@@ -126,6 +142,8 @@ export class SyncManager {
       exportDocKey?: (docId: string) => Promise<Uint8Array>;
       /** 伴生留言 doc 有遠端更新時通知(noteDocId + Y update),供 main 廣播給 renderer */
       onCommentUpdate?: (noteDocId: string, update: Uint8Array) => void;
+      /** 空間金鑰來源:提供時啟用空間路由(每篇筆記以其所屬空間的金鑰加解密);取代 cipher/exportDocKey */
+      spaces?: SpaceKeySource;
     },
   ) {
     this.self = {
@@ -134,14 +152,23 @@ export class SyncManager {
       color: colorFor(settings.deviceId),
     };
     this.onPresence = tuning?.onPresence;
-    this.exportDocKey = tuning?.exportDocKey;
+    this.spaces = tuning?.spaces;
     this.shareBase = httpBaseFrom(settings.url);
     this.metaFile = path.join(session.root, ".stele", "meta.ybin");
     this.stateFile = path.join(session.root, ".stele", "sync-state.json");
     this.commentsDir = path.join(session.root, ".stele", "comments");
     this.paths = this.meta.getMap("paths");
     this.comments = this.meta.getMap("comments");
+    this.docSpaces = this.meta.getMap(DOC_SPACES_MAP);
     this.onCommentUpdate = tuning?.onCommentUpdate;
+    // 空間路由:每篇筆記以其所屬空間的金鑰加解密;meta/留言/未指派筆記歸屬皆為預設空間 → master 金鑰(零遷移)
+    const routingCipher: Cipher | undefined = this.spaces && {
+      encrypt: (docId, plain) => this.spaces!.cipher(spaceOf(this.meta, docId)).then((c) => c.encrypt(docId, plain)),
+      decrypt: (docId, data) => this.spaces!.cipher(spaceOf(this.meta, docId)).then((c) => c.decrypt(docId, data)),
+    };
+    this.exportDocKey = this.spaces
+      ? (docId) => this.spaces!.cipher(spaceOf(this.meta, docId)).then((c) => c.exportDocKey(docId))
+      : tuning?.exportDocKey;
     this.loadMeta();
     this.loadStates();
 
@@ -152,6 +179,10 @@ export class SyncManager {
     this.comments.observe((event, tx) => {
       if (tx.origin === "sync") this.onRemoteComments(Array.from(event.keysChanged as Set<string>));
     });
+    // 遠端得知某筆記換了空間 → 該 docId 的伺服器 blob 已改用新空間金鑰,強制 repull 以新金鑰重解
+    this.docSpaces.observe((event, tx) => {
+      if (tx.origin === "sync") for (const docId of event.keysChanged as Set<string>) this.client.repull(docId);
+    });
 
     this.client = new SyncClient({
       url: settings.url,
@@ -161,13 +192,15 @@ export class SyncManager {
       host: this.makeHost(),
       createSocket: (url) => new WebSocket(url) as unknown as SocketLike,
       onStatus: (status) => {
+        const wasOffline = this.status !== "online";
         this.status = status;
+        if (status === "online" && wasOffline) this.flushPendingRekey();
         this.onStatus?.(status);
       },
       onAwareness: (docId, states) => this.emitPresence(docId, states),
       pushDebounceMs: tuning?.pushDebounceMs,
       snapshotThreshold: tuning?.snapshotThreshold,
-      cipher: tuning?.cipher,
+      cipher: routingCipher ?? tuning?.cipher,
     });
     this.unsubscribeFiles = session.onFileEvent((event) => this.onLocalFile(event));
     // client 就緒後,把既有留言 doc 讀進記憶體,才會進 listDocIds、連線後同步
@@ -228,6 +261,57 @@ export class SyncManager {
   async revokeShare(shareId: string): Promise<ShareEntry[]> {
     const shares = await this.client.revokeShare(shareId);
     return shares.map((s) => ({ ...s, rel: this.session.relForDocId(s.docId) }));
+  }
+
+  // ── 空間(vault → 空間 → 筆記三層的中繼資料 + 金鑰路由)──
+
+  /** 全部空間(含預設空間,永遠在最前) */
+  listSpaces(): Space[] {
+    return readSpaces(this.meta);
+  }
+
+  /** 建立新空間,回傳新 spaceId(id 由此處生成 UUID) */
+  createSpace(name: string, color?: string): string {
+    const id = randomUUID();
+    this.meta.transact(() => createSpaceModel(this.meta, { id, name, color, at: Date.now() }), "local-meta");
+    return id;
+  }
+
+  renameSpace(spaceId: string, name: string): void {
+    this.meta.transact(() => renameSpaceModel(this.meta, spaceId, name, Date.now()), "local-meta");
+  }
+
+  /** 某筆記所屬空間 id(未指派 → 預設空間) */
+  spaceOfNote(rel: string): string {
+    const id = this.session.peekDocId(rel) ?? this.session.docId(rel);
+    return spaceOf(this.meta, id);
+  }
+
+  /**
+   * 把筆記移到某空間:改歸屬(路由 cipher 之後對此 docId 改用新空間金鑰),
+   * 再以新金鑰重推快照、截斷舊金鑰增量,使其他裝置能以新空間金鑰解出。
+   * 離線或未拉齊而無法重推時,登記到 pendingRekey,上線後補推。
+   */
+  async moveNoteToSpace(rel: string, spaceId: string): Promise<void> {
+    const docId = this.session.peekDocId(rel) ?? this.session.docId(rel);
+    if (spaceOf(this.meta, docId) === spaceId) return;
+    this.meta.transact(() => moveNoteModel(this.meta, docId, spaceId, Date.now()), "local-meta");
+    const done = await this.client.rekey(docId);
+    if (!done) this.pendingRekey.add(docId);
+  }
+
+  /** 空間變更稽核紀錄(append-only)供 UI 追查 */
+  readSpaceAudit(): SpaceAuditEvent[] {
+    return readAudit(this.meta);
+  }
+
+  /** 上線後補推移動當下未能重推的快照,直到成功才移出待辦 */
+  private flushPendingRekey(): void {
+    for (const docId of [...this.pendingRekey]) {
+      void this.client.rekey(docId).then((done) => {
+        if (done) this.pendingRekey.delete(docId);
+      });
+    }
   }
 
   private emitPresence(docId: string, states: Map<number, AwarenessState>): void {

@@ -13,7 +13,9 @@ import { DEFAULT_SPACE_ID } from "./crypto.ts";
  */
 
 const SPACES = "spaces";
-const DOC_SPACES = "docSpaces";
+/** vault-meta 上「筆記歸屬」Y.Map 的 key,匯出供 SyncManager 掛遠端變更 observer */
+export const DOC_SPACES_MAP = "docSpaces";
+const DOC_SPACES = DOC_SPACES_MAP;
 const AUDIT = "spaceAudit";
 
 export interface Space {

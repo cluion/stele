@@ -30,6 +30,7 @@ export {
   moveNote,
   recordCopy,
   readAudit,
+  DOC_SPACES_MAP,
   type Space,
   type SpaceAuditKind,
   type SpaceAuditEvent,
