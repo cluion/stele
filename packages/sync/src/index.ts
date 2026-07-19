@@ -22,3 +22,15 @@ export {
   type AwarenessState,
 } from "./client.ts";
 export { ShareClient, type ShareClientOptions } from "./share-client.ts";
+export {
+  readSpaces,
+  spaceOf,
+  createSpace,
+  renameSpace,
+  moveNote,
+  recordCopy,
+  readAudit,
+  type Space,
+  type SpaceAuditKind,
+  type SpaceAuditEvent,
+} from "./spaces.ts";
