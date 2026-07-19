@@ -12,7 +12,9 @@ import { DEFAULT_SPACE_ID } from "./crypto.ts";
  * - spaceAudit:Y.Array<SpaceAuditEvent>  append-only 稽核紀錄
  */
 
-const SPACES = "spaces";
+/** vault-meta 上「空間登記」Y.Map 的 key,匯出供 SyncManager 掛變更 observer(observeDeep 含改名) */
+export const SPACES_MAP = "spaces";
+const SPACES = SPACES_MAP;
 /** vault-meta 上「筆記歸屬」Y.Map 的 key,匯出供 SyncManager 掛遠端變更 observer */
 export const DOC_SPACES_MAP = "docSpaces";
 const DOC_SPACES = DOC_SPACES_MAP;

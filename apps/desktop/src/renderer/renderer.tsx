@@ -24,7 +24,18 @@ import { encodeCursor, participantCursor, throttle, type RemoteCursor } from "./
 import { remoteCursorPlugin, remoteCursorKey, type BlockCursor } from "./wysiwyg-cursors.ts";
 import { commentMarkPlugin, commentMarkKey, type CommentBlock } from "./comment-marks.ts";
 import { GraphView } from "./graph-view.tsx";
-import type { SteleApi, BacklinkItem, VaultInfo, Participant, ShareEntry, SharePermission, CommentIdentity } from "../main/preload.ts";
+import type {
+  SteleApi,
+  BacklinkItem,
+  VaultInfo,
+  Participant,
+  ShareEntry,
+  SharePermission,
+  CommentIdentity,
+  SpacesOverview,
+  SpaceInfo,
+  SpaceAuditItem,
+} from "../main/preload.ts";
 
 type EditorMode = "wysiwyg" | "source";
 
@@ -1072,6 +1083,42 @@ function SharedView({ state, onClose }: { state: SharedState; onClose: () => voi
   );
 }
 
+function SpaceAuditDialog({ spaces, onClose }: { spaces: SpaceInfo[]; onClose: () => void }) {
+  const { t } = useTranslation();
+  const [items, setItems] = useState<SpaceAuditItem[]>([]);
+  useEffect(() => {
+    void window.stele.spaceAudit().then(setItems);
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const nameOf = (id?: string): string => {
+    const s = spaces.find((sp) => sp.id === id);
+    if (!s) return id ?? "";
+    return s.isDefault && !s.name ? t("space.default") : s.name;
+  };
+  return (
+    <div className="switcher-backdrop" onClick={onClose}>
+      <div className="switcher audit" onClick={(e) => e.stopPropagation()}>
+        <h2>{t("space.audit")}</h2>
+        {items.length === 0 && <p className="placeholder">{t("space.auditEmpty")}</p>}
+        <ul className="audit-list">
+          {items
+            .map((e, i) => ({ e, i }))
+            .reverse()
+            .map(({ e, i }) => (
+              <li key={i}>{t(`space.audit.${e.kind}`, { name: e.name ?? nameOf(e.spaceId) })}</li>
+            ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const { t } = useTranslation();
   // undefined = 啟動查詢中,null = 尚未開啟 vault(歡迎畫面)
@@ -1093,10 +1140,29 @@ function App() {
   // 消費分享連結:null = 未開共享;貼上連結對話框開關
   const [shared, setShared] = useState<SharedState | null>(null);
   const [consumeOpen, setConsumeOpen] = useState(false);
+  // 空間總覽(null = 同步未啟用,側欄退回平面清單)
+  const [spacesData, setSpacesData] = useState<SpacesOverview | null>(null);
+  // 建立/改名空間對話框
+  const [spaceEdit, setSpaceEdit] = useState<{ id?: string; value: string; failed?: string } | null>(null);
+  // 選目標空間(移動/複製)
+  const [spacePick, setSpacePick] = useState<{ rel: string; action: "move" | "copy" } | null>(null);
+  // 移動確認
+  const [moveConfirm, setMoveConfirm] = useState<{ rel: string; spaceId: string; spaceName: string } | null>(null);
+  // 稽核紀錄面板
+  const [auditOpen, setAuditOpen] = useState(false);
+  // 折疊的空間 section
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
 
   useEffect(() => {
     void window.stele.syncStatus().then(setSyncState);
     return window.stele.onSyncStatus(setSyncState);
+  }, [vaultInfo?.root]);
+
+  // 空間總覽:載入 + 訂閱本地/遠端變更
+  useEffect(() => {
+    const load = (): void => void window.stele.spacesOverview().then(setSpacesData);
+    load();
+    return window.stele.onSpacesChanged(load);
   }, [vaultInfo?.root]);
 
   useEffect(() => {
@@ -1242,6 +1308,49 @@ function App() {
 
   const files = vaultInfo?.files ?? [];
 
+  // ── 空間分組與操作 ──
+  const spaces = spacesData?.spaces ?? [];
+  const assignments = spacesData?.assignments ?? {};
+  const defaultSpaceId = spaces.find((s) => s.isDefault)?.id;
+  const spaceLabel = (s: SpaceInfo): string => (s.isDefault && !s.name ? t("space.default") : s.name);
+  // 只有存在自訂空間時才分組顯示,否則平面清單
+  const showGroups = spaces.length > 1;
+  const groupedFiles = (): Array<{ space: SpaceInfo; files: string[] }> => {
+    const byId = new Map(spaces.map((s) => [s.id, [] as string[]]));
+    for (const f of files) {
+      const sid = assignments[f];
+      const target = sid && byId.has(sid) ? sid : defaultSpaceId;
+      if (target) byId.get(target)!.push(f);
+    }
+    return spaces.map((s) => ({ space: s, files: byId.get(s.id) ?? [] }));
+  };
+  const currentSpaceOf = (rel: string): string | undefined => assignments[rel] ?? defaultSpaceId;
+  const toggleCollapsed = (id: string): void =>
+    setCollapsed((c) => {
+      const next = new Set(c);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const doMove = (rel: string, spaceId: string): void => {
+    void window.stele.moveNoteToSpace(rel, spaceId).catch((err: unknown) => console.error("移動到空間失敗:", err));
+  };
+  const doCopy = (rel: string, spaceId: string): void => {
+    void window.stele
+      .copyNoteToSpace(rel, spaceId)
+      .then(async (copyRel) => {
+        const info = await window.stele.listVault();
+        if (info) setVaultInfo(info);
+        activate(copyRel);
+      })
+      .catch((err: unknown) => console.error("複製到空間失敗:", err));
+  };
+  const renderNote = (f: string) => (
+    <button key={f} data-rel={f} className={f === active ? "active" : ""} onClick={() => activate(f)}>
+      {f.replace(/\.md$/, "")}
+    </button>
+  );
+
   /** 未命名、未命名 2、未命名 3… 找到第一個沒被用掉的 */
   const newUntitled = (folder: string) => {
     const base = t("contextmenu.untitled");
@@ -1316,13 +1425,41 @@ function App() {
           <button className="vault-switch" title={t("vault.switch")} aria-label={t("vault.switch")} onClick={chooseVault}>
             ⇄
           </button>
+          {spacesData && (
+            <>
+              <button className="vault-switch" title={t("space.new")} aria-label={t("space.new")} onClick={() => setSpaceEdit({ value: "" })}>
+                ＋
+              </button>
+              <button className="vault-switch" title={t("space.audit")} aria-label={t("space.audit")} onClick={() => setAuditOpen(true)}>
+                🕘
+              </button>
+            </>
+          )}
         </div>
         {files.length === 0 && <p className="placeholder">{t("sidebar.empty")}</p>}
-        {files.map((f) => (
-          <button key={f} data-rel={f} className={f === active ? "active" : ""} onClick={() => activate(f)}>
-            {f.replace(/\.md$/, "")}
-          </button>
-        ))}
+        {showGroups
+          ? groupedFiles().map(({ space, files: sf }) => (
+              <div className="space-group" key={space.id}>
+                <div className="space-header">
+                  <button className="space-toggle" onClick={() => toggleCollapsed(space.id)}>
+                    <span className="space-caret">{collapsed.has(space.id) ? "▸" : "▾"}</span>
+                    {space.color && <span className="space-dot" style={{ background: space.color }} />}
+                    {spaceLabel(space)}
+                    <span className="space-count">{sf.length}</span>
+                  </button>
+                  <button
+                    className="space-rename"
+                    title={t("space.rename")}
+                    aria-label={t("space.rename")}
+                    onClick={() => setSpaceEdit({ id: space.id, value: spaceLabel(space) })}
+                  >
+                    ✎
+                  </button>
+                </div>
+                {!collapsed.has(space.id) && sf.map(renderNote)}
+              </div>
+            ))
+          : files.map(renderNote)}
       </nav>
       {graphOpen ? (
         <GraphView
@@ -1377,6 +1514,26 @@ function App() {
                 >
                   {t("contextmenu.rename")}
                 </button>
+                {spacesData && (
+                  <>
+                    <button
+                      onClick={() => {
+                        setSpacePick({ rel: menu.rel!, action: "move" });
+                        setMenu(null);
+                      }}
+                    >
+                      {t("space.moveTo")}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setSpacePick({ rel: menu.rel!, action: "copy" });
+                        setMenu(null);
+                      }}
+                    >
+                      {t("space.copyTo")}
+                    </button>
+                  </>
+                )}
                 <button
                   onClick={() => {
                     setShareRel(menu.rel!);
@@ -1457,6 +1614,81 @@ function App() {
         />
       )}
       {shareRel && <ShareDialog rel={shareRel} onClose={() => setShareRel(null)} />}
+      {spacePick && (
+        <div className="switcher-backdrop" onClick={() => setSpacePick(null)}>
+          <div className="switcher space-picker" onClick={(e) => e.stopPropagation()}>
+            <h2>
+              {t(spacePick.action === "move" ? "space.pickMove" : "space.pickCopy", {
+                name: spacePick.rel.replace(/\.md$/, "").split("/").pop(),
+              })}
+            </h2>
+            {spaces
+              .filter((s) => !(spacePick.action === "move" && s.id === currentSpaceOf(spacePick.rel)))
+              .map((s) => (
+                <button
+                  key={s.id}
+                  className="space-pick-item"
+                  onClick={() => {
+                    const { rel, action } = spacePick;
+                    setSpacePick(null);
+                    if (action === "copy") doCopy(rel, s.id);
+                    else setMoveConfirm({ rel, spaceId: s.id, spaceName: spaceLabel(s) });
+                  }}
+                >
+                  {s.color && <span className="space-dot" style={{ background: s.color }} />}
+                  {spaceLabel(s)}
+                </button>
+              ))}
+          </div>
+        </div>
+      )}
+      {moveConfirm && (
+        <div className="switcher-backdrop" onClick={() => setMoveConfirm(null)}>
+          <div className="switcher confirm" onClick={(e) => e.stopPropagation()}>
+            <h2>{t("space.moveConfirmTitle", { space: moveConfirm.spaceName })}</h2>
+            <p className="placeholder">{t("space.moveConfirmBody", { space: moveConfirm.spaceName })}</p>
+            <div className="confirm-actions">
+              <button onClick={() => setMoveConfirm(null)}>{t("space.cancel")}</button>
+              <button
+                className="primary"
+                onClick={() => {
+                  doMove(moveConfirm.rel, moveConfirm.spaceId);
+                  setMoveConfirm(null);
+                }}
+              >
+                {t("space.moveConfirmOk")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {spaceEdit && (
+        <div className="switcher-backdrop" onClick={() => setSpaceEdit(null)}>
+          <div className="switcher" onClick={(e) => e.stopPropagation()}>
+            <input
+              autoFocus
+              placeholder={t("space.namePlaceholder")}
+              value={spaceEdit.value}
+              onChange={(e) => setSpaceEdit({ ...spaceEdit, value: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing) return;
+                if (e.key === "Escape") setSpaceEdit(null);
+                if (e.key !== "Enter") return;
+                e.preventDefault();
+                const name = spaceEdit.value.trim();
+                if (!name) return;
+                const done = spaceEdit.id
+                  ? window.stele.renameSpace(spaceEdit.id, name)
+                  : window.stele.createSpace(name).then(() => undefined);
+                void done.then(() => setSpaceEdit(null)).catch((err: unknown) => setSpaceEdit({ ...spaceEdit, failed: String(err) }));
+              }}
+            />
+            {spaceEdit.failed && <p className="error">{spaceEdit.failed}</p>}
+            <p className="placeholder">{spaceEdit.id ? t("space.rename") : t("space.new")}</p>
+          </div>
+        </div>
+      )}
+      {auditOpen && <SpaceAuditDialog spaces={spaces} onClose={() => setAuditOpen(false)} />}
       {overlays}
     </div>
   );

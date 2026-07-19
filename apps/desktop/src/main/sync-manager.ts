@@ -12,6 +12,7 @@ import {
   renameSpace as renameSpaceModel,
   moveNote as moveNoteModel,
   recordCopy as recordCopyModel,
+  SPACES_MAP,
   DOC_SPACES_MAP,
   type AwarenessState,
   type Cipher,
@@ -122,6 +123,7 @@ export class SyncManager {
   private metaTimer: NodeJS.Timeout | undefined;
   private stateTimer: NodeJS.Timeout | undefined;
   private onPresence: ((rel: string, participants: Participant[]) => void) | undefined;
+  private onSpacesChange: (() => void) | undefined;
   /** 檔案系統操作依序執行,遠端 meta 變更不互相踩腳 */
   private fsOps: Promise<void> = Promise.resolve();
   status: SyncStatus = "offline";
@@ -152,6 +154,8 @@ export class SyncManager {
       onCommentUpdate?: (noteDocId: string, update: Uint8Array) => void;
       /** 空間金鑰來源:提供時啟用空間路由(每篇筆記以其所屬空間的金鑰加解密);取代 cipher/exportDocKey */
       spaces?: SpaceKeySource;
+      /** 空間登記或筆記歸屬有變(本地或遠端),供 main 通知 renderer 刷新側欄 */
+      onSpacesChange?: () => void;
     },
   ) {
     this.self = {
@@ -160,6 +164,7 @@ export class SyncManager {
       color: colorFor(settings.deviceId),
     };
     this.onPresence = tuning?.onPresence;
+    this.onSpacesChange = tuning?.onSpacesChange;
     this.spaces = tuning?.spaces;
     this.shareBase = httpBaseFrom(settings.url);
     this.metaFile = path.join(session.root, ".stele", "meta.ybin");
@@ -190,7 +195,10 @@ export class SyncManager {
     // 遠端得知某筆記換了空間 → 該 docId 的伺服器 blob 已改用新空間金鑰,強制 repull 以新金鑰重解
     this.docSpaces.observe((event, tx) => {
       if (tx.origin === "sync") for (const docId of event.keysChanged as Set<string>) this.client.repull(docId);
+      this.onSpacesChange?.();
     });
+    // 空間登記變更(建立/改名/顏色,含巢狀欄位)→ 通知刷新側欄;observeDeep 才抓得到改名
+    this.meta.getMap(SPACES_MAP).observeDeep(() => this.onSpacesChange?.());
 
     this.client = new SyncClient({
       url: settings.url,
@@ -276,6 +284,16 @@ export class SyncManager {
   /** 全部空間(含預設空間,永遠在最前) */
   listSpaces(): Space[] {
     return readSpaces(this.meta);
+  }
+
+  /** 空間總覽:全部空間 + 每篇筆記歸屬(rel → spaceId,僅非預設空間) */
+  spacesOverview(): { spaces: Space[]; assignments: Record<string, string> } {
+    const assignments: Record<string, string> = {};
+    for (const [docId, spaceId] of this.docSpaces.entries()) {
+      const rel = this.session.relForDocId(docId);
+      if (rel !== undefined) assignments[rel] = spaceId;
+    }
+    return { spaces: readSpaces(this.meta), assignments };
   }
 
   /** 建立新空間,回傳新 spaceId(id 由此處生成 UUID) */

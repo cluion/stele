@@ -115,6 +115,7 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
         const rel = next.relForDocId(noteDocId);
         if (rel) sendAll("comments:update", rel, update);
       },
+      onSpacesChange: () => sendAll("spaces:changed"),
     });
     syncManager.start();
   } else {
@@ -204,6 +205,32 @@ ipcMain.handle("comments:open", (_e, rel: unknown) => {
 ipcMain.on("comments:push", (_e, rel: unknown, update: unknown) => {
   if (syncManager && typeof rel === "string" && update instanceof Uint8Array) syncManager.pushComment(rel, update);
 });
+
+ipcMain.handle("spaces:overview", () => syncManager?.spacesOverview() ?? null);
+
+ipcMain.handle("spaces:create", (_e, name: unknown, color: unknown) => {
+  if (!syncManager || typeof name !== "string" || name.trim().length === 0) throw new Error("非法請求");
+  return syncManager.createSpace(name.trim(), typeof color === "string" ? color : undefined);
+});
+
+ipcMain.handle("spaces:rename", (_e, spaceId: unknown, name: unknown) => {
+  if (!syncManager || typeof spaceId !== "string" || typeof name !== "string" || name.trim().length === 0) {
+    throw new Error("非法請求");
+  }
+  syncManager.renameSpace(spaceId, name.trim());
+});
+
+ipcMain.handle("spaces:move", (_e, rel: unknown, spaceId: unknown) => {
+  if (!syncManager || typeof rel !== "string" || typeof spaceId !== "string") throw new Error("非法請求");
+  return syncManager.moveNoteToSpace(rel, spaceId);
+});
+
+ipcMain.handle("spaces:copy", (_e, rel: unknown, spaceId: unknown) => {
+  if (!syncManager || typeof rel !== "string" || typeof spaceId !== "string") throw new Error("非法請求");
+  return syncManager.copyNoteToSpace(rel, spaceId);
+});
+
+ipcMain.handle("spaces:audit", () => syncManager?.readSpaceAudit() ?? []);
 
 ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {
   if (typeof rel !== "string") throw new Error("非法參數");

@@ -71,6 +71,43 @@ export interface SteleApi {
   onSharedClosed(cb: (code: string) => void): () => void;
   /** 共享 doc 遠端更新;回傳退訂函式 */
   onSharedUpdate(cb: (update: Uint8Array) => void): () => void;
+  /** 空間總覽:全部空間 + 每篇筆記歸屬(rel → spaceId);同步未啟用回 null(側欄退回平面清單) */
+  spacesOverview(): Promise<SpacesOverview | null>;
+  /** 建立空間,回傳新 spaceId */
+  createSpace(name: string, color?: string): Promise<string>;
+  renameSpace(spaceId: string, name: string): Promise<void>;
+  /** 移動筆記到空間(跨金鑰邊界,會以新金鑰重新加密) */
+  moveNoteToSpace(rel: string, spaceId: string): Promise<void>;
+  /** 複製筆記到空間:目標得一篇全新筆記(原筆記不動),回傳副本 rel */
+  copyNoteToSpace(rel: string, spaceId: string): Promise<string>;
+  /** 空間變更稽核紀錄 */
+  spaceAudit(): Promise<SpaceAuditItem[]>;
+  /** 空間或歸屬有變(本地或遠端);回傳退訂函式 */
+  onSpacesChanged(cb: () => void): () => void;
+}
+
+export interface SpaceInfo {
+  id: string;
+  /** 預設空間未改名時為空字串,UI 以 i18n 補預設標籤 */
+  name: string;
+  createdAt: number;
+  color?: string;
+  isDefault: boolean;
+}
+
+export interface SpacesOverview {
+  spaces: SpaceInfo[];
+  /** 筆記歸屬:rel → spaceId(僅非預設空間的筆記;其餘視為預設空間) */
+  assignments: Record<string, string>;
+}
+
+export interface SpaceAuditItem {
+  at: number;
+  kind: "space-created" | "space-renamed" | "note-moved" | "note-copied";
+  docId?: string;
+  spaceId?: string;
+  fromSpaceId?: string;
+  name?: string;
 }
 
 export interface CommentIdentity {
@@ -176,6 +213,17 @@ const api: SteleApi = {
     const handler = (_e: IpcRendererEvent, update: Uint8Array) => cb(update);
     ipcRenderer.on("shared:update", handler);
     return () => ipcRenderer.off("shared:update", handler);
+  },
+  spacesOverview: () => ipcRenderer.invoke("spaces:overview"),
+  createSpace: (name, color) => ipcRenderer.invoke("spaces:create", name, color),
+  renameSpace: (spaceId, name) => ipcRenderer.invoke("spaces:rename", spaceId, name),
+  moveNoteToSpace: (rel, spaceId) => ipcRenderer.invoke("spaces:move", rel, spaceId),
+  copyNoteToSpace: (rel, spaceId) => ipcRenderer.invoke("spaces:copy", rel, spaceId),
+  spaceAudit: () => ipcRenderer.invoke("spaces:audit"),
+  onSpacesChanged: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("spaces:changed", handler);
+    return () => ipcRenderer.off("spaces:changed", handler);
   },
 };
 

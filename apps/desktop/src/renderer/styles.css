@@ -170,6 +170,43 @@ body {
 .sidebar button.active { background: var(--accent-subtle); color: var(--accent); }
 .sidebar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
+/* 空間分組 */
+.space-group { margin-bottom: var(--sp-2); }
+.space-header { display: flex; align-items: center; gap: var(--sp-1); }
+.space-header .space-toggle {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+}
+.space-caret { color: var(--text-faint); font-size: 0.7em; width: 0.8em; }
+.space-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.space-count { margin-left: auto; color: var(--text-faint); font-size: var(--fs-xs); }
+.space-header .space-rename {
+  width: auto;
+  flex: none;
+  color: var(--text-faint);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+.space-header:hover .space-rename { opacity: 1; }
+.space-header .space-rename:hover { color: var(--accent); }
+.space-group > button[data-rel] { padding-left: var(--sp-5); }
+
+/* 空間選擇 / 移動確認 / 稽核 modal */
+.switcher.space-picker h2,
+.switcher.confirm h2,
+.switcher.audit h2 { font-size: var(--fs-sm); color: var(--text-muted); margin: 0 0 var(--sp-2); }
+.space-pick-item { display: flex; align-items: center; gap: var(--sp-2); }
+.confirm-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: var(--sp-3); }
+.confirm-actions button { width: auto; padding: var(--sp-2) var(--sp-4); border-radius: var(--radius-sm); cursor: pointer; }
+.confirm-actions button.primary { background: var(--accent); color: var(--accent-text); }
+.audit-list { list-style: none; margin: 0; padding: 0; max-height: 50vh; overflow-y: auto; }
+.audit-list li { padding: var(--sp-1) var(--sp-2); color: var(--text-muted); font-size: var(--fs-sm); }
+
 .editor-pane { flex: 1; overflow-y: auto; }
 .placeholder { color: var(--text-muted); padding: var(--sp-7); }
 
