@@ -11,6 +11,7 @@ import {
   createSpace as createSpaceModel,
   renameSpace as renameSpaceModel,
   moveNote as moveNoteModel,
+  recordCopy as recordCopyModel,
   DOC_SPACES_MAP,
   type AwarenessState,
   type Cipher,
@@ -73,6 +74,13 @@ function colorFor(deviceId: string): string {
 function commentDocIdFor(noteDocId: string): string {
   const h = createHash("sha256").update(`stele-comments:${noteDocId}`).digest("hex");
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
+
+/** 複製筆記的目標路徑:「a/b.md」→「a/b (副本).md」(進一步撞名由 VaultSession freeVariant 退讓) */
+function copyPathFor(rel: string): string {
+  const dir = path.dirname(rel);
+  const name = `${path.basename(rel).replace(/\.md$/, "")} (副本).md`;
+  return dir === "." ? name : `${dir}/${name}`;
 }
 
 /** 由 ws(s) 同步網址推導檢視器的 http(s) 基底;分享頁與 WS 同一台伺服器同一埠 */
@@ -298,6 +306,28 @@ export class SyncManager {
     this.meta.transact(() => moveNoteModel(this.meta, docId, spaceId, Date.now()), "local-meta");
     const done = await this.client.rekey(docId);
     if (!done) this.pendingRekey.add(docId);
+  }
+
+  /**
+   * 複製筆記到某空間:目標空間生一篇全新筆記(新 docId、內容複製),原筆記原封不動。
+   * 自出生即以目標空間金鑰加密——先 recordCopy 登記歸屬,再建檔開 host、track 同步,
+   * 確保第一次 push 就走目標空間的金鑰。回傳副本的相對路徑。
+   */
+  copyNoteToSpace(rel: string, spaceId: string): string {
+    const fromDocId = this.session.peekDocId(rel) ?? this.session.docId(rel);
+    const md = this.session.docFor(rel).getText("md").toString();
+    const copy = new Y.Doc();
+    copy.getText("md").insert(0, md);
+    const newDocId = randomUUID();
+    // 先登記歸屬:讓 track 觸發的第一次 push 就以目標空間金鑰加密,免得先用預設金鑰再重推
+    this.meta.transact(
+      () => recordCopyModel(this.meta, { fromDocId, newDocId, toSpaceId: spaceId, at: Date.now() }),
+      "local-meta",
+    );
+    const landed = this.session.adoptRemoteDoc(copyPathFor(rel), newDocId, copy);
+    this.setPath(newDocId, landed);
+    this.client.track(newDocId);
+    return landed;
   }
 
   /** 空間變更稽核紀錄(append-only)供 UI 追查 */

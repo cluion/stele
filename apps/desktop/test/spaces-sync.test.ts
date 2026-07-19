@@ -109,4 +109,26 @@ describe("空間端對端同步", () => {
       "C bootstrap 出空間筆記內容與歸屬",
     );
   });
+
+  it("複製到空間:目標得一篇全新筆記(在目標空間)、原筆記原封留在原空間", async () => {
+    const a = await makeDevice("v-sp4", "devA", { "計畫.md": "計畫內容\n" });
+    const b = await makeDevice("v-sp4", "devB");
+    await until(() => content(b, "計畫.md") === "計畫內容\n", "B 先拿到原筆記");
+
+    const workId = a.manager.createSpace("工作");
+    const copyRel = a.manager.copyNoteToSpace("計畫.md", workId);
+    expect(copyRel).not.toBe("計畫.md"); // 是全新一篇,不同路徑
+
+    // A:原筆記留在預設、副本在工作,兩者內容相同
+    expect(a.manager.spaceOfNote("計畫.md")).toBe(DEFAULT_SPACE_ID);
+    expect(a.manager.spaceOfNote(copyRel)).toBe(workId);
+    expect(content(a, copyRel)).toBe("計畫內容\n");
+    expect(content(a, "計畫.md")).toBe("計畫內容\n");
+
+    // B:兩篇都收斂,歸屬與內容正確
+    await until(() => content(b, copyRel) === "計畫內容\n", "B 收到副本內容");
+    await until(() => b.manager.spaceOfNote(copyRel) === workId, "B 收斂副本歸屬到工作");
+    expect(content(b, "計畫.md")).toBe("計畫內容\n");
+    expect(b.manager.spaceOfNote("計畫.md")).toBe(DEFAULT_SPACE_ID);
+  });
 });
