@@ -27,6 +27,7 @@ import {
   type SyncStatus,
 } from "@stele/sync";
 import type { VaultSession, VaultFileEvent } from "./vault-session.ts";
+import { VaultMeta } from "./vault-meta.ts";
 
 /**
  * 把 VaultSession 接上 SyncClient:
@@ -104,7 +105,11 @@ interface PersistedDocState {
 const SAVE_DEBOUNCE_MS = 200;
 
 export class SyncManager {
-  private readonly meta = new Y.Doc();
+  private readonly metaStore: VaultMeta;
+  /** meta doc 本體;生老病死由 VaultMeta 管,同步層只是它的訂閱者 */
+  private get meta(): Y.Doc {
+    return this.metaStore.doc;
+  }
   private readonly paths: Y.Map<string>;
   /** 留言登記表:筆記 docId → 伴生留言 docId,隨 meta 同步,讓留言 doc 的存在跨裝置傳播 */
   private readonly comments: Y.Map<string>;
@@ -118,9 +123,7 @@ export class SyncManager {
   private readonly states = new Map<string, SyncDocState>();
   private readonly client: SyncClient;
   private readonly unsubscribeFiles: () => void;
-  private readonly metaFile: string;
   private readonly stateFile: string;
-  private metaTimer: NodeJS.Timeout | undefined;
   private stateTimer: NodeJS.Timeout | undefined;
   private onPresence: ((rel: string, participants: Participant[]) => void) | undefined;
   private onSpacesChange: (() => void) | undefined;
@@ -167,7 +170,7 @@ export class SyncManager {
     this.onSpacesChange = tuning?.onSpacesChange;
     this.spaces = tuning?.spaces;
     this.shareBase = httpBaseFrom(settings.url);
-    this.metaFile = path.join(session.root, ".stele", "meta.ybin");
+    this.metaStore = new VaultMeta(session.root);
     this.stateFile = path.join(session.root, ".stele", "sync-state.json");
     this.commentsDir = path.join(session.root, ".stele", "comments");
     this.paths = this.meta.getMap("paths");
@@ -182,10 +185,8 @@ export class SyncManager {
     this.exportDocKey = this.spaces
       ? (docId) => this.spaces!.cipher(spaceOf(this.meta, docId)).then((c) => c.exportDocKey(docId))
       : tuning?.exportDocKey;
-    this.loadMeta();
     this.loadStates();
 
-    this.meta.on("update", () => this.scheduleMetaSave());
     this.paths.observe((event, tx) => {
       if (tx.origin === "sync") this.applyRemoteMeta(Array.from(event.keysChanged as Set<string>));
     });
@@ -383,14 +384,12 @@ export class SyncManager {
     this.unsubscribeFiles();
     await this.client.stop();
     await this.fsOps;
-    clearTimeout(this.metaTimer);
     clearTimeout(this.stateTimer);
     for (const timer of this.commentSaveTimers.values()) clearTimeout(timer);
     this.commentSaveTimers.clear();
-    this.saveMetaNow();
     this.saveStatesNow();
     for (const commentDocId of this.commentDocs.keys()) this.saveCommentNow(commentDocId);
-    this.meta.destroy();
+    this.metaStore.stop();
     for (const doc of this.commentDocs.values()) doc.destroy();
     this.commentDocs.clear();
     this.commentIds.clear();
@@ -577,29 +576,6 @@ export class SyncManager {
         .catch((err: unknown) => {
           console.error(`套用遠端路徑變更失敗 ${docId}:`, err);
         });
-    }
-  }
-
-  private loadMeta(): void {
-    try {
-      Y.applyUpdate(this.meta, readFileSync(this.metaFile), "load");
-    } catch {
-      // 首次同步或狀態不在:從 manifest 重建
-    }
-  }
-
-  private scheduleMetaSave(): void {
-    clearTimeout(this.metaTimer);
-    this.metaTimer = setTimeout(() => this.saveMetaNow(), SAVE_DEBOUNCE_MS);
-  }
-
-  private saveMetaNow(): void {
-    try {
-      mkdirSync(path.dirname(this.metaFile), { recursive: true });
-      writeFileSync(this.metaFile + ".tmp", Y.encodeStateAsUpdate(this.meta));
-      renameSync(this.metaFile + ".tmp", this.metaFile);
-    } catch (err) {
-      console.error("meta 狀態落盤失敗:", err);
     }
   }
 
