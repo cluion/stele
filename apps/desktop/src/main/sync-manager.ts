@@ -18,6 +18,7 @@ import {
 } from "@stele/sync";
 import type { VaultSession, VaultFileEvent } from "./vault-session.ts";
 import { VaultMeta, setPath } from "./vault-meta.ts";
+import { colorFor } from "./presence-color.ts";
 import type { SpaceSyncHooks } from "./spaces-service.ts";
 import type { CommentDocSource, CommentSyncHooks } from "./comment-store.ts";
 
@@ -54,14 +55,6 @@ export interface Participant {
   name: string;
   color: string;
   state: AwarenessState;
-}
-
-/** 從 deviceId 穩定衍生一個好看的色相,同一裝置每次同色 */
-const PRESENCE_COLORS = ["#0e7b93", "#d99a3d", "#b5485d", "#5b8c5a", "#7d5ba6", "#c56b2d", "#2c7da0"];
-function colorFor(deviceId: string): string {
-  let h = 0;
-  for (const ch of deviceId) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return PRESENCE_COLORS[h % PRESENCE_COLORS.length]!;
 }
 
 /** 由 ws(s) 同步網址推導檢視器的 http(s) 基底;分享頁與 WS 同一台伺服器同一埠 */

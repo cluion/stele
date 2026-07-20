@@ -1,6 +1,7 @@
 import { app } from "electron";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { colorFor } from "./presence-color.ts";
 import path from "node:path";
 
 export interface Settings {
@@ -36,11 +37,14 @@ export function saveSettings(patch: Settings): void {
   writeFileSync(settingsFile(), JSON.stringify({ ...loadSettings(), ...patch }, null, 2));
 }
 
-/** 本機身分,首次呼叫時配發並寫回設定 */
-export function localIdentity(): { deviceId: string; name: string } {
+/**
+ * 本機身分,首次呼叫時配發並寫回設定。
+ * 形狀與 SyncManager.identity() 一致(含 color,同一 deviceId 得同色),
+ * 兩者都填 renderer 的 CommentIdentity,純本地留言作者才不會缺色。
+ */
+export function localIdentity(): { deviceId: string; name: string; color: string } {
   const saved = loadSettings();
-  if (saved.deviceId) return { deviceId: saved.deviceId, name: saved.displayName ?? `我-${saved.deviceId.slice(0, 4)}` };
-  const deviceId = randomUUID();
-  saveSettings({ deviceId });
-  return { deviceId, name: `我-${deviceId.slice(0, 4)}` };
+  const deviceId = saved.deviceId ?? randomUUID();
+  if (!saved.deviceId) saveSettings({ deviceId });
+  return { deviceId, name: saved.displayName ?? `我-${deviceId.slice(0, 4)}`, color: colorFor(deviceId) };
 }
