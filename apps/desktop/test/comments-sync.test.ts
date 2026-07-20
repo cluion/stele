@@ -9,6 +9,7 @@ import { addThread, encodeAnchor, decodeAnchor, readThreads, type Thread } from 
 import { VaultSession } from "../src/main/vault-session.ts";
 import { SyncManager, type SyncSettings } from "../src/main/sync-manager.ts";
 import { VaultMeta } from "../src/main/vault-meta.ts";
+import { CommentStore } from "../src/main/comment-store.ts";
 
 const TOKEN = "留言同步-token-1234567890";
 const noop = {
@@ -32,6 +33,8 @@ interface Device {
   dir: string;
   session: VaultSession;
   manager: SyncManager;
+  meta: VaultMeta;
+  comments: CommentStore;
 }
 
 describe("留言 doc 端對端同步", () => {
@@ -45,13 +48,17 @@ describe("留言 doc 端對端同步", () => {
     for (const [rel, c] of Object.entries(seed)) writeFileSync(path.join(dir, rel), c);
     const session = new VaultSession(dir, noop);
     const settings: SyncSettings = { url: `ws://127.0.0.1:${server.port}`, token: TOKEN, vaultId, deviceId };
-    const manager = new SyncManager(session, settings, new VaultMeta(dir), undefined, {
+    const meta = new VaultMeta(dir);
+    const comments = new CommentStore(meta, session);
+    const manager = new SyncManager(session, settings, meta, undefined, {
       pushDebounceMs: 20,
       cipher,
       exportDocKey: (d: string) => cipher.exportDocKey(d),
+      comments,
     });
+    comments.setSyncHooks(manager);
     manager.start();
-    const device = { dir, session, manager };
+    const device = { dir, session, manager, meta, comments };
     devices.push(device);
     return device;
   }
@@ -64,7 +71,7 @@ describe("留言 doc 端對端同步", () => {
   };
   const threadsOf = (d: Device, rel: string): Thread[] => {
     const doc = new Y.Doc();
-    Y.applyUpdate(doc, d.manager.openCommentDoc(rel));
+    Y.applyUpdate(doc, d.comments.open(rel));
     return readThreads(doc);
   };
 
@@ -75,6 +82,8 @@ describe("留言 doc 端對端同步", () => {
   afterAll(async () => {
     for (const d of devices) {
       await d.manager.stop();
+      d.comments.stop();
+      d.meta.stop();
       await d.session.destroy();
     }
     await server.close();
@@ -92,10 +101,10 @@ describe("留言 doc 端對端同步", () => {
     const ytA = noteA.getText("md");
     const from = ytA.toString().indexOf("這一句");
     const cdoc = new Y.Doc();
-    Y.applyUpdate(cdoc, a.manager.openCommentDoc("文.md"));
+    Y.applyUpdate(cdoc, a.comments.open("文.md"));
     const sv = Y.encodeStateVector(cdoc);
     addThread(cdoc, { id: "t1", anchor: encodeAnchor(ytA, from, from + 3), author: "devA", name: "甲", body: "這裡要改", createdAt: 1 });
-    a.manager.pushComment("文.md", Y.encodeStateAsUpdate(cdoc, sv));
+    a.comments.push("文.md", Y.encodeStateAsUpdate(cdoc, sv));
 
     // B:等留言同步過來
     let tb: Thread[] = [];
@@ -119,19 +128,19 @@ describe("留言 doc 端對端同步", () => {
 
     // A 建串
     const c1 = new Y.Doc();
-    Y.applyUpdate(c1, a.manager.openCommentDoc("文.md"));
+    Y.applyUpdate(c1, a.comments.open("文.md"));
     let sv = Y.encodeStateVector(c1);
     addThread(c1, { id: "t1", anchor: { a: "AA", h: "BB" }, author: "devA", name: "甲", body: "問一下", createdAt: 1 });
-    a.manager.pushComment("文.md", Y.encodeStateAsUpdate(c1, sv));
+    a.comments.push("文.md", Y.encodeStateAsUpdate(c1, sv));
     await until(() => threadsOf(b, "文.md").length === 1, "B 收到串");
 
     // B 回覆
     const c2 = new Y.Doc();
-    Y.applyUpdate(c2, b.manager.openCommentDoc("文.md"));
+    Y.applyUpdate(c2, b.comments.open("文.md"));
     sv = Y.encodeStateVector(c2);
     const { addReply } = await import("@stele/editor-core");
     addReply(c2, "t1", { id: "r1", author: "devB", name: "乙", body: "我來答", createdAt: 2 });
-    b.manager.pushComment("文.md", Y.encodeStateAsUpdate(c2, sv));
+    b.comments.push("文.md", Y.encodeStateAsUpdate(c2, sv));
 
     // A 收到回覆
     await until(() => threadsOf(a, "文.md")[0]?.replies.length === 1, "A 收到回覆");

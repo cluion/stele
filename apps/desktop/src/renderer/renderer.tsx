@@ -136,7 +136,7 @@ function CommentsPanel({
           ×
         </button>
       </div>
-      {!available && <p className="placeholder comments-notice">{t("comments.needSync")}</p>}
+      {!available && <p className="placeholder comments-notice">{t("comments.unavailable")}</p>}
       <div className="comments-compose">
         <textarea
           placeholder={canAdd ? t("comments.placeholder") : t("comments.addHint")}

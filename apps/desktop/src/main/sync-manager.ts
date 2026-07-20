@@ -1,7 +1,6 @@
 import * as Y from "yjs";
 import WebSocket from "ws";
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
-import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   SyncClient,
@@ -20,6 +19,7 @@ import {
 import type { VaultSession, VaultFileEvent } from "./vault-session.ts";
 import { VaultMeta, setPath } from "./vault-meta.ts";
 import type { SpaceSyncHooks } from "./spaces-service.ts";
+import type { CommentDocSource, CommentSyncHooks } from "./comment-store.ts";
 
 /**
  * 把 VaultSession 接上 SyncClient:
@@ -64,12 +64,6 @@ function colorFor(deviceId: string): string {
   return PRESENCE_COLORS[h % PRESENCE_COLORS.length]!;
 }
 
-/** 由筆記 docId 決定性衍生留言伴生 docId(UUID 形狀);兩裝置各自算出同一個,免對照即可避免分裂 */
-function commentDocIdFor(noteDocId: string): string {
-  const h = createHash("sha256").update(`stele-comments:${noteDocId}`).digest("hex");
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
-}
-
 /** 由 ws(s) 同步網址推導檢視器的 http(s) 基底;分享頁與 WS 同一台伺服器同一埠 */
 function httpBaseFrom(wsUrl: string): string {
   try {
@@ -89,20 +83,15 @@ interface PersistedDocState {
 
 const SAVE_DEBOUNCE_MS = 200;
 
-export class SyncManager implements SpaceSyncHooks {
+export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
   /** meta doc 本體;生老病死由 VaultMeta 管(擁有者是 vault 而非同步),同步層只是它的訂閱者 */
   private get meta(): Y.Doc {
     return this.metaStore.doc;
   }
   private readonly paths: Y.Map<string>;
   /** 留言登記表:筆記 docId → 伴生留言 docId,隨 meta 同步,讓留言 doc 的存在跨裝置傳播 */
-  private readonly comments: Y.Map<string>;
-  /** 伴生留言 doc(不鏡像磁碟,存 .stele/comments/<id>.ybin) */
-  private readonly commentDocs = new Map<string, Y.Doc>();
-  private readonly commentIds = new Set<string>();
-  private readonly commentSaveTimers = new Map<string, NodeJS.Timeout>();
-  private readonly commentsDir: string;
-  private onCommentUpdate: ((noteDocId: string, update: Uint8Array) => void) | undefined;
+  /** 伴生留言 doc 的來源(由 main 注入);同步層只負責把它們推上去 */
+  private readonly comments: CommentDocSource | undefined;
   private readonly loose = new Map<string, Y.Doc>();
   private readonly states = new Map<string, SyncDocState>();
   private readonly client: SyncClient;
@@ -138,8 +127,8 @@ export class SyncManager implements SpaceSyncHooks {
       onPresence?: (rel: string, participants: Participant[]) => void;
       /** 匯出某 doc 的原始金鑰,供分享連結放進 URL fragment;未提供則無法建立分享 */
       exportDocKey?: (docId: string) => Promise<Uint8Array>;
-      /** 伴生留言 doc 有遠端更新時通知(noteDocId + Y update),供 main 廣播給 renderer */
-      onCommentUpdate?: (noteDocId: string, update: Uint8Array) => void;
+      /** 伴生留言 doc 來源:提供時一併納入同步 */
+      comments?: CommentDocSource;
       /** 空間金鑰來源:提供時啟用空間路由(每篇筆記以其所屬空間的金鑰加解密);取代 cipher/exportDocKey */
       spaces?: SpaceKeySource;
     },
@@ -153,11 +142,9 @@ export class SyncManager implements SpaceSyncHooks {
     this.spaces = tuning?.spaces;
     this.shareBase = httpBaseFrom(settings.url);
     this.stateFile = path.join(session.root, ".stele", "sync-state.json");
-    this.commentsDir = path.join(session.root, ".stele", "comments");
     this.paths = this.meta.getMap("paths");
-    this.comments = this.meta.getMap("comments");
+    this.comments = tuning?.comments;
     this.docSpaces = this.meta.getMap(DOC_SPACES_MAP);
-    this.onCommentUpdate = tuning?.onCommentUpdate;
     // 空間路由:每篇筆記以其所屬空間的金鑰加解密;meta/留言/未指派筆記歸屬皆為預設空間 → master 金鑰(零遷移)
     const routingCipher: Cipher | undefined = this.spaces && {
       encrypt: (docId, plain) => this.spaces!.cipher(spaceOf(this.meta, docId)).then((c) => c.encrypt(docId, plain)),
@@ -170,9 +157,6 @@ export class SyncManager implements SpaceSyncHooks {
 
     this.paths.observe((event, tx) => {
       if (tx.origin === "sync") this.applyRemoteMeta(Array.from(event.keysChanged as Set<string>));
-    });
-    this.comments.observe((event, tx) => {
-      if (tx.origin === "sync") this.onRemoteComments(Array.from(event.keysChanged as Set<string>));
     });
     // 遠端得知某筆記換了空間 → 該 docId 的伺服器 blob 已改用新空間金鑰,強制 repull 以新金鑰重解
     this.docSpaces.observe((event, tx) => {
@@ -198,10 +182,6 @@ export class SyncManager implements SpaceSyncHooks {
       cipher: routingCipher ?? tuning?.cipher,
     });
     this.unsubscribeFiles = session.onFileEvent((event) => this.onLocalFile(event));
-    // client 就緒後,把既有留言 doc 讀進記憶體,才會進 listDocIds、連線後同步
-    for (const [noteDocId, commentDocId] of this.comments.entries()) {
-      if (NOTE_DOC_ID.test(commentDocId)) this.commentDocFor(commentDocId, noteDocId);
-    }
   }
 
   start(): void {
@@ -269,9 +249,16 @@ export class SyncManager implements SpaceSyncHooks {
     if (!done) this.pendingRekey.add(docId);
   }
 
-  /** 新生的 doc(如跨空間複製的副本)納入同步 */
+  /** 新生的 doc(跨空間複製的副本、留言伴生 doc)納入同步 */
   trackNewDoc(docId: string): void {
     this.client.track(docId);
+  }
+
+  /** 交出 loose 池中的 doc:伴生 doc materialize 時要沿用同一物件,client runtime 可能已指向它 */
+  adoptLoose(docId: string): Y.Doc | undefined {
+    const doc = this.loose.get(docId);
+    if (doc) this.loose.delete(docId);
+    return doc;
   }
 
   /** 上線後補推移動當下未能重推的快照,直到成功才移出待辦 */
@@ -305,14 +292,8 @@ export class SyncManager implements SpaceSyncHooks {
     await this.client.stop();
     await this.fsOps;
     clearTimeout(this.stateTimer);
-    for (const timer of this.commentSaveTimers.values()) clearTimeout(timer);
-    this.commentSaveTimers.clear();
     this.saveStatesNow();
-    for (const commentDocId of this.commentDocs.keys()) this.saveCommentNow(commentDocId);
-    // 不動 metaStore:它屬於 vault 生命週期,由 main 在換 vault/退出時收
-    for (const doc of this.commentDocs.values()) doc.destroy();
-    this.commentDocs.clear();
-    this.commentIds.clear();
+    // 不動 metaStore 與 comments:兩者屬於 vault 生命週期,由 main 在換 vault/退出時收
     for (const doc of this.loose.values()) doc.destroy();
     this.loose.clear();
   }
@@ -322,91 +303,12 @@ export class SyncManager implements SpaceSyncHooks {
     return { ...this.self };
   }
 
-  /** 開啟某筆記的留言 doc(必要時建立),回傳目前狀態快照供 renderer 投影 */
-  openCommentDoc(noteRel: string): Uint8Array {
-    const noteDocId = this.session.peekDocId(noteRel) ?? this.session.docId(noteRel);
-    return Y.encodeStateAsUpdate(this.ensureCommentDoc(noteDocId));
-  }
-
-  /** renderer 對留言 doc 的本地變更:origin "renderer" 讓 client 推同步、不回音給自己 */
-  pushComment(noteRel: string, update: Uint8Array): void {
-    const noteDocId = this.session.peekDocId(noteRel) ?? this.session.docId(noteRel);
-    Y.applyUpdate(this.ensureCommentDoc(noteDocId), update, "renderer");
-  }
-
-  private ensureCommentDoc(noteDocId: string): Y.Doc {
-    // 決定性 id:兩裝置由同一 noteDocId 各自算出同一個 commentDocId,避免併發開啟時分裂
-    const commentDocId = commentDocIdFor(noteDocId);
-    if (this.comments.get(noteDocId) !== commentDocId) {
-      this.meta.transact(() => this.comments.set(noteDocId, commentDocId), "local-meta");
-    }
-    return this.commentDocFor(commentDocId, noteDocId);
-  }
-
-  private commentDocFor(commentDocId: string, noteDocId: string): Y.Doc {
-    const cached = this.commentDocs.get(commentDocId);
-    if (cached) return cached;
-    // 沿用 loose 池同一物件(client runtime 可能已指向它),否則從 .ybin 載入
-    let doc = this.loose.get(commentDocId);
-    if (doc) this.loose.delete(commentDocId);
-    else doc = this.loadCommentDoc(commentDocId);
-    doc.on("update", (update: Uint8Array, origin: unknown) => {
-      this.scheduleCommentSave(commentDocId);
-      if (origin !== "renderer") this.onCommentUpdate?.(noteDocId, update);
-    });
-    this.commentDocs.set(commentDocId, doc);
-    this.commentIds.add(commentDocId);
-    this.client.track(commentDocId);
-    return doc;
-  }
-
-  /** 遠端 meta 帶來新的留言登記:materialize 伴生 doc 並開始同步 */
-  private onRemoteComments(noteDocIds: string[]): void {
-    for (const noteDocId of noteDocIds) {
-      const commentDocId = this.comments.get(noteDocId);
-      if (commentDocId && NOTE_DOC_ID.test(commentDocId) && !this.commentDocs.has(commentDocId)) {
-        const update = Y.encodeStateAsUpdate(this.commentDocFor(commentDocId, noteDocId));
-        this.onCommentUpdate?.(noteDocId, update); // 讓已開著該筆記的 renderer 立即收到既有留言
-      }
-    }
-  }
-
-  private loadCommentDoc(commentDocId: string): Y.Doc {
-    const doc = new Y.Doc();
-    try {
-      Y.applyUpdate(doc, readFileSync(path.join(this.commentsDir, `${commentDocId}.ybin`)), "load");
-    } catch {
-      // 首次:空 doc
-    }
-    return doc;
-  }
-
-  private scheduleCommentSave(commentDocId: string): void {
-    clearTimeout(this.commentSaveTimers.get(commentDocId));
-    this.commentSaveTimers.set(
-      commentDocId,
-      setTimeout(() => this.saveCommentNow(commentDocId), SAVE_DEBOUNCE_MS),
-    );
-  }
-
-  private saveCommentNow(commentDocId: string): void {
-    const doc = this.commentDocs.get(commentDocId);
-    if (!doc) return;
-    try {
-      mkdirSync(this.commentsDir, { recursive: true });
-      const file = path.join(this.commentsDir, `${commentDocId}.ybin`);
-      writeFileSync(file + ".tmp", Y.encodeStateAsUpdate(doc));
-      renameSync(file + ".tmp", file);
-    } catch (err) {
-      console.error(`留言狀態落盤失敗 ${commentDocId}:`, err);
-    }
-  }
-
   private makeHost(): SyncHost {
     return {
       openDoc: (docId) => {
         if (docId === META_DOC_ID) return Promise.resolve(this.meta);
-        if (this.commentIds.has(docId)) return Promise.resolve(this.commentDocs.get(docId));
+        const comment = this.comments?.get(docId);
+        if (comment) return Promise.resolve(comment);
         const rel = this.session.relForDocId(docId);
         if (rel) return Promise.resolve(this.session.docFor(rel));
         // 未知 docId 必須是合法 UUID 才承接(可能是 meta 還沒到的遠端新 doc)
@@ -419,7 +321,7 @@ export class SyncManager implements SpaceSyncHooks {
         }
         return Promise.resolve(doc);
       },
-      listDocIds: () => Promise.resolve([META_DOC_ID, ...this.session.allDocIds(), ...this.commentIds]),
+      listDocIds: () => Promise.resolve([META_DOC_ID, ...this.session.allDocIds(), ...(this.comments?.ids() ?? [])]),
       loadState: (docId) => this.states.get(docId),
       saveState: (docId, state) => {
         this.states.set(docId, state);

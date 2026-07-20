@@ -1,9 +1,13 @@
 import { app } from "electron";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 export interface Settings {
   lastVault?: string;
+  /** 本機身分:未啟用同步時的留言作者(啟用同步則以 sync.json 的 deviceId 為準,與在場指示一致) */
+  deviceId?: string;
+  displayName?: string;
 }
 
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
@@ -13,8 +17,12 @@ export function loadSettings(): Settings {
   try {
     const parsed: unknown = JSON.parse(readFileSync(settingsFile(), "utf8"));
     if (typeof parsed === "object" && parsed !== null) {
-      const lastVault = (parsed as Record<string, unknown>)["lastVault"];
-      if (typeof lastVault === "string") return { lastVault };
+      const raw = parsed as Record<string, unknown>;
+      const out: Settings = {};
+      if (typeof raw["lastVault"] === "string") out.lastVault = raw["lastVault"];
+      if (typeof raw["deviceId"] === "string") out.deviceId = raw["deviceId"];
+      if (typeof raw["displayName"] === "string") out.displayName = raw["displayName"];
+      return out;
     }
   } catch {
     /* 沒有設定檔就是全新狀態 */
@@ -22,7 +30,17 @@ export function loadSettings(): Settings {
   return {};
 }
 
-export function saveSettings(settings: Settings): void {
+/** 合併寫入:呼叫端只給要改的欄位,其餘保留(避免存 lastVault 時洗掉本機身分) */
+export function saveSettings(patch: Settings): void {
   mkdirSync(path.dirname(settingsFile()), { recursive: true });
-  writeFileSync(settingsFile(), JSON.stringify(settings, null, 2));
+  writeFileSync(settingsFile(), JSON.stringify({ ...loadSettings(), ...patch }, null, 2));
+}
+
+/** 本機身分,首次呼叫時配發並寫回設定 */
+export function localIdentity(): { deviceId: string; name: string } {
+  const saved = loadSettings();
+  if (saved.deviceId) return { deviceId: saved.deviceId, name: saved.displayName ?? `我-${saved.deviceId.slice(0, 4)}` };
+  const deviceId = randomUUID();
+  saveSettings({ deviceId });
+  return { deviceId, name: `我-${deviceId.slice(0, 4)}` };
 }

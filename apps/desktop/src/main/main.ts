@@ -8,9 +8,10 @@ import { deriveVaultKey, MasterKeySpaces } from "@stele/sync";
 import { SyncManager, type SyncSettings } from "./sync-manager.ts";
 import { VaultMeta } from "./vault-meta.ts";
 import { SpacesService } from "./spaces-service.ts";
+import { CommentStore } from "./comment-store.ts";
 import { SharedSession } from "./shared-session.ts";
 import { parseConsumeLink } from "./share-link.ts";
-import { loadSettings, saveSettings } from "./settings.ts";
+import { loadSettings, saveSettings, localIdentity } from "./settings.ts";
 
 const SMOKE = process.argv.includes("--smoke");
 // smoke 固定 zh-TW locale:CI runner 多為 en,navigator.language 會讓 i18n 走英文,
@@ -22,6 +23,7 @@ let session: VaultSession | undefined;
 /** vault 的中繼資料 doc 與空間服務:與同步無關,純本地 vault 一樣有 */
 let meta: VaultMeta | undefined;
 let spaces: SpacesService | undefined;
+let comments: CommentStore | undefined;
 let syncManager: SyncManager | undefined;
 let sharedSession: SharedSession | undefined;
 const windows = new Set<BrowserWindow>();
@@ -106,11 +108,16 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
   session = next;
   syncManager = undefined;
   if (prevManager) await prevManager.stop().catch((err: unknown) => console.error("停止同步失敗:", err));
+  comments?.stop();
   prevMeta?.stop(); // 同步停妥後才收 meta:順序反了會漏掉最後一批寫入
   if (prev) await prev.destroy();
-  // meta 與空間先於同步建立:空間在未啟用同步的 vault 也完整可用
+  // meta、空間與留言先於同步建立:三者在未啟用同步的 vault 也完整可用
   meta = new VaultMeta(next.root);
   spaces = new SpacesService(meta, next, () => sendAll("spaces:changed"));
+  comments = new CommentStore(meta, next, (noteDocId, update) => {
+    const rel = next.relForDocId(noteDocId);
+    if (rel) sendAll("comments:update", rel, update);
+  });
   const syncSettings = SMOKE ? undefined : loadSyncSettings(next.root);
   if (syncSettings) {
     const keySource = new MasterKeySpaces(await deriveVaultKey(syncSettings.passphrase, syncSettings.vaultId));
@@ -121,12 +128,10 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
           if (!w.isDestroyed()) w.webContents.send("presence:update", rel, participants);
         }
       },
-      onCommentUpdate: (noteDocId, update) => {
-        const rel = next.relForDocId(noteDocId);
-        if (rel) sendAll("comments:update", rel, update);
-      },
+      comments,
     });
     spaces.setSyncHooks(syncManager);
+    comments.setSyncHooks(syncManager);
     syncManager.start();
   } else {
     broadcastSyncStatus("off");
@@ -208,12 +213,13 @@ ipcMain.on("shared:push", (_e, update: unknown) => {
 ipcMain.handle("shared:close", () => closeSharedSession());
 
 ipcMain.handle("comments:open", (_e, rel: unknown) => {
-  if (!syncManager || typeof rel !== "string") return null;
-  return { snapshot: syncManager.openCommentDoc(rel), me: syncManager.identity() };
+  if (!comments || typeof rel !== "string") return null;
+  // 有同步時沿用同步身分,與在場指示同一個 deviceId;純本地則用本機身分
+  return { snapshot: comments.open(rel), me: syncManager?.identity() ?? localIdentity() };
 });
 
 ipcMain.on("comments:push", (_e, rel: unknown, update: unknown) => {
-  if (syncManager && typeof rel === "string" && update instanceof Uint8Array) syncManager.pushComment(rel, update);
+  if (comments && typeof rel === "string" && update instanceof Uint8Array) comments.push(rel, update);
 });
 
 ipcMain.handle("spaces:overview", () => spaces?.overview() ?? null);
@@ -754,13 +760,18 @@ app.on("before-quit", (e) => {
   const closing = session;
   const closingManager = syncManager;
   const closingMeta = meta;
+  const closingComments = comments;
   session = undefined;
   syncManager = undefined;
   meta = undefined;
   spaces = undefined;
+  comments = undefined;
   void (closingManager ? closingManager.stop() : Promise.resolve())
     .catch((err: unknown) => console.error("退出前停止同步失敗:", err))
-    .then(() => closingMeta?.stop()) // 同步停妥後才收 meta,最後一批寫入才不會漏
+    .then(() => {
+      closingComments?.stop();
+      closingMeta?.stop(); // 同步停妥後才收留言與 meta,最後一批寫入才不會漏
+    })
     .then(() => closing.destroy())
     .catch((err: unknown) => console.error("退出前 flush 失敗:", err))
     .finally(() => app.quit());
