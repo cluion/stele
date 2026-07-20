@@ -13,6 +13,17 @@ export { identityCipher, digest, type Cipher } from "./cipher.ts";
 export { deriveVaultKey, VaultCipher, ShareCipher, deriveSpaceKey, DEFAULT_SPACE_ID, MasterKeySpaces } from "./crypto.ts";
 export type { SpaceKeySource } from "./crypto.ts";
 export {
+  generateSeed,
+  deriveIdentity,
+  identityChallengeBytes,
+  verifyChallenge,
+  exportIdentity,
+  importIdentity,
+  IDENTITY_FORMAT,
+  type SyncIdentity,
+  type IdentityFile,
+} from "./identity.ts";
+export {
   SyncClient,
   type SyncClientOptions,
   type SyncDocState,

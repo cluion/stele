@@ -12,10 +12,11 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.0.1",
     "lib0": "^0.2.114",
-    "yjs": "latest",
-    "y-protocols": "^1.0.6"
+    "y-protocols": "^1.0.6",
+    "yjs": "latest"
   },
   "devDependencies": {
     "@types/node": "latest",
