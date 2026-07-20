@@ -22,6 +22,15 @@ const clientCases: ClientMessage[] = [
   { type: "shareList", reqId: 2 },
   { type: "shareRevoke", reqId: 3, shareId: "AbC123xyz" },
   { type: "shareAuth", shareId: "AbC123xyz" },
+  {
+    type: "authId",
+    token: "祕密-token-1234567890",
+    vaultId: "vault-uuid-1",
+    memberId: "a".repeat(64),
+    pubSign: new Uint8Array(32).fill(11),
+    pubWrap: new Uint8Array(32).fill(22),
+  },
+  { type: "authProof", signature: new Uint8Array(64).fill(7) },
 ];
 
 const serverCases: ServerMessage[] = [
@@ -52,6 +61,7 @@ const serverCases: ServerMessage[] = [
   },
   { type: "shareAuthOk", docId: "doc-1", permission: "read", headSeq: 5, snapshotSeq: 3 },
   { type: "shareAuthOk", docId: "doc-2", permission: "write", headSeq: 0, snapshotSeq: 0 },
+  { type: "authChallenge", nonce: new Uint8Array(32).fill(5) },
 ];
 
 describe("同步協議編解碼", () => {

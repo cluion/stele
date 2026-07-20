@@ -88,4 +88,25 @@ describe("SyncStore", () => {
     expect(store.snapshot("v1", "沒有")).toBeUndefined();
     expect(store.headSeqs("v1")).toEqual([]);
   });
+
+  it("enrollMember TOFU:首見入表、同公鑰更新、換公鑰 conflict、按 vault 隔離", () => {
+    const store = makeStore();
+    const sign1 = bytes(1, 1, 1);
+    const wrap1 = bytes(2, 2, 2);
+    expect(store.enrollMember("v1", "m1", sign1, wrap1)).toBe("ok");
+    expect(store.enrollMember("v1", "m1", sign1, wrap1)).toBe("ok"); // 同公鑰再連,更新 last_seen
+    expect(store.enrollMember("v1", "m1", bytes(9, 9, 9), wrap1)).toBe("conflict"); // 換 pubSign 被釘選擋下
+
+    const rec = store.getMember("v1", "m1");
+    expect(rec).toBeDefined();
+    expect([...rec!.pubSign]).toEqual([1, 1, 1]); // conflict 不改原列
+    expect([...rec!.pubWrap]).toEqual([2, 2, 2]);
+
+    // 同 memberId 在別的 vault 是全新一列(複合鍵隔離),互不影響
+    expect(store.enrollMember("v2", "m1", bytes(9, 9, 9), wrap1)).toBe("ok");
+    expect([...store.getMember("v1", "m1")!.pubSign]).toEqual([1, 1, 1]); // v1 的 m1 不受 v2 影響
+    expect([...store.getMember("v2", "m1")!.pubSign]).toEqual([9, 9, 9]);
+    expect(store.listMembers("v1").map((m) => m.memberId)).toEqual(["m1"]);
+    expect(store.listMembers("v2").map((m) => m.memberId)).toEqual(["m1"]);
+  });
 });

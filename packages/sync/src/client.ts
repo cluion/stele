@@ -10,6 +10,7 @@ import {
   type SharePermission,
 } from "./protocol.ts";
 import { identityCipher, type Cipher } from "./cipher.ts";
+import { identityChallengeBytes, type SyncIdentity } from "./identity.ts";
 
 /** awareness 狀態:游標/選取/使用者資訊等,JSON 可序列化 */
 export type AwarenessState = Record<string, unknown>;
@@ -70,6 +71,8 @@ export interface SyncClientOptions {
   host: SyncHost;
   createSocket(url: string): SocketLike;
   cipher?: Cipher;
+  /** 提供時走帶身分認證(challenge-response);未提供則走 legacy token-only auth */
+  identity?: SyncIdentity;
   onStatus?(status: SyncStatus): void;
   /** 某 doc 的 awareness 狀態集變化(含遠端加入/離開);states 的 key 是 Yjs clientID */
   onAwareness?(docId: string, states: Map<number, AwarenessState>): void;
@@ -195,7 +198,13 @@ export class SyncClient {
     this.socket = socket;
     socket.binaryType = "arraybuffer";
     socket.onopen = () => {
-      this.send({ type: "auth", token: this.opts.token, vaultId: this.opts.vaultId });
+      const id = this.opts.identity;
+      if (id) {
+        // 帶身分:送宣稱身分與公鑰,等伺服器回 challenge nonce 再簽章(見 handleMessage authChallenge)
+        this.send({ type: "authId", token: this.opts.token, vaultId: this.opts.vaultId, memberId: id.memberId, pubSign: id.pubSign, pubWrap: id.pubWrap });
+      } else {
+        this.send({ type: "auth", token: this.opts.token, vaultId: this.opts.vaultId });
+      }
     };
     socket.onmessage = (event) => {
       this.rx = this.rx
@@ -282,6 +291,14 @@ export class SyncClient {
 
   private async handleMessage(msg: ServerMessage): Promise<void> {
     switch (msg.type) {
+      case "authChallenge": {
+        // 伺服器給的 nonce:以身分私鑰簽 challenge 回證,兩端用同一 helper 組待簽位元組
+        const id = this.opts.identity;
+        if (!id) return; // 沒送 authId 卻收到 challenge:忽略
+        const proof = id.sign(identityChallengeBytes(msg.nonce, this.opts.vaultId, id.memberId));
+        this.send({ type: "authProof", signature: proof });
+        break;
+      }
       case "authOk": {
         this.online = true;
         this.backoff = RECONNECT_MIN_MS;

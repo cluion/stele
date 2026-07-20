@@ -1,6 +1,12 @@
 import Database from "better-sqlite3";
 import type { SharePermission, ShareInfo } from "@stele/sync";
 
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 /**
  * 加密 blob 儲存層:伺服器只見 doc id 與密文,不解讀內容
  * doc 命名空間按 vault 隔離(composite key):不同 vault 的同名 doc 互不相干,
@@ -44,6 +50,15 @@ CREATE TABLE IF NOT EXISTS shares (
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS shares_by_vault ON shares (vault_id);
+CREATE TABLE IF NOT EXISTS members (
+  vault_id TEXT NOT NULL,
+  member_id TEXT NOT NULL,
+  pub_sign BLOB NOT NULL,
+  pub_wrap BLOB NOT NULL,
+  first_seen INTEGER NOT NULL DEFAULT (unixepoch()),
+  last_seen INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (vault_id, member_id)
+);
 `;
 
 export interface StoredUpdate {
@@ -61,6 +76,13 @@ export interface ShareScope {
   vaultId: string;
   docId: string;
   permission: SharePermission;
+}
+
+/** 某 vault 的一位成員(公開資料);Slice 2a 為 advisory,2b/2c 才升為授權邊界 */
+export interface MemberRecord {
+  memberId: string;
+  pubSign: Uint8Array;
+  pubWrap: Uint8Array;
 }
 
 export class SyncStore {
@@ -167,6 +189,48 @@ export class SyncStore {
       .prepare("SELECT share_id, doc_id, permission, revoked FROM shares WHERE vault_id = ? ORDER BY created_at DESC")
       .all(vaultId) as Array<{ share_id: string; doc_id: string; permission: SharePermission; revoked: number }>;
     return rows.map((r) => ({ shareId: r.share_id, docId: r.doc_id, permission: r.permission, revoked: r.revoked === 1 }));
+  }
+
+  /**
+   * 成員入表(TOFU 公鑰釘選):
+   * - 首見 (vault,member) → INSERT
+   * - 再見且 pub_sign 相同 → 更新 last_seen,回 "ok"
+   * - 再見但 pub_sign 不同 → "conflict"(擋冒名/覆蓋),不改任何列
+   * Slice 2a 是自註冊、advisory;釘選是唯一現在就給的硬保證,為 2c 留可信起點。
+   */
+  enrollMember(vaultId: string, memberId: string, pubSign: Uint8Array, pubWrap: Uint8Array): "ok" | "conflict" {
+    const enroll = this.db.transaction((): "ok" | "conflict" => {
+      const existing = this.db
+        .prepare("SELECT pub_sign FROM members WHERE vault_id = ? AND member_id = ?")
+        .get(vaultId, memberId) as { pub_sign: Buffer } | undefined;
+      if (existing) {
+        if (!bytesEqual(new Uint8Array(existing.pub_sign), pubSign)) return "conflict";
+        this.db
+          .prepare("UPDATE members SET last_seen = unixepoch() WHERE vault_id = ? AND member_id = ?")
+          .run(vaultId, memberId);
+        return "ok";
+      }
+      this.db
+        .prepare("INSERT INTO members (vault_id, member_id, pub_sign, pub_wrap) VALUES (?, ?, ?, ?)")
+        .run(vaultId, memberId, Buffer.from(pubSign), Buffer.from(pubWrap));
+      return "ok";
+    });
+    return enroll();
+  }
+
+  getMember(vaultId: string, memberId: string): MemberRecord | undefined {
+    const row = this.db
+      .prepare("SELECT member_id, pub_sign, pub_wrap FROM members WHERE vault_id = ? AND member_id = ?")
+      .get(vaultId, memberId) as { member_id: string; pub_sign: Buffer; pub_wrap: Buffer } | undefined;
+    return row && { memberId: row.member_id, pubSign: new Uint8Array(row.pub_sign), pubWrap: new Uint8Array(row.pub_wrap) };
+  }
+
+  /** 列出某 vault 全部成員,供 2b 邀請/包裝金鑰時查對方 wrap 公鑰 */
+  listMembers(vaultId: string): MemberRecord[] {
+    const rows = this.db
+      .prepare("SELECT member_id, pub_sign, pub_wrap FROM members WHERE vault_id = ? ORDER BY first_seen")
+      .all(vaultId) as Array<{ member_id: string; pub_sign: Buffer; pub_wrap: Buffer }>;
+    return rows.map((r) => ({ memberId: r.member_id, pubSign: new Uint8Array(r.pub_sign), pubWrap: new Uint8Array(r.pub_wrap) }));
   }
 
   close(): void {

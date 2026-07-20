@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash, timingSafeEqual, randomBytes } from "node:crypto";
-import { decodeClientMessage, encodeServerMessage, type ClientMessage, type ServerMessage } from "@stele/sync";
+import { decodeClientMessage, encodeServerMessage, verifyChallenge, type ClientMessage, type ServerMessage } from "@stele/sync";
 import { SyncStore, type ShareScope } from "./store.ts";
 
 /**
@@ -114,6 +114,9 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
     let vaultId: string | undefined;
     let scope: ShareScope | undefined;
     let shareId: string | undefined;
+    // 帶身分認證的兩階段中間態(challenge-response);存 closure 內不用全域 Map,免洩漏
+    let pendingNonce: Uint8Array | undefined;
+    let pendingIdentity: { vaultId: string; memberId: string; pubSign: Uint8Array; pubWrap: Uint8Array } | undefined;
     const authTimer = setTimeout(() => ws.close(4401, "未認證"), AUTH_TIMEOUT_MS);
     alive.add(ws);
     ws.on("pong", () => alive.add(ws));
@@ -150,6 +153,56 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         return;
       }
       vaultId = msg.vaultId;
+      clearTimeout(authTimer);
+      joinVault(vaultId);
+      send({ type: "authOk", docs: opts.store.headSeqs(vaultId) });
+    };
+
+    // 帶身分認證第一階段:token 准入 + 宣稱身分 → 回每連線新生的 nonce 供簽章(防重放)
+    const handleAuthId = (msg: ClientMessage & { type: "authId" }): void => {
+      if (vaultId !== undefined) {
+        refuse("bad-message", "重複認證");
+        return;
+      }
+      if (!tokenMatches(msg.token, opts.token)) {
+        refuse("bad-token", "token 錯誤");
+        return;
+      }
+      if (!validId(msg.vaultId) || !validId(msg.memberId)) {
+        refuse("bad-vault", "非法 id");
+        return;
+      }
+      if (msg.pubSign.length !== 32 || msg.pubWrap.length !== 32) {
+        refuse("bad-message", "非法公鑰");
+        return;
+      }
+      pendingIdentity = { vaultId: msg.vaultId, memberId: msg.memberId, pubSign: msg.pubSign, pubWrap: msg.pubWrap };
+      pendingNonce = randomBytes(32);
+      send({ type: "authChallenge", nonce: pendingNonce });
+    };
+
+    // 帶身分認證第二階段:驗簽 → TOFU 入表 → 鎖 vault。members 表在 2a 為 advisory,授權仍靠 token
+    const handleAuthProof = (msg: ClientMessage & { type: "authProof" }): void => {
+      if (vaultId !== undefined) {
+        refuse("bad-message", "重複認證");
+        return;
+      }
+      if (!pendingNonce || !pendingIdentity) {
+        refuse("bad-message", "未先發起身分認證");
+        return;
+      }
+      const p = pendingIdentity;
+      if (!verifyChallenge(msg.signature, pendingNonce, p.vaultId, p.memberId, p.pubSign)) {
+        refuse("bad-proof", "身分簽章驗證失敗");
+        return;
+      }
+      if (opts.store.enrollMember(p.vaultId, p.memberId, p.pubSign, p.pubWrap) === "conflict") {
+        refuse("member-conflict", "此成員公鑰與註冊紀錄不符");
+        return;
+      }
+      vaultId = p.vaultId;
+      pendingNonce = undefined;
+      pendingIdentity = undefined;
       clearTimeout(authTimer);
       joinVault(vaultId);
       send({ type: "authOk", docs: opts.store.headSeqs(vaultId) });
@@ -232,7 +285,7 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
       }
     };
 
-    const handle = (vault: string, msg: Exclude<ClientMessage, { type: "auth" | "shareAuth" }>): void => {
+    const handle = (vault: string, msg: Exclude<ClientMessage, { type: "auth" | "authId" | "authProof" | "shareAuth" }>): void => {
       if (msg.type === "shareCreate" || msg.type === "shareList" || msg.type === "shareRevoke") {
         if (scope !== undefined) {
           refuse("forbidden", "分享連線不得管理分享");
@@ -298,6 +351,8 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
       }
       try {
         if (msg.type === "auth") handleAuth(msg);
+        else if (msg.type === "authId") handleAuthId(msg);
+        else if (msg.type === "authProof") handleAuthProof(msg);
         else if (msg.type === "shareAuth") handleShareAuth(msg);
         else if (vaultId === undefined) refuse("unauthorized", "尚未認證");
         else handle(vaultId, msg);

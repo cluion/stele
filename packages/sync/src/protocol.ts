@@ -18,6 +18,10 @@ export interface ShareInfo {
 
 export type ClientMessage =
   | { type: "auth"; token: string; vaultId: string }
+  // 帶身分認證(Slice 2a):token 准入 + 宣稱成員身分與公鑰,伺服器回 challenge
+  | { type: "authId"; token: string; vaultId: string; memberId: string; pubSign: Uint8Array; pubWrap: Uint8Array }
+  // 對 challenge nonce 的 Ed25519 簽章,證明持有身分私鑰
+  | { type: "authProof"; signature: Uint8Array }
   | { type: "push"; docId: string; deviceId: string; counter: number; payload: Uint8Array }
   | { type: "pull"; docId: string; fromSeq: number }
   | { type: "snapshotPush"; docId: string; uptoSeq: number; payload: Uint8Array }
@@ -39,6 +43,8 @@ export interface DocHead {
 
 export type ServerMessage =
   | { type: "authOk"; docs: DocHead[] }
+  // 身分認證第一階段:伺服器給每連線新生的 nonce,client 據此簽章
+  | { type: "authChallenge"; nonce: Uint8Array }
   | { type: "update"; docId: string; seq: number; payload: Uint8Array }
   | { type: "ack"; docId: string; counter: number; seq: number }
   | { type: "snapshot"; docId: string; uptoSeq: number; payload: Uint8Array }
@@ -62,6 +68,8 @@ const CLIENT_TAG = {
   shareList: 7,
   shareRevoke: 8,
   shareAuth: 9,
+  authId: 10,
+  authProof: 11,
 } as const;
 const SERVER_TAG = {
   authOk: 0,
@@ -74,6 +82,7 @@ const SERVER_TAG = {
   shareCreated: 7,
   shareCatalog: 8,
   shareAuthOk: 9,
+  authChallenge: 10,
 } as const;
 
 const PERM_TAG: Record<SharePermission, number> = { read: 0, write: 1 };
@@ -86,6 +95,16 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
     case "auth":
       encoding.writeVarString(enc, msg.token);
       encoding.writeVarString(enc, msg.vaultId);
+      break;
+    case "authId":
+      encoding.writeVarString(enc, msg.token);
+      encoding.writeVarString(enc, msg.vaultId);
+      encoding.writeVarString(enc, msg.memberId);
+      encoding.writeVarUint8Array(enc, msg.pubSign);
+      encoding.writeVarUint8Array(enc, msg.pubWrap);
+      break;
+    case "authProof":
+      encoding.writeVarUint8Array(enc, msg.signature);
       break;
     case "push":
       encoding.writeVarString(enc, msg.docId);
@@ -134,6 +153,17 @@ export function decodeClientMessage(data: Uint8Array): ClientMessage {
   switch (tag) {
     case CLIENT_TAG.auth:
       return { type: "auth", token: decoding.readVarString(dec), vaultId: decoding.readVarString(dec) };
+    case CLIENT_TAG.authId:
+      return {
+        type: "authId",
+        token: decoding.readVarString(dec),
+        vaultId: decoding.readVarString(dec),
+        memberId: decoding.readVarString(dec),
+        pubSign: readPayload(dec),
+        pubWrap: readPayload(dec),
+      };
+    case CLIENT_TAG.authProof:
+      return { type: "authProof", signature: readPayload(dec) };
     case CLIENT_TAG.push:
       return {
         type: "push",
@@ -184,6 +214,9 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
         encoding.writeVarUint(enc, doc.headSeq);
         encoding.writeVarUint(enc, doc.snapshotSeq);
       }
+      break;
+    case "authChallenge":
+      encoding.writeVarUint8Array(enc, msg.nonce);
       break;
     case "update":
       encoding.writeVarString(enc, msg.docId);
@@ -252,6 +285,8 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
       }
       return { type: "authOk", docs };
     }
+    case SERVER_TAG.authChallenge:
+      return { type: "authChallenge", nonce: readPayload(dec) };
     case SERVER_TAG.update:
       return {
         type: "update",
