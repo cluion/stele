@@ -9,6 +9,8 @@ import { SyncManager, type SyncSettings } from "./sync-manager.ts";
 import { VaultMeta } from "./vault-meta.ts";
 import { SpacesService } from "./spaces-service.ts";
 import { CommentStore } from "./comment-store.ts";
+import { loadOrCreateIdentity } from "./identity-store.ts";
+import type { SyncIdentity } from "@stele/sync";
 import { SharedSession } from "./shared-session.ts";
 import { parseConsumeLink } from "./share-link.ts";
 import { loadSettings, saveSettings, localIdentity } from "./settings.ts";
@@ -25,6 +27,12 @@ let meta: VaultMeta | undefined;
 let spaces: SpacesService | undefined;
 let comments: CommentStore | undefined;
 let syncManager: SyncManager | undefined;
+/** app 級成員身分,跨 vault 共用,首次啟用同步時載入並快取 */
+let identity: SyncIdentity | undefined;
+async function getIdentity(): Promise<SyncIdentity> {
+  if (!identity) identity = await loadOrCreateIdentity();
+  return identity;
+}
 let sharedSession: SharedSession | undefined;
 const windows = new Set<BrowserWindow>();
 
@@ -121,8 +129,10 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
   const syncSettings = SMOKE ? undefined : loadSyncSettings(next.root);
   if (syncSettings) {
     const keySource = new MasterKeySpaces(await deriveVaultKey(syncSettings.passphrase, syncSettings.vaultId));
+    const memberIdentity = await getIdentity();
     syncManager = new SyncManager(next, syncSettings, meta, broadcastSyncStatus, {
       spaces: keySource,
+      identity: memberIdentity,
       onPresence: (rel, participants) => {
         for (const w of windows) {
           if (!w.isDestroyed()) w.webContents.send("presence:update", rel, participants);

@@ -12,6 +12,7 @@ import {
   type SharePermission,
   type SocketLike,
   type SpaceKeySource,
+  type SyncIdentity,
   type SyncDocState,
   type SyncHost,
   type SyncStatus,
@@ -124,6 +125,8 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
       comments?: CommentDocSource;
       /** 空間金鑰來源:提供時啟用空間路由(每篇筆記以其所屬空間的金鑰加解密);取代 cipher/exportDocKey */
       spaces?: SpaceKeySource;
+      /** 成員身分:提供時走帶身分認證(challenge-response);未提供則走 legacy token-only auth */
+      identity?: SyncIdentity;
     },
   ) {
     this.self = {
@@ -162,6 +165,7 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
       vaultId: settings.vaultId,
       deviceId: settings.deviceId,
       host: this.makeHost(),
+      identity: tuning?.identity,
       createSocket: (url) => new WebSocket(url) as unknown as SocketLike,
       onStatus: (status) => {
         const wasOffline = this.status !== "online";
