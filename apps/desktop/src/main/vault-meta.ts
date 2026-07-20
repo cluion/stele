@@ -14,6 +14,13 @@ const SAVE_DEBOUNCE_MS = 200;
 /** 本地變更的 transaction origin;遠端變更走 "sync",載入走 "load",觀察者據此決定要不要落地成檔案操作 */
 export const LOCAL_ORIGIN = "local-meta";
 
+/** 路徑 LWW 的守門寫入:比對後才寫,app 內操作、watcher 回音與遠端落地的回音都在這裡歸零 */
+export function setPath(meta: VaultMeta, docId: string, rel: string): void {
+  const paths = meta.doc.getMap<string>("paths");
+  if (paths.get(docId) === rel) return;
+  meta.transact(() => paths.set(docId, rel));
+}
+
 export class VaultMeta {
   readonly doc = new Y.Doc();
   private readonly file: string;

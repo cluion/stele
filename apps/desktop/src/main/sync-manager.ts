@@ -1,33 +1,25 @@
 import * as Y from "yjs";
 import WebSocket from "ws";
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   SyncClient,
-  readSpaces,
   spaceOf,
-  readAudit,
-  createSpace as createSpaceModel,
-  renameSpace as renameSpaceModel,
-  moveNote as moveNoteModel,
-  recordCopy as recordCopyModel,
-  SPACES_MAP,
   DOC_SPACES_MAP,
   type AwarenessState,
   type Cipher,
   type ShareInfo,
   type SharePermission,
   type SocketLike,
-  type Space,
-  type SpaceAuditEvent,
   type SpaceKeySource,
   type SyncDocState,
   type SyncHost,
   type SyncStatus,
 } from "@stele/sync";
 import type { VaultSession, VaultFileEvent } from "./vault-session.ts";
-import { VaultMeta } from "./vault-meta.ts";
+import { VaultMeta, setPath } from "./vault-meta.ts";
+import type { SpaceSyncHooks } from "./spaces-service.ts";
 
 /**
  * 把 VaultSession 接上 SyncClient:
@@ -78,13 +70,6 @@ function commentDocIdFor(noteDocId: string): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
 }
 
-/** 複製筆記的目標路徑:「a/b.md」→「a/b (副本).md」(進一步撞名由 VaultSession freeVariant 退讓) */
-function copyPathFor(rel: string): string {
-  const dir = path.dirname(rel);
-  const name = `${path.basename(rel).replace(/\.md$/, "")} (副本).md`;
-  return dir === "." ? name : `${dir}/${name}`;
-}
-
 /** 由 ws(s) 同步網址推導檢視器的 http(s) 基底;分享頁與 WS 同一台伺服器同一埠 */
 function httpBaseFrom(wsUrl: string): string {
   try {
@@ -104,9 +89,8 @@ interface PersistedDocState {
 
 const SAVE_DEBOUNCE_MS = 200;
 
-export class SyncManager {
-  private readonly metaStore: VaultMeta;
-  /** meta doc 本體;生老病死由 VaultMeta 管,同步層只是它的訂閱者 */
+export class SyncManager implements SpaceSyncHooks {
+  /** meta doc 本體;生老病死由 VaultMeta 管(擁有者是 vault 而非同步),同步層只是它的訂閱者 */
   private get meta(): Y.Doc {
     return this.metaStore.doc;
   }
@@ -126,7 +110,6 @@ export class SyncManager {
   private readonly stateFile: string;
   private stateTimer: NodeJS.Timeout | undefined;
   private onPresence: ((rel: string, participants: Participant[]) => void) | undefined;
-  private onSpacesChange: (() => void) | undefined;
   /** 檔案系統操作依序執行,遠端 meta 變更不互相踩腳 */
   private fsOps: Promise<void> = Promise.resolve();
   status: SyncStatus = "offline";
@@ -145,6 +128,8 @@ export class SyncManager {
   constructor(
     private readonly session: VaultSession,
     settings: SyncSettings,
+    /** meta doc 由 vault 生命週期擁有並注入;同步層只訂閱與推送,絕不銷毀它 */
+    private readonly metaStore: VaultMeta,
     private readonly onStatus?: (status: SyncStatus) => void,
     tuning?: {
       pushDebounceMs?: number;
@@ -157,8 +142,6 @@ export class SyncManager {
       onCommentUpdate?: (noteDocId: string, update: Uint8Array) => void;
       /** 空間金鑰來源:提供時啟用空間路由(每篇筆記以其所屬空間的金鑰加解密);取代 cipher/exportDocKey */
       spaces?: SpaceKeySource;
-      /** 空間登記或筆記歸屬有變(本地或遠端),供 main 通知 renderer 刷新側欄 */
-      onSpacesChange?: () => void;
     },
   ) {
     this.self = {
@@ -167,10 +150,8 @@ export class SyncManager {
       color: colorFor(settings.deviceId),
     };
     this.onPresence = tuning?.onPresence;
-    this.onSpacesChange = tuning?.onSpacesChange;
     this.spaces = tuning?.spaces;
     this.shareBase = httpBaseFrom(settings.url);
-    this.metaStore = new VaultMeta(session.root);
     this.stateFile = path.join(session.root, ".stele", "sync-state.json");
     this.commentsDir = path.join(session.root, ".stele", "comments");
     this.paths = this.meta.getMap("paths");
@@ -196,10 +177,7 @@ export class SyncManager {
     // 遠端得知某筆記換了空間 → 該 docId 的伺服器 blob 已改用新空間金鑰,強制 repull 以新金鑰重解
     this.docSpaces.observe((event, tx) => {
       if (tx.origin === "sync") for (const docId of event.keysChanged as Set<string>) this.client.repull(docId);
-      this.onSpacesChange?.();
     });
-    // 空間登記變更(建立/改名/顏色,含巢狀欄位)→ 通知刷新側欄;observeDeep 才抓得到改名
-    this.meta.getMap(SPACES_MAP).observeDeep(() => this.onSpacesChange?.());
 
     this.client = new SyncClient({
       url: settings.url,
@@ -280,78 +258,20 @@ export class SyncManager {
     return shares.map((s) => ({ ...s, rel: this.session.relForDocId(s.docId) }));
   }
 
-  // ── 空間(vault → 空間 → 筆記三層的中繼資料 + 金鑰路由)──
-
-  /** 全部空間(含預設空間,永遠在最前) */
-  listSpaces(): Space[] {
-    return readSpaces(this.meta);
-  }
-
-  /** 空間總覽:全部空間 + 每篇筆記歸屬(rel → spaceId,僅非預設空間) */
-  spacesOverview(): { spaces: Space[]; assignments: Record<string, string> } {
-    const assignments: Record<string, string> = {};
-    for (const [docId, spaceId] of this.docSpaces.entries()) {
-      const rel = this.session.relForDocId(docId);
-      if (rel !== undefined) assignments[rel] = spaceId;
-    }
-    return { spaces: readSpaces(this.meta), assignments };
-  }
-
-  /** 建立新空間,回傳新 spaceId(id 由此處生成 UUID) */
-  createSpace(name: string, color?: string): string {
-    const id = randomUUID();
-    this.meta.transact(() => createSpaceModel(this.meta, { id, name, color, at: Date.now() }), "local-meta");
-    return id;
-  }
-
-  renameSpace(spaceId: string, name: string): void {
-    this.meta.transact(() => renameSpaceModel(this.meta, spaceId, name, Date.now()), "local-meta");
-  }
-
-  /** 某筆記所屬空間 id(未指派 → 預設空間) */
-  spaceOfNote(rel: string): string {
-    const id = this.session.peekDocId(rel) ?? this.session.docId(rel);
-    return spaceOf(this.meta, id);
-  }
+  // ── 空間的同步副作用(SpaceSyncHooks);空間本身的 CRUD 在 SpacesService,不需要同步 ──
 
   /**
-   * 把筆記移到某空間:改歸屬(路由 cipher 之後對此 docId 改用新空間金鑰),
-   * 再以新金鑰重推快照、截斷舊金鑰增量,使其他裝置能以新空間金鑰解出。
+   * 筆記移動空間後,以新空間金鑰重推快照、截斷舊金鑰增量,使其他裝置能以新空間金鑰解出。
    * 離線或未拉齊而無法重推時,登記到 pendingRekey,上線後補推。
    */
-  async moveNoteToSpace(rel: string, spaceId: string): Promise<void> {
-    const docId = this.session.peekDocId(rel) ?? this.session.docId(rel);
-    if (spaceOf(this.meta, docId) === spaceId) return;
-    this.meta.transact(() => moveNoteModel(this.meta, docId, spaceId, Date.now()), "local-meta");
+  async rekeyAfterMove(docId: string): Promise<void> {
     const done = await this.client.rekey(docId);
     if (!done) this.pendingRekey.add(docId);
   }
 
-  /**
-   * 複製筆記到某空間:目標空間生一篇全新筆記(新 docId、內容複製),原筆記原封不動。
-   * 自出生即以目標空間金鑰加密——先 recordCopy 登記歸屬,再建檔開 host、track 同步,
-   * 確保第一次 push 就走目標空間的金鑰。回傳副本的相對路徑。
-   */
-  copyNoteToSpace(rel: string, spaceId: string): string {
-    const fromDocId = this.session.peekDocId(rel) ?? this.session.docId(rel);
-    const md = this.session.docFor(rel).getText("md").toString();
-    const copy = new Y.Doc();
-    copy.getText("md").insert(0, md);
-    const newDocId = randomUUID();
-    // 先登記歸屬:讓 track 觸發的第一次 push 就以目標空間金鑰加密,免得先用預設金鑰再重推
-    this.meta.transact(
-      () => recordCopyModel(this.meta, { fromDocId, newDocId, toSpaceId: spaceId, at: Date.now() }),
-      "local-meta",
-    );
-    const landed = this.session.adoptRemoteDoc(copyPathFor(rel), newDocId, copy);
-    this.setPath(newDocId, landed);
-    this.client.track(newDocId);
-    return landed;
-  }
-
-  /** 空間變更稽核紀錄(append-only)供 UI 追查 */
-  readSpaceAudit(): SpaceAuditEvent[] {
-    return readAudit(this.meta);
+  /** 新生的 doc(如跨空間複製的副本)納入同步 */
+  trackNewDoc(docId: string): void {
+    this.client.track(docId);
   }
 
   /** 上線後補推移動當下未能重推的快照,直到成功才移出待辦 */
@@ -389,7 +309,7 @@ export class SyncManager {
     this.commentSaveTimers.clear();
     this.saveStatesNow();
     for (const commentDocId of this.commentDocs.keys()) this.saveCommentNow(commentDocId);
-    this.metaStore.stop();
+    // 不動 metaStore:它屬於 vault 生命週期,由 main 在換 vault/退出時收
     for (const doc of this.commentDocs.values()) doc.destroy();
     this.commentDocs.clear();
     this.commentIds.clear();
@@ -535,10 +455,8 @@ export class SyncManager {
     }
   }
 
-  /** 比對後才寫,app 內操作與 watcher 回音、遠端落地的回音都在這裡歸零 */
   private setPath(id: string, rel: string): void {
-    if (this.paths.get(id) === rel) return;
-    this.meta.transact(() => this.paths.set(id, rel), "local-meta");
+    setPath(this.metaStore, id, rel);
   }
 
   private applyRemoteMeta(docIds: string[]): void {

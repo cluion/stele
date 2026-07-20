@@ -7,6 +7,7 @@ import { startServer, SyncStore, type RunningServer } from "@stele/server";
 import { deriveVaultKey, VaultCipher, type SyncStatus, type SharePermission } from "@stele/sync";
 import { VaultSession } from "../src/main/vault-session.ts";
 import { SyncManager, type SyncSettings } from "../src/main/sync-manager.ts";
+import { VaultMeta } from "../src/main/vault-meta.ts";
 import { parseConsumeLink } from "../src/main/share-link.ts";
 import { SharedSession } from "../src/main/shared-session.ts";
 
@@ -58,10 +59,10 @@ describe("SharedSession 消費分享連結", () => {
     for (const [rel, content] of Object.entries(seed)) writeFileSync(path.join(dir, rel), content);
     const session = new VaultSession(dir, noop);
     const settings: SyncSettings = { url: `ws://127.0.0.1:${server.port}`, token: TOKEN, vaultId, deviceId: "origin" };
-    const manager = new SyncManager(session, settings, undefined, {
+    const manager = new SyncManager(session, settings, new VaultMeta(dir), undefined, {
       pushDebounceMs: 20,
       cipher,
-      exportDocKey: (docId) => cipher.exportDocKey(docId),
+      exportDocKey: (docId: string) => cipher.exportDocKey(docId),
     });
     manager.start();
     cleanups.push(async () => {

@@ -8,6 +8,7 @@ import { deriveVaultKey, VaultCipher } from "@stele/sync";
 import { addThread, encodeAnchor, decodeAnchor, readThreads, type Thread } from "@stele/editor-core";
 import { VaultSession } from "../src/main/vault-session.ts";
 import { SyncManager, type SyncSettings } from "../src/main/sync-manager.ts";
+import { VaultMeta } from "../src/main/vault-meta.ts";
 
 const TOKEN = "留言同步-token-1234567890";
 const noop = {
@@ -44,7 +45,11 @@ describe("留言 doc 端對端同步", () => {
     for (const [rel, c] of Object.entries(seed)) writeFileSync(path.join(dir, rel), c);
     const session = new VaultSession(dir, noop);
     const settings: SyncSettings = { url: `ws://127.0.0.1:${server.port}`, token: TOKEN, vaultId, deviceId };
-    const manager = new SyncManager(session, settings, undefined, { pushDebounceMs: 20, cipher, exportDocKey: (d) => cipher.exportDocKey(d) });
+    const manager = new SyncManager(session, settings, new VaultMeta(dir), undefined, {
+      pushDebounceMs: 20,
+      cipher,
+      exportDocKey: (d: string) => cipher.exportDocKey(d),
+    });
     manager.start();
     const device = { dir, session, manager };
     devices.push(device);

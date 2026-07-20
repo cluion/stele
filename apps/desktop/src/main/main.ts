@@ -6,6 +6,8 @@ import path from "node:path";
 import { VaultSession, type SessionCallbacks } from "./vault-session.ts";
 import { deriveVaultKey, MasterKeySpaces } from "@stele/sync";
 import { SyncManager, type SyncSettings } from "./sync-manager.ts";
+import { VaultMeta } from "./vault-meta.ts";
+import { SpacesService } from "./spaces-service.ts";
 import { SharedSession } from "./shared-session.ts";
 import { parseConsumeLink } from "./share-link.ts";
 import { loadSettings, saveSettings } from "./settings.ts";
@@ -17,6 +19,9 @@ if (SMOKE) app.commandLine.appendSwitch("lang", "zh-TW");
 const FIXTURES_VAULT = path.resolve(__dirname, "..", "..", "..", "prototypes", "mirror", "fixtures", "vault");
 
 let session: VaultSession | undefined;
+/** vault 的中繼資料 doc 與空間服務:與同步無關,純本地 vault 一樣有 */
+let meta: VaultMeta | undefined;
+let spaces: SpacesService | undefined;
 let syncManager: SyncManager | undefined;
 let sharedSession: SharedSession | undefined;
 const windows = new Set<BrowserWindow>();
@@ -97,15 +102,20 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
   const next = new VaultSession(dir, callbacks);
   const prev = session;
   const prevManager = syncManager;
+  const prevMeta = meta;
   session = next;
   syncManager = undefined;
   if (prevManager) await prevManager.stop().catch((err: unknown) => console.error("停止同步失敗:", err));
+  prevMeta?.stop(); // 同步停妥後才收 meta:順序反了會漏掉最後一批寫入
   if (prev) await prev.destroy();
+  // meta 與空間先於同步建立:空間在未啟用同步的 vault 也完整可用
+  meta = new VaultMeta(next.root);
+  spaces = new SpacesService(meta, next, () => sendAll("spaces:changed"));
   const syncSettings = SMOKE ? undefined : loadSyncSettings(next.root);
   if (syncSettings) {
-    const spaces = new MasterKeySpaces(await deriveVaultKey(syncSettings.passphrase, syncSettings.vaultId));
-    syncManager = new SyncManager(next, syncSettings, broadcastSyncStatus, {
-      spaces,
+    const keySource = new MasterKeySpaces(await deriveVaultKey(syncSettings.passphrase, syncSettings.vaultId));
+    syncManager = new SyncManager(next, syncSettings, meta, broadcastSyncStatus, {
+      spaces: keySource,
       onPresence: (rel, participants) => {
         for (const w of windows) {
           if (!w.isDestroyed()) w.webContents.send("presence:update", rel, participants);
@@ -115,8 +125,8 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
         const rel = next.relForDocId(noteDocId);
         if (rel) sendAll("comments:update", rel, update);
       },
-      onSpacesChange: () => sendAll("spaces:changed"),
     });
+    spaces.setSyncHooks(syncManager);
     syncManager.start();
   } else {
     broadcastSyncStatus("off");
@@ -206,31 +216,31 @@ ipcMain.on("comments:push", (_e, rel: unknown, update: unknown) => {
   if (syncManager && typeof rel === "string" && update instanceof Uint8Array) syncManager.pushComment(rel, update);
 });
 
-ipcMain.handle("spaces:overview", () => syncManager?.spacesOverview() ?? null);
+ipcMain.handle("spaces:overview", () => spaces?.overview() ?? null);
 
 ipcMain.handle("spaces:create", (_e, name: unknown, color: unknown) => {
-  if (!syncManager || typeof name !== "string" || name.trim().length === 0) throw new Error("非法請求");
-  return syncManager.createSpace(name.trim(), typeof color === "string" ? color : undefined);
+  if (!spaces || typeof name !== "string" || name.trim().length === 0) throw new Error("非法請求");
+  return spaces.createSpace(name.trim(), typeof color === "string" ? color : undefined);
 });
 
 ipcMain.handle("spaces:rename", (_e, spaceId: unknown, name: unknown) => {
-  if (!syncManager || typeof spaceId !== "string" || typeof name !== "string" || name.trim().length === 0) {
+  if (!spaces || typeof spaceId !== "string" || typeof name !== "string" || name.trim().length === 0) {
     throw new Error("非法請求");
   }
-  syncManager.renameSpace(spaceId, name.trim());
+  spaces.renameSpace(spaceId, name.trim());
 });
 
 ipcMain.handle("spaces:move", (_e, rel: unknown, spaceId: unknown) => {
-  if (!syncManager || typeof rel !== "string" || typeof spaceId !== "string") throw new Error("非法請求");
-  return syncManager.moveNoteToSpace(rel, spaceId);
+  if (!spaces || typeof rel !== "string" || typeof spaceId !== "string") throw new Error("非法請求");
+  return spaces.moveNoteToSpace(rel, spaceId);
 });
 
 ipcMain.handle("spaces:copy", (_e, rel: unknown, spaceId: unknown) => {
-  if (!syncManager || typeof rel !== "string" || typeof spaceId !== "string") throw new Error("非法請求");
-  return syncManager.copyNoteToSpace(rel, spaceId);
+  if (!spaces || typeof rel !== "string" || typeof spaceId !== "string") throw new Error("非法請求");
+  return spaces.copyNoteToSpace(rel, spaceId);
 });
 
-ipcMain.handle("spaces:audit", () => syncManager?.readSpaceAudit() ?? []);
+ipcMain.handle("spaces:audit", () => spaces?.readAudit() ?? []);
 
 ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {
   if (typeof rel !== "string") throw new Error("非法參數");
@@ -743,10 +753,14 @@ app.on("before-quit", (e) => {
   quitting = true;
   const closing = session;
   const closingManager = syncManager;
+  const closingMeta = meta;
   session = undefined;
   syncManager = undefined;
+  meta = undefined;
+  spaces = undefined;
   void (closingManager ? closingManager.stop() : Promise.resolve())
     .catch((err: unknown) => console.error("退出前停止同步失敗:", err))
+    .then(() => closingMeta?.stop()) // 同步停妥後才收 meta,最後一批寫入才不會漏
     .then(() => closing.destroy())
     .catch((err: unknown) => console.error("退出前 flush 失敗:", err))
     .finally(() => app.quit());

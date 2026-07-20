@@ -6,6 +6,8 @@ import { startServer, SyncStore, type RunningServer } from "@stele/server";
 import { deriveVaultKey, MasterKeySpaces, DEFAULT_SPACE_ID } from "@stele/sync";
 import { VaultSession } from "../src/main/vault-session.ts";
 import { SyncManager, type SyncSettings } from "../src/main/sync-manager.ts";
+import { VaultMeta } from "../src/main/vault-meta.ts";
+import { SpacesService } from "../src/main/spaces-service.ts";
 
 const TOKEN = "空間同步-token-1234567890";
 const noop = {
@@ -29,6 +31,8 @@ interface Device {
   dir: string;
   session: VaultSession;
   manager: SyncManager;
+  meta: VaultMeta;
+  spaces: SpacesService;
 }
 
 describe("空間端對端同步", () => {
@@ -37,14 +41,17 @@ describe("空間端對端同步", () => {
   const devices: Device[] = [];
 
   async function makeDevice(vaultId: string, deviceId: string, seed: Record<string, string> = {}): Promise<Device> {
-    const spaces = new MasterKeySpaces(await deriveVaultKey("空間密語", vaultId, 12));
+    const keySource = new MasterKeySpaces(await deriveVaultKey("空間密語", vaultId, 12));
     const dir = mkdtempSync(path.join(tmpdir(), "stele-space-"));
     for (const [rel, c] of Object.entries(seed)) writeFileSync(path.join(dir, rel), c);
     const session = new VaultSession(dir, noop);
     const settings: SyncSettings = { url: `ws://127.0.0.1:${server.port}`, token: TOKEN, vaultId, deviceId };
-    const manager = new SyncManager(session, settings, undefined, { pushDebounceMs: 20, spaces });
+    const meta = new VaultMeta(dir);
+    const spaces = new SpacesService(meta, session);
+    const manager = new SyncManager(session, settings, meta, undefined, { pushDebounceMs: 20, spaces: keySource });
+    spaces.setSyncHooks(manager);
     manager.start();
-    const device = { dir, session, manager };
+    const device = { dir, session, manager, meta, spaces };
     devices.push(device);
     return device;
   }
@@ -63,6 +70,7 @@ describe("空間端對端同步", () => {
   afterAll(async () => {
     for (const d of devices) {
       await d.manager.stop();
+      d.meta.stop();
       await d.session.destroy();
     }
     await server.close();
@@ -74,7 +82,7 @@ describe("空間端對端同步", () => {
     void a;
     const b = await makeDevice("v-sp1", "devB");
     await until(() => content(b, "祕密.md") === "預設空間內容\n", "B 物化預設空間筆記");
-    expect(b.manager.spaceOfNote("祕密.md")).toBe(DEFAULT_SPACE_ID);
+    expect(b.spaces.spaceOfNote("祕密.md")).toBe(DEFAULT_SPACE_ID);
   });
 
   it("已連線的 B:A 把筆記移到新空間後,B 收斂到該空間且仍解得出內容", async () => {
@@ -82,14 +90,14 @@ describe("空間端對端同步", () => {
     const b = await makeDevice("v-sp2", "devB");
     await until(() => content(b, "工作筆記.md") === "工作內容\n", "B 先拿到預設空間內容");
 
-    const spaceId = a.manager.createSpace("工作");
-    await a.manager.moveNoteToSpace("工作筆記.md", spaceId);
+    const spaceId = a.spaces.createSpace("工作");
+    await a.spaces.moveNoteToSpace("工作筆記.md", spaceId);
 
-    await until(() => b.manager.spaceOfNote("工作筆記.md") === spaceId, "B 收斂到新空間歸屬");
+    await until(() => b.spaces.spaceOfNote("工作筆記.md") === spaceId, "B 收斂到新空間歸屬");
     expect(content(b, "工作筆記.md")).toBe("工作內容\n"); // 用新空間金鑰仍解得出
-    expect(b.manager.listSpaces().some((s) => s.id === spaceId && s.name === "工作")).toBe(true);
+    expect(b.spaces.listSpaces().some((s) => s.id === spaceId && s.name === "工作")).toBe(true);
     // A 端內容不變,歸屬為新空間
-    expect(a.manager.spaceOfNote("工作筆記.md")).toBe(spaceId);
+    expect(a.spaces.spaceOfNote("工作筆記.md")).toBe(spaceId);
     expect(content(a, "工作筆記.md")).toBe("工作內容\n");
   });
 
@@ -98,14 +106,14 @@ describe("空間端對端同步", () => {
     const b = await makeDevice("v-sp3", "devB");
     await until(() => content(b, "機密.md") === "機密內容\n", "B 先確保 A 已上線並推送");
 
-    const spaceId = a.manager.createSpace("機要");
-    await a.manager.moveNoteToSpace("機密.md", spaceId);
-    await until(() => b.manager.spaceOfNote("機密.md") === spaceId, "B 收斂新空間");
+    const spaceId = a.spaces.createSpace("機要");
+    await a.spaces.moveNoteToSpace("機密.md", spaceId);
+    await until(() => b.spaces.spaceOfNote("機密.md") === spaceId, "B 收斂新空間");
 
     // C 在移動之後才加入
     const c = await makeDevice("v-sp3", "devC");
     await until(
-      () => content(c, "機密.md") === "機密內容\n" && c.manager.spaceOfNote("機密.md") === spaceId,
+      () => content(c, "機密.md") === "機密內容\n" && c.spaces.spaceOfNote("機密.md") === spaceId,
       "C bootstrap 出空間筆記內容與歸屬",
     );
   });
@@ -115,20 +123,20 @@ describe("空間端對端同步", () => {
     const b = await makeDevice("v-sp4", "devB");
     await until(() => content(b, "計畫.md") === "計畫內容\n", "B 先拿到原筆記");
 
-    const workId = a.manager.createSpace("工作");
-    const copyRel = a.manager.copyNoteToSpace("計畫.md", workId);
+    const workId = a.spaces.createSpace("工作");
+    const copyRel = a.spaces.copyNoteToSpace("計畫.md", workId);
     expect(copyRel).not.toBe("計畫.md"); // 是全新一篇,不同路徑
 
     // A:原筆記留在預設、副本在工作,兩者內容相同
-    expect(a.manager.spaceOfNote("計畫.md")).toBe(DEFAULT_SPACE_ID);
-    expect(a.manager.spaceOfNote(copyRel)).toBe(workId);
+    expect(a.spaces.spaceOfNote("計畫.md")).toBe(DEFAULT_SPACE_ID);
+    expect(a.spaces.spaceOfNote(copyRel)).toBe(workId);
     expect(content(a, copyRel)).toBe("計畫內容\n");
     expect(content(a, "計畫.md")).toBe("計畫內容\n");
 
     // B:兩篇都收斂,歸屬與內容正確
     await until(() => content(b, copyRel) === "計畫內容\n", "B 收到副本內容");
-    await until(() => b.manager.spaceOfNote(copyRel) === workId, "B 收斂副本歸屬到工作");
+    await until(() => b.spaces.spaceOfNote(copyRel) === workId, "B 收斂副本歸屬到工作");
     expect(content(b, "計畫.md")).toBe("計畫內容\n");
-    expect(b.manager.spaceOfNote("計畫.md")).toBe(DEFAULT_SPACE_ID);
+    expect(b.spaces.spaceOfNote("計畫.md")).toBe(DEFAULT_SPACE_ID);
   });
 });

@@ -7,6 +7,7 @@ import { startServer, SyncStore, type RunningServer } from "@stele/server";
 import { deriveVaultKey, VaultCipher } from "@stele/sync";
 import { VaultSession } from "../src/main/vault-session.ts";
 import { SyncManager, type SyncSettings, type Participant } from "../src/main/sync-manager.ts";
+import { VaultMeta } from "../src/main/vault-meta.ts";
 
 const TOKEN = "桌面整合-token-1234567890";
 
@@ -52,11 +53,11 @@ describe("SyncManager 桌面端對端", () => {
     const session = new VaultSession(dir, noop);
     const settings: SyncSettings = { url: `ws://127.0.0.1:${server.port}`, token: TOKEN, vaultId, deviceId };
     const presence = new Map<string, Participant[]>();
-    const manager = new SyncManager(session, settings, undefined, {
+    const manager = new SyncManager(session, settings, new VaultMeta(dir), undefined, {
       pushDebounceMs: 20,
       cipher,
-      onPresence: (rel, list) => presence.set(rel, list),
-      exportDocKey: cipher ? (docId) => cipher.exportDocKey(docId) : undefined,
+      onPresence: (rel: string, list: Participant[]) => presence.set(rel, list),
+      exportDocKey: cipher ? (docId: string) => cipher.exportDocKey(docId) : undefined,
     });
     manager.start();
     const device = { dir, session, manager, presence };
@@ -144,7 +145,7 @@ describe("SyncManager 桌面端對端", () => {
       vaultId: "v-離線桌面",
       deviceId: "devB",
     };
-    const manager2 = new SyncManager(b.session, settings, undefined, { pushDebounceMs: 20 });
+    const manager2 = new SyncManager(b.session, settings, new VaultMeta(b.dir), undefined, { pushDebounceMs: 20 });
     manager2.start();
     devices.push({ dir: b.dir, session: b.session, manager: manager2, presence: new Map() });
 
