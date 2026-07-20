@@ -89,6 +89,8 @@ describe("SyncStore", () => {
     expect(store.headSeqs("v1")).toEqual([]);
   });
 
+  // 註:server 層 H1 綁定 memberId==sha256(pubSign) 後,「同 memberId 換 pubSign」在正常協議不可達;
+  // 此處直測 store 的 conflict 分支,是萬一綁定被繞過的防禦深度保險。
   it("enrollMember TOFU:首見入表、同公鑰更新、換公鑰 conflict、按 vault 隔離", () => {
     const store = makeStore();
     const sign1 = bytes(1, 1, 1);

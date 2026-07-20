@@ -176,6 +176,13 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         refuse("bad-message", "非法公鑰");
         return;
       }
+      // memberId 必須 = hex(sha256(pubSign)):否則攻擊者可挑任意 memberId 配自己的金鑰搶註,
+      // 讓 2b 的邀請者把空間金鑰包給攻擊者的 pubWrap。綁定後 memberId 不再是自選 label,
+      // 搶註別人 memberId 需 sha256 碰撞;順帶讓 challenge 的 memberId 固定 64 hex,拼接無歧義。
+      if (msg.memberId !== createHash("sha256").update(msg.pubSign).digest("hex")) {
+        refuse("bad-member", "memberId 與公鑰不符");
+        return;
+      }
       pendingIdentity = { vaultId: msg.vaultId, memberId: msg.memberId, pubSign: msg.pubSign, pubWrap: msg.pubWrap };
       pendingNonce = randomBytes(32);
       send({ type: "authChallenge", nonce: pendingNonce });
@@ -187,12 +194,16 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         refuse("bad-message", "重複認證");
         return;
       }
-      if (!pendingNonce || !pendingIdentity) {
+      // nonce 一次性:取出即清,無論成敗都不留給下一則 authProof 重試(防禦深度)
+      const nonce = pendingNonce;
+      const p = pendingIdentity;
+      pendingNonce = undefined;
+      pendingIdentity = undefined;
+      if (!nonce || !p) {
         refuse("bad-message", "未先發起身分認證");
         return;
       }
-      const p = pendingIdentity;
-      if (!verifyChallenge(msg.signature, pendingNonce, p.vaultId, p.memberId, p.pubSign)) {
+      if (!verifyChallenge(msg.signature, nonce, p.vaultId, p.memberId, p.pubSign)) {
         refuse("bad-proof", "身分簽章驗證失敗");
         return;
       }
@@ -201,8 +212,6 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         return;
       }
       vaultId = p.vaultId;
-      pendingNonce = undefined;
-      pendingIdentity = undefined;
       clearTimeout(authTimer);
       joinVault(vaultId);
       send({ type: "authOk", docs: opts.store.headSeqs(vaultId) });

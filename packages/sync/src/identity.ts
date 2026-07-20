@@ -70,6 +70,9 @@ export async function deriveIdentity(seed: Uint8Array): Promise<SyncIdentity> {
 /**
  * challenge-response 的待簽位元組,client 與 server 都呼叫此函式組出、保兩端位元組一致。
  * 綁 domain(防跨協議)+ server nonce(防重放)+ vaultId(防跨 vault 挪用)+ memberId(綁定宣稱身分)。
+ *
+ * 拼接無長度分隔卻無歧義:domain(13B)與 nonce(32B)固定長,且 server 強制 memberId==hex(sha256(pubSign))
+ * = 永遠 64 hex 固定長(見 server handleAuthId),故從尾部倒數 64 即 memberId、中間即 vaultId,無切分歧義。
  */
 export function identityChallengeBytes(nonce: Uint8Array, vaultId: string, memberId: string): Uint8Array {
   const parts = [CHALLENGE_DOMAIN, nonce, utf8(vaultId), utf8(memberId)];

@@ -131,25 +131,6 @@ describe("帶身分認證(challenge-response)", () => {
     c1.close();
   });
 
-  it("TOFU:同 memberId 換一把 pubSign 二次連線被拒 conflict", async () => {
-    const id = await deriveIdentity(generateSeed());
-    const c1 = new TestClient(server.port);
-    await c1.authWith(id, "v-tofu");
-    c1.close();
-
-    // 偽造:memberId 沿用受害者的,但公鑰換成攻擊者另一把私鑰對應的
-    const attacker = await deriveIdentity(generateSeed());
-    const c2 = new TestClient(server.port);
-    await c2.open();
-    c2.send({ type: "authId", token: TOKEN, vaultId: "v-tofu", memberId: id.memberId, pubSign: attacker.pubSign, pubWrap: attacker.pubWrap });
-    const ch = await c2.next("authChallenge");
-    // 用 attacker 私鑰簽(對得上送出的 pubSign,能過 verifyChallenge,才測得到 enrollMember 的釘選)
-    c2.send({ type: "authProof", signature: attacker.sign(identityChallengeBytes(ch.nonce, "v-tofu", id.memberId)) });
-
-    const err = await c2.next("error");
-    expect(err.code).toBe("member-conflict");
-  });
-
   it("同一成員(同種子)多裝置:各自握手皆入同一 members 列", async () => {
     const seed = generateSeed();
     const idA = await deriveIdentity(seed);
@@ -164,6 +145,22 @@ describe("帶身分認證(challenge-response)", () => {
     expect(store.listMembers("v-multi").filter((m) => m.memberId === idA.memberId)).toHaveLength(1);
     a.close();
     b.close();
+  });
+
+  it("搶註:memberId 與 pubSign 不符即拒(擋自選 memberId 配自己金鑰霸佔他人身分)", async () => {
+    // 攻擊者用自己的合法 keypair,但宣稱一個任意的、非其公鑰衍生的 memberId
+    const attacker = await deriveIdentity(generateSeed());
+    const fakeMemberId = "b".repeat(64);
+    expect(fakeMemberId).not.toBe(attacker.memberId);
+
+    // memberId↔pubSign 綁定在第一階段就查,連 challenge 都拿不到,攻擊者沒有簽章的機會
+    const c = new TestClient(server.port);
+    await c.open();
+    c.send({ type: "authId", token: TOKEN, vaultId: "v-squat", memberId: fakeMemberId, pubSign: attacker.pubSign, pubWrap: attacker.pubWrap });
+
+    const err = await c.next("error");
+    expect(err.code).toBe("bad-member");
+    expect(store.getMember("v-squat", fakeMemberId)).toBeUndefined();
   });
 
   it("token 錯誤在身分握手第一階段就被拒", async () => {
