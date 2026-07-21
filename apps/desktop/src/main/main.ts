@@ -271,7 +271,12 @@ function initialVaultDir(): string | undefined {
 
 ipcMain.handle("vault:list", () => session?.list() ?? null);
 
-ipcMain.handle("sync:status", () => syncManager?.status ?? "off");
+ipcMain.handle("sync:status", () => {
+  if (syncManager) return syncManager.status;
+  // team vault 已認證但 owner 尚未包 root 給我:pending(初次查詢也要反映,不只靠 switchVault 廣播)
+  if (teamRuntime && teamRuntime.root === undefined) return "pending";
+  return "off";
+});
 
 ipcMain.on("presence:active", (_e, rel: unknown) => {
   syncManager?.setActiveNote(typeof rel === "string" ? rel : undefined);

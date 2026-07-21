@@ -35,6 +35,8 @@ import type {
   SpacesOverview,
   SpaceInfo,
   SpaceAuditItem,
+  TeamInfo,
+  TeamMember,
 } from "../main/preload.ts";
 
 type EditorMode = "wysiwyg" | "source";
@@ -1119,6 +1121,183 @@ function SpaceAuditDialog({ spaces, onClose }: { spaces: SpaceInfo[]; onClose: (
   );
 }
 
+/**
+ * 團隊面板:依 vault 的 team 狀態分三態呈現——
+ *  - 個人 vault:建立團隊 vault(url+token)或貼邀請碼加入
+ *  - 團隊 + 擁有者:產生邀請碼、成員清單(顯示指紋)核准/移除
+ *  - 團隊 + 成員:顯示金鑰是否就緒(pending = 等擁有者核准)
+ */
+function TeamDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation();
+  const [info, setInfo] = useState<TeamInfo | undefined>(undefined);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // 建立
+  const [url, setUrl] = useState("");
+  const [token, setToken] = useState("");
+  // 加入
+  const [invite, setInvite] = useState("");
+  // 擁有者:邀請碼與成員
+  const [inviteOut, setInviteOut] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [members, setMembers] = useState<TeamMember[]>([]);
+
+  const reload = (): void => {
+    void window.stele.teamInfo().then((i) => {
+      setInfo(i);
+      if (i.team && i.owner) void window.stele.teamMembers().then(setMembers).catch(() => setMembers([]));
+    });
+  };
+  useEffect(reload, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const run = (fn: () => Promise<void>): void => {
+    setBusy(true);
+    setError(null);
+    void fn()
+      .catch(() => setError(t("team.error")))
+      .finally(() => setBusy(false));
+  };
+
+  const create = (): void => {
+    if (!url.trim() || !token.trim()) return;
+    run(async () => {
+      await window.stele.teamCreate(url.trim(), token.trim());
+      reload();
+    });
+  };
+  const join = (): void => {
+    if (!invite.trim()) return;
+    run(async () => {
+      await window.stele.teamJoin(invite.trim());
+      reload();
+    });
+  };
+  const makeInvite = (): void => {
+    setCopied(false);
+    run(async () => {
+      setInviteOut(await window.stele.teamInvite());
+    });
+  };
+  const approve = (memberId: string): void => {
+    if (!window.confirm(t("team.approveConfirm"))) return;
+    run(async () => {
+      await window.stele.teamApprove(memberId);
+      reload();
+    });
+  };
+  const remove = (memberId: string): void => {
+    if (!window.confirm(t("team.removeConfirm"))) return;
+    run(async () => {
+      await window.stele.teamRemove(memberId);
+      reload();
+    });
+  };
+
+  return (
+    <div className="switcher-backdrop" onClick={onClose}>
+      <div className="switcher team" onClick={(e) => e.stopPropagation()}>
+        <h2>{t("team.title")}</h2>
+
+        {info === undefined && <p className="placeholder">{t("editor.loading")}</p>}
+
+        {info && !info.team && (
+          <>
+            <p className="placeholder">{t("team.notTeam")}</p>
+            <section className="team-section">
+              <h3>{t("team.create.title")}</h3>
+              <p className="placeholder">{t("team.create.hint")}</p>
+              <input placeholder={t("team.create.url")} value={url} onChange={(e) => setUrl(e.target.value)} />
+              <input placeholder={t("team.create.token")} value={token} onChange={(e) => setToken(e.target.value)} />
+              <button className="primary" disabled={busy} onClick={create}>
+                {busy ? t("team.create.busy") : t("team.create.submit")}
+              </button>
+            </section>
+            <section className="team-section">
+              <h3>{t("team.join.title")}</h3>
+              <p className="placeholder">{t("team.join.hint")}</p>
+              <textarea placeholder={t("team.join.placeholder")} value={invite} onChange={(e) => setInvite(e.target.value)} rows={3} />
+              <button className="primary" disabled={busy} onClick={join}>
+                {busy ? t("team.join.busy") : t("team.join.submit")}
+              </button>
+            </section>
+          </>
+        )}
+
+        {info && info.team && info.owner && (
+          <>
+            <section className="team-section">
+              <h3>{t("team.invite.title")}</h3>
+              <p className="placeholder">{t("team.invite.hint")}</p>
+              {inviteOut ? (
+                <div className="share-link">
+                  <input readOnly value={inviteOut} onFocus={(e) => e.target.select()} />
+                  <button
+                    className="primary"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(inviteOut).then(() => setCopied(true));
+                    }}
+                  >
+                    {copied ? t("team.invite.copied") : t("team.invite.copy")}
+                  </button>
+                </div>
+              ) : (
+                <button className="primary" disabled={busy} onClick={makeInvite}>
+                  {busy ? t("team.invite.busy") : t("team.invite.generate")}
+                </button>
+              )}
+            </section>
+            <section className="team-section">
+              <h3>
+                {t("team.members.title")}{" "}
+                <button className="link-btn" onClick={reload}>
+                  {t("team.members.refresh")}
+                </button>
+              </h3>
+              {members.filter((m) => !m.isOwner).length === 0 && <p className="placeholder">{t("team.members.empty")}</p>}
+              <ul className="team-members">
+                {members.map((m) => (
+                  <li key={m.memberId} className="team-member">
+                    <div className="team-member-id">
+                      <code>{m.memberId.slice(0, 12)}…</code>
+                      {m.isOwner && <span className="team-badge">{t("team.owner.badge")}</span>}
+                    </div>
+                    <div className="team-fingerprint" title={t("team.member.fingerprintHint")}>
+                      {m.fingerprint}
+                    </div>
+                    {!m.isOwner && (
+                      <div className="team-member-actions">
+                        <button disabled={busy} onClick={() => approve(m.memberId)}>
+                          {t("team.member.approve")}
+                        </button>
+                        <button className="danger" disabled={busy} onClick={() => remove(m.memberId)}>
+                          {t("team.member.remove")}
+                        </button>
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          </>
+        )}
+
+        {info && info.team && !info.owner && (
+          <p className="placeholder">{info.ready ? t("team.member.status.ready") : t("team.member.status.pending")}</p>
+        )}
+
+        {error && <p className="error">{error}</p>}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const { t } = useTranslation();
   // undefined = 啟動查詢中,null = 尚未開啟 vault(歡迎畫面)
@@ -1150,6 +1329,8 @@ function App() {
   const [moveConfirm, setMoveConfirm] = useState<{ rel: string; spaceId: string; spaceName: string } | null>(null);
   // 稽核紀錄面板
   const [auditOpen, setAuditOpen] = useState(false);
+  // 團隊面板
+  const [teamOpen, setTeamOpen] = useState(false);
   // 折疊的空間 section
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
 
@@ -1425,6 +1606,9 @@ function App() {
           <button className="vault-switch" title={t("vault.switch")} aria-label={t("vault.switch")} onClick={chooseVault}>
             ⇄
           </button>
+          <button className="vault-switch" title={t("team.open")} aria-label={t("team.open")} onClick={() => setTeamOpen(true)}>
+            ⛬
+          </button>
           {spacesData && (
             <>
               <button className="vault-switch" title={t("space.new")} aria-label={t("space.new")} onClick={() => setSpaceEdit({ value: "" })}>
@@ -1689,6 +1873,7 @@ function App() {
         </div>
       )}
       {auditOpen && <SpaceAuditDialog spaces={spaces} onClose={() => setAuditOpen(false)} />}
+      {teamOpen && <TeamDialog onClose={() => setTeamOpen(false)} />}
       {overlays}
     </div>
   );
