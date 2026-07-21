@@ -28,7 +28,7 @@ export interface TeamBootstrapOptions {
   ownerPubSign: Uint8Array;
   /** 新成員首次加入帶一次性邀請碼;已 enroll 成員/建立者留空或省略 */
   enrollmentToken?: string;
-  createSocket(url: string): SocketLike;
+  createSocket: (url: string) => SocketLike;
 }
 
 /** ready=拿到 root 可協作;pending=已認證但 owner 尚未包 root 給我(等待授權,不可 start sync) */
@@ -70,7 +70,7 @@ export interface CreateTeamVaultOptions {
   token: string;
   vaultId: string;
   identity: SyncIdentity;
-  createSocket(url: string): SocketLike;
+  createSocket: (url: string) => SocketLike;
   /** 測試可注入決定性 root;預設隨機 32B */
   generateRoot?: () => Uint8Array;
 }

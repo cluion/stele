@@ -53,6 +53,7 @@ export {
   type TeamBootstrapResult,
   type CreateTeamVaultOptions,
 } from "./bootstrap.ts";
+export { TeamAdminSession, type TeamAdminOptions } from "./team-admin.ts";
 export {
   readSpaces,
   spaceOf,

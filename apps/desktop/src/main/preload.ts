@@ -84,6 +84,30 @@ export interface SteleApi {
   spaceAudit(): Promise<SpaceAuditItem[]>;
   /** 空間或歸屬有變(本地或遠端);回傳退訂函式 */
   onSpacesChanged(cb: () => void): () => void;
+  // ── 團隊(2b)──
+  /** 目前 vault 的 team 狀態(是否 team、是否 owner、金鑰是否就緒) */
+  teamInfo(): Promise<TeamInfo>;
+  /** 把目前 vault 轉為 team vault(建立者);回傳新 vaultId */
+  teamCreate(url: string, token: string): Promise<{ vaultId: string }>;
+  /** 以邀請 bundle 加入 team vault;ready=false 表示已 enroll 但等擁有者核准 */
+  teamJoin(invite: string): Promise<{ vaultId: string; ready: boolean }>;
+  /** owner 產生邀請 bundle(含一次性邀請碼與 ownerPubSign 信任錨) */
+  teamInvite(ttlSec?: number): Promise<string>;
+  /** owner 列成員(附 pubWrap 指紋供 out-of-band 核對) */
+  teamMembers(): Promise<TeamMember[]>;
+  /** owner 核准某成員(把 root 包給他);呼叫前 UI 應先讓 owner 核對指紋 */
+  teamApprove(memberId: string): Promise<void>;
+  /** owner 移除成員 */
+  teamRemove(memberId: string): Promise<void>;
+}
+
+export type TeamInfo = { team: false } | { team: true; vaultId: string; owner: boolean; ready: boolean };
+
+export interface TeamMember {
+  memberId: string;
+  /** pubWrap 的 safety-number 式指紋 */
+  fingerprint: string;
+  isOwner: boolean;
 }
 
 export interface SpaceInfo {
@@ -225,6 +249,13 @@ const api: SteleApi = {
     ipcRenderer.on("spaces:changed", handler);
     return () => ipcRenderer.off("spaces:changed", handler);
   },
+  teamInfo: () => ipcRenderer.invoke("team:info"),
+  teamCreate: (url, token) => ipcRenderer.invoke("team:create", url, token),
+  teamJoin: (invite) => ipcRenderer.invoke("team:join", invite),
+  teamInvite: (ttlSec) => ipcRenderer.invoke("team:invite", ttlSec),
+  teamMembers: () => ipcRenderer.invoke("team:members"),
+  teamApprove: (memberId) => ipcRenderer.invoke("team:approve", memberId),
+  teamRemove: (memberId) => ipcRenderer.invoke("team:remove", memberId),
 };
 
 contextBridge.exposeInMainWorld("stele", api);

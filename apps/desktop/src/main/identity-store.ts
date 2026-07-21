@@ -58,7 +58,7 @@ function readPlaintext(): IdentityFile | undefined {
   }
   // enc null(0.8.0 明文檔)或其他:交 importIdentity 驗證
   importIdentity(parsed);
-  return parsed as IdentityFile;
+  return parsed as unknown as IdentityFile;
 }
 
 /** 原子寫(tmp + rename);keychain 可用則加密種子後落盤,否則明文退回。輸入是明文 IdentityFile */

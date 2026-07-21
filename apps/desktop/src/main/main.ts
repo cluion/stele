@@ -1,11 +1,14 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { readFileSync, existsSync, statSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import path from "node:path";
+import WebSocket from "ws";
 import { VaultSession, type SessionCallbacks } from "./vault-session.ts";
-import { deriveVaultKey, MasterKeySpaces } from "@stele/sync";
+import { deriveVaultKey, MasterKeySpaces, bootstrapTeamKey, createTeamVault, TeamAdminSession } from "@stele/sync";
+import type { SocketLike } from "@stele/sync";
 import { SyncManager, type SyncSettings } from "./sync-manager.ts";
+import { encodeInvite, decodeInvite } from "./team-invite.ts";
 import { VaultMeta } from "./vault-meta.ts";
 import { SpacesService } from "./spaces-service.ts";
 import { CommentStore } from "./comment-store.ts";
@@ -44,17 +47,44 @@ function sendAll(channel: string, ...args: unknown[]): void {
 }
 
 /**
- * vault 內 .stele/sync.json 有 url+token+passphrase 才啟用同步;vaultId/deviceId 首次自動配發並寫回
- * E2EE 是硬條件:缺 passphrase 不做明文同步,直接停用並提示
+ * 同步設定:個人 vault 的金鑰來自 passphrase→scrypt(E2EE 硬條件);
+ * 團隊 vault(vaultType="team")無 passphrase,root 由 bootstrap 經伺服器信封取得,
+ * 信任錨 ownerPubSign 隨 sync.json(join 時由邀請 bundle 帶入)。
  */
-function loadSyncSettings(root: string): (SyncSettings & { passphrase: string }) | undefined {
-  const file = path.join(root, ".stele", "sync.json");
+type LoadedSync =
+  | { kind: "personal"; settings: SyncSettings; passphrase: string }
+  | { kind: "team"; settings: SyncSettings; ownerPubSign: Uint8Array; enrollmentToken?: string };
+
+const syncFile = (root: string): string => path.join(root, ".stele", "sync.json");
+
+function loadSyncSettings(root: string): LoadedSync | undefined {
+  const file = syncFile(root);
   try {
     const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
     const url = raw["url"];
     const token = raw["token"];
-    const passphrase = raw["passphrase"];
     if (typeof url !== "string" || typeof token !== "string") return undefined;
+
+    if (raw["vaultType"] === "team") {
+      const ownerPubSign = raw["ownerPubSign"];
+      // team vault 的 vaultId 由建立/加入時指定,不自動配發(它是伺服器上共享金鑰的命名空間)
+      if (typeof ownerPubSign !== "string" || typeof raw["vaultId"] !== "string") {
+        console.error("team sync.json 缺 ownerPubSign 或 vaultId,同步停用");
+        return undefined;
+      }
+      let changed = false;
+      if (typeof raw["deviceId"] !== "string") {
+        raw["deviceId"] = randomUUID();
+        changed = true;
+      }
+      if (changed) writeFileSync(file, JSON.stringify(raw, null, 2));
+      const settings: SyncSettings = { url, token, vaultId: raw["vaultId"], deviceId: raw["deviceId"] as string };
+      if (typeof raw["displayName"] === "string") settings.displayName = raw["displayName"];
+      const enrollmentToken = typeof raw["enrollmentToken"] === "string" ? raw["enrollmentToken"] : undefined;
+      return { kind: "team", settings, ownerPubSign: new Uint8Array(Buffer.from(ownerPubSign, "base64")), enrollmentToken };
+    }
+
+    const passphrase = raw["passphrase"];
     if (typeof passphrase !== "string" || passphrase.length === 0) {
       console.error("sync.json 缺 passphrase:E2EE 為必要條件,同步停用");
       return undefined;
@@ -69,10 +99,51 @@ function loadSyncSettings(root: string): (SyncSettings & { passphrase: string })
       changed = true;
     }
     if (changed) writeFileSync(file, JSON.stringify(raw, null, 2));
-    return { url, token, passphrase, vaultId: raw["vaultId"] as string, deviceId: raw["deviceId"] as string };
+    const settings: SyncSettings = { url, token, vaultId: raw["vaultId"] as string, deviceId: raw["deviceId"] as string };
+    if (typeof raw["displayName"] === "string") settings.displayName = raw["displayName"];
+    return { kind: "personal", settings, passphrase };
   } catch {
     return undefined;
   }
+}
+
+/** 目前 team vault 的執行態(供 owner 管理 IPC 與 pending 重試);切 vault 時重設 */
+let teamRuntime: { settings: SyncSettings; ownerPubSign: Uint8Array; root: Uint8Array | undefined } | undefined;
+
+/** 建 socket:與 SyncManager 給 SyncClient 的同形,供 bootstrap/admin 對伺服器握手 */
+const createTeamSocket = (url: string): SocketLike => new WebSocket(url) as unknown as SocketLike;
+
+/** 我是不是此 team vault 的 owner(pubSign == 信任錨);owner 才給管理 IPC */
+async function isTeamOwner(): Promise<boolean> {
+  if (!teamRuntime) return false;
+  const me = await getIdentity();
+  return Buffer.from(me.pubSign).equals(Buffer.from(teamRuntime.ownerPubSign));
+}
+
+/** 首次 enroll 後把已消耗的一次性邀請碼從 sync.json 移除 */
+function clearEnrollmentToken(root: string): void {
+  const file = syncFile(root);
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    if (raw["enrollmentToken"] === undefined) return;
+    delete raw["enrollmentToken"];
+    writeFileSync(file, JSON.stringify(raw, null, 2));
+  } catch (err) {
+    console.error("清除邀請碼失敗:", err);
+  }
+}
+
+/** 把設定物件寫入某 vault 的 .stele/sync.json(建立/加入 team vault 用) */
+function writeSyncConfig(root: string, config: Record<string, unknown>): void {
+  const file = syncFile(root);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(config, null, 2));
+}
+
+/** 成員 pubWrap 的人類可核對指紋(safety number 式):SHA-256 前 16 hex 分四組 */
+function fingerprintOf(pub: Uint8Array): string {
+  const h = createHash("sha256").update(pub).digest("hex");
+  return (h.slice(0, 16).match(/.{4}/g) ?? []).join(" ");
 }
 
 function broadcastSyncStatus(status: string): void {
@@ -126,23 +197,55 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
     const rel = next.relForDocId(noteDocId);
     if (rel) sendAll("comments:update", rel, update);
   });
-  const syncSettings = SMOKE ? undefined : loadSyncSettings(next.root);
-  if (syncSettings) {
-    const keySource = new MasterKeySpaces(await deriveVaultKey(syncSettings.passphrase, syncSettings.vaultId));
+  teamRuntime = undefined;
+  const loaded = SMOKE ? undefined : loadSyncSettings(next.root);
+  if (loaded) {
     const memberIdentity = await getIdentity();
-    syncManager = new SyncManager(next, syncSettings, meta, broadcastSyncStatus, {
-      spaces: keySource,
-      identity: memberIdentity,
-      onPresence: (rel, participants) => {
-        for (const w of windows) {
-          if (!w.isDestroyed()) w.webContents.send("presence:update", rel, participants);
+    let keySource: MasterKeySpaces | undefined;
+    if (loaded.kind === "personal") {
+      keySource = new MasterKeySpaces(await deriveVaultKey(loaded.passphrase, loaded.settings.vaultId));
+    } else {
+      // team:先跑獨立 bootstrap 拿 root(避開 SyncClient authOk 立即解 vault-meta 的死結)
+      teamRuntime = { settings: loaded.settings, ownerPubSign: loaded.ownerPubSign, root: undefined };
+      try {
+        const res = await bootstrapTeamKey({
+          url: loaded.settings.url,
+          token: loaded.settings.token,
+          vaultId: loaded.settings.vaultId,
+          identity: memberIdentity,
+          ownerPubSign: loaded.ownerPubSign,
+          enrollmentToken: loaded.enrollmentToken,
+          createSocket: createTeamSocket,
+        });
+        // 首次以邀請碼 enroll 後,碼已被伺服器消耗;清出 sync.json(單次、留著無益)
+        if (loaded.enrollmentToken) clearEnrollmentToken(next.root);
+        if (res.status === "ready") {
+          teamRuntime.root = res.root;
+          keySource = new MasterKeySpaces(res.root);
+        } else {
+          // pending:owner 尚未包 root 給我。不 start sync、不碰 vault-meta;重連或重開 vault 時重試
+          broadcastSyncStatus("pending");
         }
-      },
-      comments,
-    });
-    spaces.setSyncHooks(syncManager);
-    comments.setSyncHooks(syncManager);
-    syncManager.start();
+      } catch (err) {
+        console.error("團隊金鑰 bootstrap 失敗:", err);
+        broadcastSyncStatus("error");
+      }
+    }
+    if (keySource) {
+      syncManager = new SyncManager(next, loaded.settings, meta, broadcastSyncStatus, {
+        spaces: keySource,
+        identity: memberIdentity,
+        onPresence: (rel, participants) => {
+          for (const w of windows) {
+            if (!w.isDestroyed()) w.webContents.send("presence:update", rel, participants);
+          }
+        },
+        comments,
+      });
+      spaces.setSyncHooks(syncManager);
+      comments.setSyncHooks(syncManager);
+      syncManager.start();
+    }
   } else {
     broadcastSyncStatus("off");
   }
@@ -257,6 +360,123 @@ ipcMain.handle("spaces:copy", (_e, rel: unknown, spaceId: unknown) => {
 });
 
 ipcMain.handle("spaces:audit", () => spaces?.readAudit() ?? []);
+
+// ── 團隊(2b):建立/加入/邀請/核准/移除。owner 管理走短命 TeamAdminSession,不動 doc 同步連線 ──
+
+/** 目前 vault 的 team 狀態,供 renderer 決定顯示哪些入口 */
+ipcMain.handle("team:info", async () => {
+  if (!teamRuntime) return { team: false as const };
+  return {
+    team: true as const,
+    vaultId: teamRuntime.settings.vaultId,
+    owner: await isTeamOwner(),
+    ready: teamRuntime.root !== undefined, // false = pending(等擁有者授權)
+  };
+});
+
+/** 把目前 vault 轉為 team vault(建立者):生 root、self-wrap、認領 owner,寫 sync.json 後重載 */
+ipcMain.handle("team:create", async (_e, url: unknown, token: unknown) => {
+  if (typeof url !== "string" || typeof token !== "string" || url.length === 0 || token.length === 0) {
+    throw new Error("非法請求:缺 url 或 token");
+  }
+  const root = requireSession().root;
+  const me = await getIdentity();
+  const vaultId = randomUUID();
+  await createTeamVault({ url, token, vaultId, identity: me, createSocket: createTeamSocket });
+  writeSyncConfig(root, {
+    url,
+    token,
+    vaultId,
+    vaultType: "team",
+    ownerPubSign: Buffer.from(me.pubSign).toString("base64"),
+    deviceId: randomUUID(),
+  });
+  await switchVault(root); // 以 team 模式重載:bootstrap 由 self-envelope 復原 root → ready
+  return { vaultId };
+});
+
+/** 加入 team vault(被邀請者):解析邀請 bundle,寫 sync.json(暫存邀請碼供首次 enroll)後重載 */
+ipcMain.handle("team:join", async (_e, inviteText: unknown) => {
+  if (typeof inviteText !== "string") throw new Error("非法請求");
+  const invite = decodeInvite(inviteText);
+  const root = requireSession().root;
+  writeSyncConfig(root, {
+    url: invite.url,
+    token: invite.token,
+    vaultId: invite.vaultId,
+    vaultType: "team",
+    ownerPubSign: invite.ownerPubSign,
+    deviceId: randomUUID(),
+    enrollmentToken: invite.enrollToken,
+  });
+  await switchVault(root);
+  return { vaultId: invite.vaultId, ready: teamRuntime?.root !== undefined };
+});
+
+/** owner 產生邀請 bundle(含一次性邀請碼 + ownerPubSign 信任錨) */
+ipcMain.handle("team:invite", async (_e, ttlSec: unknown) => {
+  if (!(await isTeamOwner()) || !teamRuntime) throw new Error("非團隊擁有者");
+  const me = await getIdentity();
+  const ttl = typeof ttlSec === "number" && ttlSec > 0 ? ttlSec : 24 * 60 * 60;
+  const admin = await TeamAdminSession.open({ ...teamRuntime.settings, identity: me, createSocket: createTeamSocket });
+  try {
+    const enrollToken = await admin.inviteToken(ttl);
+    return encodeInvite({
+      url: teamRuntime.settings.url,
+      token: teamRuntime.settings.token,
+      vaultId: teamRuntime.settings.vaultId,
+      ownerPubSign: Buffer.from(me.pubSign).toString("base64"),
+      enrollToken,
+    });
+  } finally {
+    admin.close();
+  }
+});
+
+/** owner 列成員(附 pubWrap 指紋,供核准前 out-of-band 核對) */
+ipcMain.handle("team:members", async () => {
+  if (!(await isTeamOwner()) || !teamRuntime) throw new Error("非團隊擁有者");
+  const me = await getIdentity();
+  const admin = await TeamAdminSession.open({ ...teamRuntime.settings, identity: me, createSocket: createTeamSocket });
+  try {
+    return (await admin.members()).map((m) => ({
+      memberId: m.memberId,
+      fingerprint: fingerprintOf(m.pubWrap),
+      isOwner: m.memberId === me.memberId,
+    }));
+  } finally {
+    admin.close();
+  }
+});
+
+/** owner 核准某成員:以 root 包給他(呼叫端 UI 應先讓 owner 核對指紋) */
+ipcMain.handle("team:approve", async (_e, memberId: unknown) => {
+  if (typeof memberId !== "string") throw new Error("非法請求");
+  if (!(await isTeamOwner()) || !teamRuntime) throw new Error("非團隊擁有者");
+  if (!teamRuntime.root) throw new Error("尚未取得團隊金鑰,無法核准");
+  const me = await getIdentity();
+  const admin = await TeamAdminSession.open({ ...teamRuntime.settings, identity: me, createSocket: createTeamSocket });
+  try {
+    const member = (await admin.members()).find((m) => m.memberId === memberId);
+    if (!member) throw new Error("查無此成員");
+    await admin.approve(member, teamRuntime.root);
+  } finally {
+    admin.close();
+  }
+});
+
+/** owner 移除成員(2b 只刪列與信封;root 未輪換,留 2c) */
+ipcMain.handle("team:remove", async (_e, memberId: unknown) => {
+  if (typeof memberId !== "string") throw new Error("非法請求");
+  if (!(await isTeamOwner()) || !teamRuntime) throw new Error("非團隊擁有者");
+  const me = await getIdentity();
+  const admin = await TeamAdminSession.open({ ...teamRuntime.settings, identity: me, createSocket: createTeamSocket });
+  try {
+    await admin.remove(memberId);
+  } finally {
+    admin.close();
+  }
+});
 
 ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {
   if (typeof rel !== "string") throw new Error("非法參數");
