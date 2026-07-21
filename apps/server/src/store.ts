@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import type { SharePermission, ShareInfo } from "@stele/sync";
+import type { SharePermission, ShareInfo, KeyEnvelope } from "@stele/sync";
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
@@ -58,6 +58,27 @@ CREATE TABLE IF NOT EXISTS members (
   first_seen INTEGER NOT NULL DEFAULT (unixepoch()),
   last_seen INTEGER NOT NULL DEFAULT (unixepoch()),
   PRIMARY KEY (vault_id, member_id)
+);
+CREATE TABLE IF NOT EXISTS vault_owners (
+  vault_id TEXT PRIMARY KEY,
+  owner_member_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE TABLE IF NOT EXISTS key_envelopes (
+  vault_id TEXT NOT NULL,
+  key_id TEXT NOT NULL,
+  member_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL DEFAULT 0,
+  wrapped_blob BLOB NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (vault_id, key_id, member_id, epoch)
+);
+CREATE TABLE IF NOT EXISTS enrollment_tokens (
+  token TEXT PRIMARY KEY,
+  vault_id TEXT NOT NULL,
+  expires_at INTEGER,
+  used INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 `;
 
@@ -231,6 +252,84 @@ export class SyncStore {
       .prepare("SELECT member_id, pub_sign, pub_wrap FROM members WHERE vault_id = ? ORDER BY first_seen")
       .all(vaultId) as Array<{ member_id: string; pub_sign: Buffer; pub_wrap: Buffer }>;
     return rows.map((r) => ({ memberId: r.member_id, pubSign: new Uint8Array(r.pub_sign), pubWrap: new Uint8Array(r.pub_wrap) }));
+  }
+
+  /** 移除成員:刪 member 列 + 其所有金鑰信封(2b 只做移除;踢人後的 root 輪換留 2c) */
+  removeMember(vaultId: string, memberId: string): void {
+    const remove = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM members WHERE vault_id = ? AND member_id = ?").run(vaultId, memberId);
+      this.db.prepare("DELETE FROM key_envelopes WHERE vault_id = ? AND member_id = ?").run(vaultId, memberId);
+    });
+    remove();
+  }
+
+  /**
+   * 認領 vault 擁有者(TOFU):首位認領者寫入並釘選,之後認領一律回傳既有 owner(不覆蓋)。
+   * 回傳認領後該 vault 的實際 owner memberId。owner 存在 = 此 vault 為 team vault。
+   */
+  claimOwner(vaultId: string, memberId: string): string {
+    const claim = this.db.transaction((): string => {
+      const existing = this.db
+        .prepare("SELECT owner_member_id FROM vault_owners WHERE vault_id = ?")
+        .get(vaultId) as { owner_member_id: string } | undefined;
+      if (existing) return existing.owner_member_id;
+      this.db.prepare("INSERT INTO vault_owners (vault_id, owner_member_id) VALUES (?, ?)").run(vaultId, memberId);
+      return memberId;
+    });
+    return claim();
+  }
+
+  /** 某 vault 的 owner memberId;undefined = 非 team vault(個人/legacy) */
+  ownerOf(vaultId: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT owner_member_id FROM vault_owners WHERE vault_id = ?")
+      .get(vaultId) as { owner_member_id: string } | undefined;
+    return row?.owner_member_id;
+  }
+
+  /** 存一封金鑰信封(upsert 冪等:owner 重 wrap 同一 (vault,key,member,epoch) 直接覆蓋) */
+  putEnvelope(vaultId: string, keyId: string, memberId: string, epoch: number, blob: Uint8Array): void {
+    this.db
+      .prepare(
+        "INSERT INTO key_envelopes (vault_id, key_id, member_id, epoch, wrapped_blob) VALUES (?, ?, ?, ?, ?) " +
+          "ON CONFLICT (vault_id, key_id, member_id, epoch) DO UPDATE SET wrapped_blob = excluded.wrapped_blob, created_at = unixepoch()",
+      )
+      .run(vaultId, keyId, memberId, epoch, Buffer.from(blob));
+  }
+
+  /** 取某成員在此 vault 的金鑰信封:每個 key_id 只回最新 epoch(2b epoch 恆 0;輪換語義留 2c) */
+  envelopesFor(vaultId: string, memberId: string): KeyEnvelope[] {
+    const rows = this.db
+      .prepare(
+        `SELECT key_id, epoch, wrapped_blob FROM key_envelopes e
+         WHERE vault_id = ? AND member_id = ?
+           AND epoch = (SELECT MAX(epoch) FROM key_envelopes
+                        WHERE vault_id = e.vault_id AND key_id = e.key_id AND member_id = e.member_id)
+         ORDER BY key_id`,
+      )
+      .all(vaultId, memberId) as Array<{ key_id: string; epoch: number; wrapped_blob: Buffer }>;
+    return rows.map((r) => ({ keyId: r.key_id, epoch: r.epoch, blob: new Uint8Array(r.wrapped_blob) }));
+  }
+
+  /** 建立一次性邀請碼(綁 vault、可設有效期);token 由呼叫端產生的不可猜亂數 */
+  createEnrollmentToken(token: string, vaultId: string, expiresAt?: number): void {
+    this.db
+      .prepare("INSERT INTO enrollment_tokens (token, vault_id, expires_at) VALUES (?, ?, ?)")
+      .run(token, vaultId, expiresAt ?? null);
+  }
+
+  /**
+   * 消耗邀請碼:僅當 token 存在、未用、未過期且綁的正是此 vault 時,標記已用並回 true。
+   * 單次性由 UPDATE ... WHERE used = 0 的 changes 保證,並發下只有一次成功。
+   */
+  consumeEnrollmentToken(token: string, vaultId: string): boolean {
+    const info = this.db
+      .prepare(
+        "UPDATE enrollment_tokens SET used = 1 " +
+          "WHERE token = ? AND vault_id = ? AND used = 0 AND (expires_at IS NULL OR expires_at > unixepoch())",
+      )
+      .run(token, vaultId);
+    return info.changes > 0;
   }
 
   close(): void {

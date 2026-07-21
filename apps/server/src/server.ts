@@ -16,6 +16,15 @@ const AUTH_TIMEOUT_MS = 10_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const MAX_PAYLOAD_BYTES = 32 * 1024 * 1024;
 const MAX_ID_LENGTH = 128;
+/** 邀請碼有效期夾限:太短不便交付、太長擴大搶用面 */
+const ENROLL_TTL_MIN = 60;
+const ENROLL_TTL_MAX = 7 * 24 * 60 * 60;
+
+/** 團隊金鑰分發與成員管理訊息(需身分認證,授權按 owner/self 把關) */
+type TeamAdminMessage = Extract<
+  ClientMessage,
+  { type: "claimOwner" | "envelopePush" | "envelopePull" | "memberList" | "memberRemove" | "enrollCreate" }
+>;
 
 const CONTENT_TYPE: Record<string, string> = {
   "index.html": "text/html; charset=utf-8",
@@ -114,9 +123,13 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
     let vaultId: string | undefined;
     let scope: ShareScope | undefined;
     let shareId: string | undefined;
+    // 已認證的成員身分(authId 路徑);team 管理與金鑰信封的授權都比對它。share/legacy 連線為 undefined
+    let memberId: string | undefined;
     // 帶身分認證的兩階段中間態(challenge-response);存 closure 內不用全域 Map,免洩漏
     let pendingNonce: Uint8Array | undefined;
-    let pendingIdentity: { vaultId: string; memberId: string; pubSign: Uint8Array; pubWrap: Uint8Array } | undefined;
+    let pendingIdentity:
+      | { vaultId: string; memberId: string; pubSign: Uint8Array; pubWrap: Uint8Array; enrollmentToken: string }
+      | undefined;
     const authTimer = setTimeout(() => ws.close(4401, "未認證"), AUTH_TIMEOUT_MS);
     alive.add(ws);
     ws.on("pong", () => alive.add(ws));
@@ -152,6 +165,12 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         refuse("bad-vault", "非法 vault id");
         return;
       }
+      // team vault(已有 owner)一律走身分認證:擋掉 legacy token-only 連線,
+      // 使「已認證 = 已 enroll = 是成員」,堵掉匿名 token 持有者的 snapshotPush 截斷 DoS
+      if (opts.store.ownerOf(msg.vaultId) !== undefined) {
+        refuse("team-vault", "團隊 vault 需身分認證");
+        return;
+      }
       vaultId = msg.vaultId;
       clearTimeout(authTimer);
       joinVault(vaultId);
@@ -183,7 +202,13 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         refuse("bad-member", "memberId 與公鑰不符");
         return;
       }
-      pendingIdentity = { vaultId: msg.vaultId, memberId: msg.memberId, pubSign: msg.pubSign, pubWrap: msg.pubWrap };
+      pendingIdentity = {
+        vaultId: msg.vaultId,
+        memberId: msg.memberId,
+        pubSign: msg.pubSign,
+        pubWrap: msg.pubWrap,
+        enrollmentToken: msg.enrollmentToken,
+      };
       pendingNonce = randomBytes(32);
       send({ type: "authChallenge", nonce: pendingNonce });
     };
@@ -207,11 +232,23 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         refuse("bad-proof", "身分簽章驗證失敗");
         return;
       }
+      // team vault 的新成員准入閘:pubWrap 是 owner 包裝空間金鑰的信任錨,不可信純 TOFU 自註冊。
+      // 已有 owner(=team)且此成員既非既有成員、也非 owner 本人 → 必須憑一次性邀請碼(綁此 vault、未用、未過期)。
+      // 個人/legacy vault(無 owner)與已註冊成員維持原行為,不需邀請碼。
+      const owner = opts.store.ownerOf(p.vaultId);
+      const isNewMember = opts.store.getMember(p.vaultId, p.memberId) === undefined;
+      if (owner !== undefined && isNewMember && p.memberId !== owner) {
+        if (p.enrollmentToken === "" || !opts.store.consumeEnrollmentToken(p.enrollmentToken, p.vaultId)) {
+          refuse("enroll-required", "加入團隊 vault 需有效邀請碼");
+          return;
+        }
+      }
       if (opts.store.enrollMember(p.vaultId, p.memberId, p.pubSign, p.pubWrap) === "conflict") {
         refuse("member-conflict", "此成員公鑰與註冊紀錄不符");
         return;
       }
       vaultId = p.vaultId;
+      memberId = p.memberId;
       clearTimeout(authTimer);
       joinVault(vaultId);
       send({ type: "authOk", docs: opts.store.headSeqs(vaultId) });
@@ -294,7 +331,83 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
       }
     };
 
+    // 團隊金鑰分發與成員管理(2b):envelopePull 限本人、其餘限 owner。
+    // 授權真相在客戶端驗 owner 簽章;此處 owner 檢查只防濫用/DoS(伺服器不可信)。
+    const handleTeamAdmin = (vault: string, self: string, msg: TeamAdminMessage): void => {
+      const isOwner = opts.store.ownerOf(vault) === self;
+      const requireOwner = (): boolean => {
+        if (!isOwner) {
+          refuse("forbidden", "僅團隊擁有者可執行");
+          return false;
+        }
+        return true;
+      };
+      switch (msg.type) {
+        case "claimOwner":
+          // TOFU:首位認領者釘選為 owner;已有 owner 則回既有(claimOwner 回傳實際 owner,不覆蓋)
+          opts.store.claimOwner(vault, self);
+          send({ type: "ok", reqId: msg.reqId });
+          break;
+        case "envelopePull":
+          // 只回自己的信封:A 絕不能拉到 B 的 blob
+          send({ type: "envelopeList", reqId: msg.reqId, envelopes: opts.store.envelopesFor(vault, self) });
+          break;
+        case "envelopePush": {
+          if (!requireOwner()) return;
+          if (!validId(msg.keyId) || !validId(msg.memberId)) {
+            refuse("bad-message", "非法 id");
+            return;
+          }
+          opts.store.putEnvelope(vault, msg.keyId, msg.memberId, msg.epoch, msg.blob);
+          send({ type: "ok", reqId: msg.reqId });
+          break;
+        }
+        case "memberList":
+          if (!requireOwner()) return;
+          send({ type: "memberCatalog", reqId: msg.reqId, members: opts.store.listMembers(vault) });
+          break;
+        case "memberRemove": {
+          if (!requireOwner()) return;
+          if (msg.memberId === self) {
+            refuse("bad-message", "不可移除自己");
+            return;
+          }
+          // 2b 只刪 member 列 + 其信封;既有連線續存到斷線、root 未輪換(留 2c),故被移除者的舊快取仍能離線解舊內容
+          opts.store.removeMember(vault, msg.memberId);
+          send({ type: "ok", reqId: msg.reqId });
+          break;
+        }
+        case "enrollCreate": {
+          if (!requireOwner()) return;
+          const token = randomBytes(24).toString("base64url");
+          const ttl = Math.min(Math.max(msg.ttlSec, ENROLL_TTL_MIN), ENROLL_TTL_MAX);
+          opts.store.createEnrollmentToken(token, vault, Math.floor(Date.now() / 1000) + ttl);
+          send({ type: "enrollCreated", reqId: msg.reqId, token });
+          break;
+        }
+      }
+    };
+
     const handle = (vault: string, msg: Exclude<ClientMessage, { type: "auth" | "authId" | "authProof" | "shareAuth" }>): void => {
+      if (
+        msg.type === "claimOwner" ||
+        msg.type === "envelopePush" ||
+        msg.type === "envelopePull" ||
+        msg.type === "memberList" ||
+        msg.type === "memberRemove" ||
+        msg.type === "enrollCreate"
+      ) {
+        if (scope !== undefined) {
+          refuse("forbidden", "分享連線不得管理團隊");
+          return;
+        }
+        if (memberId === undefined) {
+          refuse("forbidden", "團隊管理需身分認證");
+          return;
+        }
+        handleTeamAdmin(vault, memberId, msg);
+        return;
+      }
       if (msg.type === "shareCreate" || msg.type === "shareList" || msg.type === "shareRevoke") {
         if (scope !== undefined) {
           refuse("forbidden", "分享連線不得管理分享");

@@ -1,4 +1,6 @@
 import { scryptAsync } from "@noble/hashes/scrypt.js";
+import { ed25519, x25519 } from "@noble/curves/ed25519.js";
+import * as encoding from "lib0/encoding";
 import type { Cipher } from "./cipher.ts";
 
 /**
@@ -19,6 +21,12 @@ const DEFAULT_WORK_FACTOR = 18;
 const utf8 = (s: string) => new TextEncoder().encode(s);
 const DOC_KEY_SALT = utf8("stele-doc-key");
 const SPACE_KEY_SALT = utf8("stele-space-key");
+/** 金鑰包裝(空間 root 信封)的獨立域分隔,別跟 doc/space/identity 的 HKDF 混 */
+const KEYWRAP_SALT = utf8("stele-keywrap-v1");
+
+const WRAP_VERSION = 1;
+const EPH_PUB_LEN = 32;
+const OWNER_SIG_LEN = 64;
 
 /**
  * 預設空間的 id 哨兵:未指派筆記的落點。
@@ -69,6 +77,118 @@ async function open(key: CryptoKey, data: Uint8Array): Promise<Uint8Array> {
   const nonce = data.slice(1, 1 + NONCE_LENGTH);
   const sealed = data.slice(1 + NONCE_LENGTH);
   return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce }, key, sealed));
+}
+
+/**
+ * 空間金鑰信封(2b 團隊層):owner 用收件人 X25519 公鑰把一把原始金鑰(root/space key)包起來,
+ * 經全盲伺服器中繼分發給成員。收件人以自己的 xSecret 解出,伺服器只見不透明密文。
+ *
+ * 格式:[版本 1B][ephPub 32B][ownerSig 64B][sealed…](sealed = seal() 的 AES-GCM 封裝)
+ *
+ * 兩道防線:
+ *  - **owner Ed25519 簽章**(涵蓋 ephPub‖sealed‖context):不可信中繼無 owner 私鑰,無法偽造信封,
+ *    故無法拿假 root 餵新成員去解一個伺服器捏造的假 vault。收件人以 out-of-band 已知的 owner pubSign 驗簽。
+ *  - **context 綁進 HKDF info**(vaultId‖keyId‖epoch‖recipientMemberId,再折入 ephPub‖recipientPubWrap):
+ *    ECDH 已綁 recipient(換 xSecret 解不出);context 綁死跨 vault/keyId/epoch 挪用重放——不符則導出金鑰不同、
+ *    GCM tag 驗不過而乾淨拒絕,不必改 seal/open 格式。
+ */
+export interface WrapContext {
+  vaultId: string;
+  keyId: string;
+  epoch: number;
+  recipientMemberId: string;
+}
+
+/** context 的確定性編碼(lib0 length-prefixed,無歧義) */
+function wrapContextBytes(ctx: WrapContext): Uint8Array {
+  const enc = encoding.createEncoder();
+  encoding.writeVarString(enc, ctx.vaultId);
+  encoding.writeVarString(enc, ctx.keyId);
+  encoding.writeVarUint(enc, ctx.epoch);
+  encoding.writeVarString(enc, ctx.recipientMemberId);
+  return encoding.toUint8Array(enc);
+}
+
+function concatBytes(...arrs: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(arrs.reduce((n, a) => n + a.length, 0));
+  let off = 0;
+  for (const a of arrs) {
+    out.set(a, off);
+    off += a.length;
+  }
+  return out;
+}
+
+function isAllZero(b: Uint8Array): boolean {
+  for (const x of b) if (x !== 0) return false;
+  return true;
+}
+
+/** 由 ECDH shared secret + context info 導一把一次性 AES-GCM 金鑰(每信封新 ephemeral → 每金鑰只用一次) */
+async function wrapAesKey(shared: Uint8Array, info: Uint8Array): Promise<CryptoKey> {
+  const hkdf = await crypto.subtle.importKey("raw", shared as BufferSource, "HKDF", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt: KEYWRAP_SALT as BufferSource, info: info as BufferSource },
+    hkdf,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+/** owner 用收件人 pubWrap 把 rawKey 包成簽章信封;ownerSign 傳入既有 identity.sign,不外露私鑰 */
+export async function wrapKey(
+  rawKey: Uint8Array,
+  recipientPubWrap: Uint8Array,
+  ownerSign: (message: Uint8Array) => Uint8Array,
+  context: WrapContext,
+): Promise<Uint8Array> {
+  const ephSecret = x25519.utils.randomSecretKey();
+  const ephPub = x25519.getPublicKey(ephSecret);
+  const shared = x25519.getSharedSecret(ephSecret, recipientPubWrap);
+  if (isAllZero(shared)) throw new Error("wrap:非法收件人公鑰(shared secret 全零)");
+  const ctxBytes = wrapContextBytes(context);
+  const aesKey = await wrapAesKey(shared, concatBytes(ctxBytes, ephPub, recipientPubWrap));
+  const sealed = await seal(aesKey, rawKey);
+  const ownerSig = ownerSign(concatBytes(ephPub, sealed, ctxBytes));
+  const out = new Uint8Array(1 + EPH_PUB_LEN + OWNER_SIG_LEN + sealed.length);
+  out[0] = WRAP_VERSION;
+  out.set(ephPub, 1);
+  out.set(ownerSig, 1 + EPH_PUB_LEN);
+  out.set(sealed, 1 + EPH_PUB_LEN + OWNER_SIG_LEN);
+  return out;
+}
+
+/** 解信封:先驗 owner 簽章(擋偽造)、ECDH 導金鑰(綁 context)再解出原始金鑰;任一不符即拋 */
+export async function unwrapKey(
+  wrapped: Uint8Array,
+  recipientXSecret: Uint8Array,
+  ownerPubSign: Uint8Array,
+  context: WrapContext,
+): Promise<Uint8Array> {
+  const headLen = 1 + EPH_PUB_LEN + OWNER_SIG_LEN;
+  if (wrapped.length < headLen + 1 + NONCE_LENGTH + 16) throw new Error("unwrap:信封不完整");
+  if (wrapped[0] !== WRAP_VERSION) throw new Error(`unwrap:未知信封版本 ${wrapped[0]}`);
+  const ephPub = wrapped.slice(1, 1 + EPH_PUB_LEN);
+  const ownerSig = wrapped.slice(1 + EPH_PUB_LEN, headLen);
+  const sealed = wrapped.slice(headLen);
+  const ctxBytes = wrapContextBytes(context);
+  if (!verifyOwnerSig(ownerSig, concatBytes(ephPub, sealed, ctxBytes), ownerPubSign)) {
+    throw new Error("unwrap:owner 簽章驗證失敗");
+  }
+  const shared = x25519.getSharedSecret(recipientXSecret, ephPub);
+  if (isAllZero(shared)) throw new Error("unwrap:非法 ephemeral 公鑰(shared secret 全零)");
+  const recipientPubWrap = x25519.getPublicKey(recipientXSecret);
+  const aesKey = await wrapAesKey(shared, concatBytes(ctxBytes, ephPub, recipientPubWrap));
+  return open(aesKey, sealed);
+}
+
+function verifyOwnerSig(signature: Uint8Array, message: Uint8Array, pubSign: Uint8Array): boolean {
+  try {
+    return ed25519.verify(signature, message, pubSign);
+  } catch {
+    return false;
+  }
 }
 
 /** 用 vault 主金鑰對某 doc 衍生 32 bytes 原始子金鑰;deriveKey 走同樣 HKDF 參數會得到同一把 */

@@ -111,4 +111,61 @@ describe("SyncStore", () => {
     expect(store.listMembers("v1").map((m) => m.memberId)).toEqual(["m1"]);
     expect(store.listMembers("v2").map((m) => m.memberId)).toEqual(["m1"]);
   });
+
+  it("claimOwner TOFU:首位認領釘選,後續認領回既有 owner 不覆蓋;ownerOf 反映狀態", () => {
+    const store = makeStore();
+    expect(store.ownerOf("team1")).toBeUndefined(); // 未認領 = 非 team vault
+    expect(store.claimOwner("team1", "owner-A")).toBe("owner-A");
+    expect(store.claimOwner("team1", "usurper-B")).toBe("owner-A"); // 不覆蓋
+    expect(store.ownerOf("team1")).toBe("owner-A");
+    expect(store.ownerOf("team2")).toBeUndefined(); // 按 vault 隔離
+  });
+
+  it("putEnvelope upsert 冪等 + envelopesFor 只回自己、每 keyId 取最新 epoch", () => {
+    const store = makeStore();
+    store.putEnvelope("t", "root", "mA", 0, bytes(1, 1));
+    store.putEnvelope("t", "root", "mB", 0, bytes(2, 2));
+    // 同鍵重 push 覆蓋(冪等)
+    store.putEnvelope("t", "root", "mA", 0, bytes(9, 9));
+    // 輪換:同 key 較高 epoch 並存,envelopesFor 取最新
+    store.putEnvelope("t", "root", "mA", 1, bytes(7, 7));
+
+    const a = store.envelopesFor("t", "mA");
+    expect(a).toHaveLength(1);
+    expect(a[0]).toMatchObject({ keyId: "root", epoch: 1 });
+    expect([...a[0]!.blob]).toEqual([7, 7]);
+    // 只回自己:A 拉不到 B
+    expect(store.envelopesFor("t", "mB").map((e) => [...e.blob])).toEqual([[2, 2]]);
+    expect(store.envelopesFor("t", "nobody")).toEqual([]);
+  });
+
+  it("removeMember 刪 member 列 + 其信封,不動他人", () => {
+    const store = makeStore();
+    store.enrollMember("t", "mA", bytes(1), bytes(1));
+    store.enrollMember("t", "mB", bytes(2), bytes(2));
+    store.putEnvelope("t", "root", "mA", 0, bytes(1));
+    store.putEnvelope("t", "root", "mB", 0, bytes(2));
+    store.removeMember("t", "mA");
+    expect(store.getMember("t", "mA")).toBeUndefined();
+    expect(store.envelopesFor("t", "mA")).toEqual([]);
+    expect(store.getMember("t", "mB")).toBeDefined();
+    expect(store.envelopesFor("t", "mB")).toHaveLength(1);
+  });
+
+  it("enrollment token:單次、綁 vault、過期各自失效", () => {
+    const store = makeStore();
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    store.createEnrollmentToken("tok-1", "team1", future);
+    // 跨 vault 不認
+    expect(store.consumeEnrollmentToken("tok-1", "team2")).toBe(false);
+    // 正確 vault:第一次成功
+    expect(store.consumeEnrollmentToken("tok-1", "team1")).toBe(true);
+    // 單次:第二次失敗
+    expect(store.consumeEnrollmentToken("tok-1", "team1")).toBe(false);
+    // 不存在的 token
+    expect(store.consumeEnrollmentToken("nope", "team1")).toBe(false);
+    // 已過期
+    store.createEnrollmentToken("tok-2", "team1", Math.floor(Date.now() / 1000) - 1);
+    expect(store.consumeEnrollmentToken("tok-2", "team1")).toBe(false);
+  });
 });

@@ -201,7 +201,16 @@ export class SyncClient {
       const id = this.opts.identity;
       if (id) {
         // 帶身分:送宣稱身分與公鑰,等伺服器回 challenge nonce 再簽章(見 handleMessage authChallenge)
-        this.send({ type: "authId", token: this.opts.token, vaultId: this.opts.vaultId, memberId: id.memberId, pubSign: id.pubSign, pubWrap: id.pubWrap });
+        // enrollmentToken 留空:SyncClient 只跑「已 enroll 成員」的重連;新成員帶邀請碼的首次 enroll 走獨立 bootstrap
+        this.send({
+          type: "authId",
+          token: this.opts.token,
+          vaultId: this.opts.vaultId,
+          memberId: id.memberId,
+          pubSign: id.pubSign,
+          pubWrap: id.pubWrap,
+          enrollmentToken: "",
+        });
       } else {
         this.send({ type: "auth", token: this.opts.token, vaultId: this.opts.vaultId });
       }

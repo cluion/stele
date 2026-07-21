@@ -60,7 +60,7 @@ class TestClient {
   /** 完整帶身分握手:authId → 收 challenge → 簽章 authProof → 回傳 authOk */
   async authWith(id: SyncIdentity, vaultId: string, token = TOKEN): Promise<ServerMessage & { type: "authOk" }> {
     await this.open();
-    this.send({ type: "authId", token, vaultId, memberId: id.memberId, pubSign: id.pubSign, pubWrap: id.pubWrap });
+    this.send({ type: "authId", token, vaultId, memberId: id.memberId, pubSign: id.pubSign, pubWrap: id.pubWrap, enrollmentToken: "" });
     const challenge = await this.next("authChallenge");
     const proof = id.sign(identityChallengeBytes(challenge.nonce, vaultId, id.memberId));
     this.send({ type: "authProof", signature: proof });
@@ -101,7 +101,7 @@ describe("帶身分認證(challenge-response)", () => {
     const id = await deriveIdentity(generateSeed());
     const c = new TestClient(server.port);
     await c.open();
-    c.send({ type: "authId", token: TOKEN, vaultId: "v-bad", memberId: id.memberId, pubSign: id.pubSign, pubWrap: id.pubWrap });
+    c.send({ type: "authId", token: TOKEN, vaultId: "v-bad", memberId: id.memberId, pubSign: id.pubSign, pubWrap: id.pubWrap, enrollmentToken: "" });
     await c.next("authChallenge");
     c.send({ type: "authProof", signature: new Uint8Array(64).fill(0) }); // 亂簽
 
@@ -115,14 +115,14 @@ describe("帶身分認證(challenge-response)", () => {
     // 連線 1 拿到 challenge 並簽好,但不送
     const c1 = new TestClient(server.port);
     await c1.open();
-    c1.send({ type: "authId", token: TOKEN, vaultId: "v-replay", memberId: id.memberId, pubSign: id.pubSign, pubWrap: id.pubWrap });
+    c1.send({ type: "authId", token: TOKEN, vaultId: "v-replay", memberId: id.memberId, pubSign: id.pubSign, pubWrap: id.pubWrap, enrollmentToken: "" });
     const ch1 = await c1.next("authChallenge");
     const proof1 = id.sign(identityChallengeBytes(ch1.nonce, "v-replay", id.memberId));
 
     // 連線 2 發起自己的握手,拿到不同 nonce,卻重放連線 1 的簽章
     const c2 = new TestClient(server.port);
     await c2.open();
-    c2.send({ type: "authId", token: TOKEN, vaultId: "v-replay", memberId: id.memberId, pubSign: id.pubSign, pubWrap: id.pubWrap });
+    c2.send({ type: "authId", token: TOKEN, vaultId: "v-replay", memberId: id.memberId, pubSign: id.pubSign, pubWrap: id.pubWrap, enrollmentToken: "" });
     await c2.next("authChallenge");
     c2.send({ type: "authProof", signature: proof1 });
 
@@ -156,7 +156,7 @@ describe("帶身分認證(challenge-response)", () => {
     // memberId↔pubSign 綁定在第一階段就查,連 challenge 都拿不到,攻擊者沒有簽章的機會
     const c = new TestClient(server.port);
     await c.open();
-    c.send({ type: "authId", token: TOKEN, vaultId: "v-squat", memberId: fakeMemberId, pubSign: attacker.pubSign, pubWrap: attacker.pubWrap });
+    c.send({ type: "authId", token: TOKEN, vaultId: "v-squat", memberId: fakeMemberId, pubSign: attacker.pubSign, pubWrap: attacker.pubWrap, enrollmentToken: "" });
 
     const err = await c.next("error");
     expect(err.code).toBe("bad-member");
@@ -167,7 +167,7 @@ describe("帶身分認證(challenge-response)", () => {
     const id = await deriveIdentity(generateSeed());
     const c = new TestClient(server.port);
     await c.open();
-    c.send({ type: "authId", token: "錯的-token", vaultId: "v-badtoken", memberId: id.memberId, pubSign: id.pubSign, pubWrap: id.pubWrap });
+    c.send({ type: "authId", token: "錯的-token", vaultId: "v-badtoken", memberId: id.memberId, pubSign: id.pubSign, pubWrap: id.pubWrap, enrollmentToken: "" });
     const err = await c.next("error");
     expect(err.code).toBe("bad-token");
   });

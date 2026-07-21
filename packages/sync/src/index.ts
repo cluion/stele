@@ -8,10 +8,21 @@ export {
   type DocHead,
   type SharePermission,
   type ShareInfo,
+  type KeyEnvelope,
+  type MemberInfo,
 } from "./protocol.ts";
 export { identityCipher, digest, type Cipher } from "./cipher.ts";
-export { deriveVaultKey, VaultCipher, ShareCipher, deriveSpaceKey, DEFAULT_SPACE_ID, MasterKeySpaces } from "./crypto.ts";
-export type { SpaceKeySource } from "./crypto.ts";
+export {
+  deriveVaultKey,
+  VaultCipher,
+  ShareCipher,
+  deriveSpaceKey,
+  DEFAULT_SPACE_ID,
+  MasterKeySpaces,
+  wrapKey,
+  unwrapKey,
+} from "./crypto.ts";
+export type { SpaceKeySource, WrapContext } from "./crypto.ts";
 export {
   generateSeed,
   deriveIdentity,
@@ -33,6 +44,15 @@ export {
   type AwarenessState,
 } from "./client.ts";
 export { ShareClient, type ShareClientOptions } from "./share-client.ts";
+export {
+  bootstrapTeamKey,
+  createTeamVault,
+  rootWrapContext,
+  KEY_ID_ROOT,
+  type TeamBootstrapOptions,
+  type TeamBootstrapResult,
+  type CreateTeamVaultOptions,
+} from "./bootstrap.ts";
 export {
   readSpaces,
   spaceOf,

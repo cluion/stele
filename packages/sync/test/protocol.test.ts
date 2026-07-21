@@ -29,8 +29,25 @@ const clientCases: ClientMessage[] = [
     memberId: "a".repeat(64),
     pubSign: new Uint8Array(32).fill(11),
     pubWrap: new Uint8Array(32).fill(22),
+    enrollmentToken: "",
+  },
+  {
+    type: "authId",
+    token: "祕密-token-1234567890",
+    vaultId: "team-vault-2",
+    memberId: "b".repeat(64),
+    pubSign: new Uint8Array(32).fill(1),
+    pubWrap: new Uint8Array(32).fill(2),
+    enrollmentToken: "enroll-abc-一次性邀請碼",
   },
   { type: "authProof", signature: new Uint8Array(64).fill(7) },
+  { type: "claimOwner", reqId: 5 },
+  { type: "envelopePush", reqId: 6, keyId: "root", memberId: "c".repeat(64), epoch: 0, blob: new Uint8Array([1, 2, 3, 255]) },
+  { type: "envelopePush", reqId: 7, keyId: "root", memberId: "d".repeat(64), epoch: 2, blob: new Uint8Array() },
+  { type: "envelopePull", reqId: 8 },
+  { type: "memberList", reqId: 9 },
+  { type: "memberRemove", reqId: 10, memberId: "e".repeat(64) },
+  { type: "enrollCreate", reqId: 11, ttlSec: 3600 },
 ];
 
 const serverCases: ServerMessage[] = [
@@ -62,6 +79,26 @@ const serverCases: ServerMessage[] = [
   { type: "shareAuthOk", docId: "doc-1", permission: "read", headSeq: 5, snapshotSeq: 3 },
   { type: "shareAuthOk", docId: "doc-2", permission: "write", headSeq: 0, snapshotSeq: 0 },
   { type: "authChallenge", nonce: new Uint8Array(32).fill(5) },
+  { type: "envelopeList", reqId: 8, envelopes: [] },
+  {
+    type: "envelopeList",
+    reqId: 8,
+    envelopes: [
+      { keyId: "root", epoch: 0, blob: new Uint8Array([9, 9, 9, 0, 255]) },
+      { keyId: "root", epoch: 1, blob: new Uint8Array(200).fill(4) },
+    ],
+  },
+  { type: "memberCatalog", reqId: 9, members: [] },
+  {
+    type: "memberCatalog",
+    reqId: 9,
+    members: [
+      { memberId: "a".repeat(64), pubSign: new Uint8Array(32).fill(11), pubWrap: new Uint8Array(32).fill(22) },
+      { memberId: "b".repeat(64), pubSign: new Uint8Array(32).fill(1), pubWrap: new Uint8Array(32).fill(2) },
+    ],
+  },
+  { type: "enrollCreated", reqId: 11, token: "enroll-xyz-一次性" },
+  { type: "ok", reqId: 6 },
 ];
 
 describe("同步協議編解碼", () => {

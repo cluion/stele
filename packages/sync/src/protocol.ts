@@ -16,12 +16,42 @@ export interface ShareInfo {
   revoked: boolean;
 }
 
+/** 一封空間金鑰信封(2b):owner 用某成員 pubWrap 包裝的原始金鑰密文,伺服器只中繼不解讀 */
+export interface KeyEnvelope {
+  keyId: string;
+  epoch: number;
+  blob: Uint8Array;
+}
+
+/** 一位成員的公開資料(owner 查對方 pubWrap 以包裝金鑰) */
+export interface MemberInfo {
+  memberId: string;
+  pubSign: Uint8Array;
+  pubWrap: Uint8Array;
+}
+
 export type ClientMessage =
   | { type: "auth"; token: string; vaultId: string }
   // 帶身分認證(Slice 2a):token 准入 + 宣稱成員身分與公鑰,伺服器回 challenge
-  | { type: "authId"; token: string; vaultId: string; memberId: string; pubSign: Uint8Array; pubWrap: Uint8Array }
+  // enrollmentToken(2b):加入 team vault 的新成員憑一次性邀請碼准入;個人 vault / 已註冊成員留空字串
+  | {
+      type: "authId";
+      token: string;
+      vaultId: string;
+      memberId: string;
+      pubSign: Uint8Array;
+      pubWrap: Uint8Array;
+      enrollmentToken: string;
+    }
   // 對 challenge nonce 的 Ed25519 簽章,證明持有身分私鑰
   | { type: "authProof"; signature: Uint8Array }
+  // 團隊金鑰分發與成員管理(2b);reqId 供 client 對應回覆。授權由伺服器按 owner/self 把關
+  | { type: "claimOwner"; reqId: number }
+  | { type: "envelopePush"; reqId: number; keyId: string; memberId: string; epoch: number; blob: Uint8Array }
+  | { type: "envelopePull"; reqId: number }
+  | { type: "memberList"; reqId: number }
+  | { type: "memberRemove"; reqId: number; memberId: string }
+  | { type: "enrollCreate"; reqId: number; ttlSec: number }
   | { type: "push"; docId: string; deviceId: string; counter: number; payload: Uint8Array }
   | { type: "pull"; docId: string; fromSeq: number }
   | { type: "snapshotPush"; docId: string; uptoSeq: number; payload: Uint8Array }
@@ -55,7 +85,13 @@ export type ServerMessage =
   | { type: "shareCreated"; reqId: number; shareId: string }
   | { type: "shareCatalog"; reqId: number; shares: ShareInfo[] }
   // 分享認證成功:告知收件人此分享對應的 doc、權限與同步進度
-  | { type: "shareAuthOk"; docId: string; permission: SharePermission; headSeq: number; snapshotSeq: number };
+  | { type: "shareAuthOk"; docId: string; permission: SharePermission; headSeq: number; snapshotSeq: number }
+  // 團隊金鑰分發與成員管理的回覆(2b)
+  | { type: "envelopeList"; reqId: number; envelopes: KeyEnvelope[] }
+  | { type: "memberCatalog"; reqId: number; members: MemberInfo[] }
+  | { type: "enrollCreated"; reqId: number; token: string }
+  // 通用成功回執(envelopePush / memberRemove / claimOwner)
+  | { type: "ok"; reqId: number };
 
 const CLIENT_TAG = {
   auth: 0,
@@ -70,6 +106,12 @@ const CLIENT_TAG = {
   shareAuth: 9,
   authId: 10,
   authProof: 11,
+  claimOwner: 12,
+  envelopePush: 13,
+  envelopePull: 14,
+  memberList: 15,
+  memberRemove: 16,
+  enrollCreate: 17,
 } as const;
 const SERVER_TAG = {
   authOk: 0,
@@ -83,6 +125,10 @@ const SERVER_TAG = {
   shareCatalog: 8,
   shareAuthOk: 9,
   authChallenge: 10,
+  envelopeList: 11,
+  memberCatalog: 12,
+  enrollCreated: 13,
+  ok: 14,
 } as const;
 
 const PERM_TAG: Record<SharePermission, number> = { read: 0, write: 1 };
@@ -102,9 +148,34 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
       encoding.writeVarString(enc, msg.memberId);
       encoding.writeVarUint8Array(enc, msg.pubSign);
       encoding.writeVarUint8Array(enc, msg.pubWrap);
+      encoding.writeVarString(enc, msg.enrollmentToken);
       break;
     case "authProof":
       encoding.writeVarUint8Array(enc, msg.signature);
+      break;
+    case "claimOwner":
+      encoding.writeVarUint(enc, msg.reqId);
+      break;
+    case "envelopePush":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarString(enc, msg.keyId);
+      encoding.writeVarString(enc, msg.memberId);
+      encoding.writeVarUint(enc, msg.epoch);
+      encoding.writeVarUint8Array(enc, msg.blob);
+      break;
+    case "envelopePull":
+      encoding.writeVarUint(enc, msg.reqId);
+      break;
+    case "memberList":
+      encoding.writeVarUint(enc, msg.reqId);
+      break;
+    case "memberRemove":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarString(enc, msg.memberId);
+      break;
+    case "enrollCreate":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarUint(enc, msg.ttlSec);
       break;
     case "push":
       encoding.writeVarString(enc, msg.docId);
@@ -161,9 +232,29 @@ export function decodeClientMessage(data: Uint8Array): ClientMessage {
         memberId: decoding.readVarString(dec),
         pubSign: readPayload(dec),
         pubWrap: readPayload(dec),
+        enrollmentToken: decoding.readVarString(dec),
       };
     case CLIENT_TAG.authProof:
       return { type: "authProof", signature: readPayload(dec) };
+    case CLIENT_TAG.claimOwner:
+      return { type: "claimOwner", reqId: decoding.readVarUint(dec) };
+    case CLIENT_TAG.envelopePush:
+      return {
+        type: "envelopePush",
+        reqId: decoding.readVarUint(dec),
+        keyId: decoding.readVarString(dec),
+        memberId: decoding.readVarString(dec),
+        epoch: decoding.readVarUint(dec),
+        blob: readPayload(dec),
+      };
+    case CLIENT_TAG.envelopePull:
+      return { type: "envelopePull", reqId: decoding.readVarUint(dec) };
+    case CLIENT_TAG.memberList:
+      return { type: "memberList", reqId: decoding.readVarUint(dec) };
+    case CLIENT_TAG.memberRemove:
+      return { type: "memberRemove", reqId: decoding.readVarUint(dec), memberId: decoding.readVarString(dec) };
+    case CLIENT_TAG.enrollCreate:
+      return { type: "enrollCreate", reqId: decoding.readVarUint(dec), ttlSec: decoding.readVarUint(dec) };
     case CLIENT_TAG.push:
       return {
         type: "push",
@@ -265,6 +356,31 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
       encoding.writeVarUint(enc, msg.headSeq);
       encoding.writeVarUint(enc, msg.snapshotSeq);
       break;
+    case "envelopeList":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarUint(enc, msg.envelopes.length);
+      for (const e of msg.envelopes) {
+        encoding.writeVarString(enc, e.keyId);
+        encoding.writeVarUint(enc, e.epoch);
+        encoding.writeVarUint8Array(enc, e.blob);
+      }
+      break;
+    case "memberCatalog":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarUint(enc, msg.members.length);
+      for (const m of msg.members) {
+        encoding.writeVarString(enc, m.memberId);
+        encoding.writeVarUint8Array(enc, m.pubSign);
+        encoding.writeVarUint8Array(enc, m.pubWrap);
+      }
+      break;
+    case "enrollCreated":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarString(enc, msg.token);
+      break;
+    case "ok":
+      encoding.writeVarUint(enc, msg.reqId);
+      break;
   }
   return encoding.toUint8Array(enc);
 }
@@ -338,6 +454,36 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
         headSeq: decoding.readVarUint(dec),
         snapshotSeq: decoding.readVarUint(dec),
       };
+    case SERVER_TAG.envelopeList: {
+      const reqId = decoding.readVarUint(dec);
+      const count = decoding.readVarUint(dec);
+      const envelopes: KeyEnvelope[] = [];
+      for (let i = 0; i < count; i++) {
+        envelopes.push({
+          keyId: decoding.readVarString(dec),
+          epoch: decoding.readVarUint(dec),
+          blob: readPayload(dec),
+        });
+      }
+      return { type: "envelopeList", reqId, envelopes };
+    }
+    case SERVER_TAG.memberCatalog: {
+      const reqId = decoding.readVarUint(dec);
+      const count = decoding.readVarUint(dec);
+      const members: MemberInfo[] = [];
+      for (let i = 0; i < count; i++) {
+        members.push({
+          memberId: decoding.readVarString(dec),
+          pubSign: readPayload(dec),
+          pubWrap: readPayload(dec),
+        });
+      }
+      return { type: "memberCatalog", reqId, members };
+    }
+    case SERVER_TAG.enrollCreated:
+      return { type: "enrollCreated", reqId: decoding.readVarUint(dec), token: decoding.readVarString(dec) };
+    case SERVER_TAG.ok:
+      return { type: "ok", reqId: decoding.readVarUint(dec) };
     default:
       throw new Error(`未知的 server 訊息類型:${tag}`);
   }

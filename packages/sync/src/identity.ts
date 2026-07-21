@@ -1,6 +1,7 @@
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { toBase64UrlEncoded, fromBase64UrlEncoded } from "lib0/buffer";
 import { digest } from "./cipher.ts";
+import { unwrapKey, type WrapContext } from "./crypto.ts";
 
 /**
  * 成員身分:一把長期非對稱金鑰,證明「我是誰」給伺服器(challenge-response),
@@ -31,14 +32,19 @@ export interface IdentityFile {
   enc: null;
 }
 
-/** 一個成員的公開資料 + 簽章能力(私鑰留在 sign 閉包內,不外露) */
+/** 一個成員的公開資料 + 簽章/解封能力(兩把私鑰皆留閉包,不外露) */
 export interface SyncIdentity {
   /** hex(SHA-256(pubSign)):確定性、過 server validId 的 charset */
   memberId: string;
   pubSign: Uint8Array;
   pubWrap: Uint8Array;
-  /** 以 Ed25519 私鑰簽一段位元組(challenge) */
-  sign(message: Uint8Array): Uint8Array;
+  /** 以 Ed25519 私鑰簽一段位元組(challenge;owner 也用它簽空間金鑰信封)。閉包屬性,可安全當 callback 傳遞 */
+  sign: (message: Uint8Array) => Uint8Array;
+  /**
+   * 解一個包給自己的空間金鑰信封(2b):以 X25519 私鑰 ECDH 還原,先驗 owner 簽章。
+   * xSecret 留閉包不外洩;expectedOwnerPubSign 是 out-of-band 已知的 owner 信任錨。
+   */
+  unwrap: (wrapped: Uint8Array, expectedOwnerPubSign: Uint8Array, context: WrapContext) => Promise<Uint8Array>;
 }
 
 /** 新成員:隨機 32B 種子 */
@@ -64,7 +70,13 @@ export async function deriveIdentity(seed: Uint8Array): Promise<SyncIdentity> {
   const pubSign = ed25519.getPublicKey(edSeed);
   const pubWrap = x25519.getPublicKey(xSecret);
   const memberId = await digest(pubSign);
-  return { memberId, pubSign, pubWrap, sign: (message) => ed25519.sign(message, edSeed) };
+  return {
+    memberId,
+    pubSign,
+    pubWrap,
+    sign: (message) => ed25519.sign(message, edSeed),
+    unwrap: (wrapped, expectedOwnerPubSign, context) => unwrapKey(wrapped, xSecret, expectedOwnerPubSign, context),
+  };
 }
 
 /**

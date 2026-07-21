@@ -3,15 +3,29 @@ import { mkdtempSync, readFileSync, statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-// identity-store 依賴 electron 的 app.getPath;mock 成一個臨時 userData 目錄
+// identity-store 依賴 electron 的 app.getPath 與 safeStorage;mock 成臨時 userData + 可切換的假 keychain
 let userData = "";
-vi.mock("electron", () => ({ app: { getPath: () => userData } }));
+let keychainOn = true;
+// 假 keychain:可用時以可逆前綴模擬加密,讓「加密後與明文不同、可解回」兩件事都可斷言
+vi.mock("electron", () => ({
+  app: { getPath: () => userData },
+  safeStorage: {
+    isEncryptionAvailable: () => keychainOn,
+    encryptString: (s: string) => Buffer.from("KC:" + s, "utf8"),
+    decryptString: (b: Buffer) => {
+      const s = b.toString("utf8");
+      if (!s.startsWith("KC:")) throw new Error("假 keychain 解密失敗");
+      return s.slice(3);
+    },
+  },
+}));
 
 const { loadOrCreateIdentity, exportIdentityFile, importIdentityFile } = await import("../src/main/identity-store.ts");
 const { deriveIdentity, generateSeed } = await import("@stele/sync");
 
 beforeEach(() => {
   userData = mkdtempSync(path.join(tmpdir(), "stele-identity-"));
+  keychainOn = true;
 });
 
 describe("identity-store", () => {
@@ -29,13 +43,37 @@ describe("identity-store", () => {
     expect(mode).toBe(0o600);
   });
 
-  it("身分檔是版本化信封,不外露公鑰以外的推導物", async () => {
+  it("keychain 可用時種子 at-rest 加密:enc 標記 safeStorage、seed 非原始種子", async () => {
     const id = await loadOrCreateIdentity();
-    const file = JSON.parse(readFileSync(path.join(userData, "identity.json"), "utf8")) as Record<string, unknown>;
-    expect(file["format"]).toBe("stele-identity-v1");
-    expect(file["memberId"]).toBe(id.memberId);
-    expect(file["enc"]).toBeNull();
-    expect(typeof file["seed"]).toBe("string");
+    const onDisk = JSON.parse(readFileSync(path.join(userData, "identity.json"), "utf8")) as Record<string, unknown>;
+    expect(onDisk["format"]).toBe("stele-identity-v1");
+    expect(onDisk["memberId"]).toBe(id.memberId);
+    expect(onDisk["enc"]).toBe("safeStorage");
+    // 落盤的 seed 是加密 blob 的 base64,含假 keychain 前綴,絕非明文種子
+    const rawSeed = Buffer.from(id.pubSign).toString("base64url"); // 任意明文比較基準
+    expect(onDisk["seed"]).not.toBe(rawSeed);
+    expect(Buffer.from(onDisk["seed"] as string, "base64").toString("utf8")).toMatch(/^KC:/);
+    // 再次載入仍取回同一身分(解密路徑)
+    const again = await loadOrCreateIdentity();
+    expect(again.memberId).toBe(id.memberId);
+  });
+
+  it("keychain 不可用時優雅退回明文(enc null),仍可載入", async () => {
+    keychainOn = false;
+    const id = await loadOrCreateIdentity();
+    const onDisk = JSON.parse(readFileSync(path.join(userData, "identity.json"), "utf8")) as Record<string, unknown>;
+    expect(onDisk["enc"]).toBeNull();
+    expect(typeof onDisk["seed"]).toBe("string");
+    const again = await loadOrCreateIdentity();
+    expect(again.memberId).toBe(id.memberId);
+  });
+
+  it("相容 0.8.0 明文檔(enc null):無 keychain 寫的檔,keychain 開著也讀得回", async () => {
+    keychainOn = false;
+    const id = await loadOrCreateIdentity(); // 寫明文檔
+    keychainOn = true; // 之後 keychain 變可用
+    const again = await loadOrCreateIdentity(); // 讀舊明文檔不應失敗
+    expect(again.memberId).toBe(id.memberId);
   });
 
   it("export → import 跨裝置搬移:匯入後得回同一 memberId", async () => {
