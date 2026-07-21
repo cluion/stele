@@ -91,22 +91,27 @@ export interface SteleApi {
   teamCreate(url: string, token: string): Promise<{ vaultId: string }>;
   /** 以邀請 bundle 加入 team vault;ready=false 表示已 enroll 但等擁有者核准 */
   teamJoin(invite: string): Promise<{ vaultId: string; ready: boolean }>;
-  /** owner 產生邀請 bundle(含一次性邀請碼與 ownerPubSign 信任錨) */
-  teamInvite(ttlSec?: number): Promise<string>;
-  /** owner 列成員(附 pubWrap 指紋供 out-of-band 核對) */
+  /** owner 產生邀請 bundle(含一次性邀請碼、ownerPubSign 信任錨與被邀者角色) */
+  teamInvite(role: "editor" | "viewer", ttlSec?: number): Promise<string>;
+  /** owner 列成員(附角色與 pubWrap 指紋供 out-of-band 核對) */
   teamMembers(): Promise<TeamMember[]>;
   /** owner 核准某成員(把 root 包給他);呼叫前 UI 應先讓 owner 核對指紋 */
   teamApprove(memberId: string): Promise<void>;
+  /** owner 改成員角色(editor/viewer);伺服器會踢對方活躍連線 */
+  teamSetRole(memberId: string, role: "editor" | "viewer"): Promise<void>;
   /** owner 移除成員 */
   teamRemove(memberId: string): Promise<void>;
 }
 
-export type TeamInfo = { team: false } | { team: true; vaultId: string; owner: boolean; ready: boolean };
+export type TeamRole = "owner" | "editor" | "viewer";
+
+export type TeamInfo = { team: false } | { team: true; vaultId: string; owner: boolean; role: TeamRole; ready: boolean };
 
 export interface TeamMember {
   memberId: string;
   /** pubWrap 的 safety-number 式指紋 */
   fingerprint: string;
+  role: TeamRole;
   isOwner: boolean;
 }
 
@@ -252,9 +257,10 @@ const api: SteleApi = {
   teamInfo: () => ipcRenderer.invoke("team:info"),
   teamCreate: (url, token) => ipcRenderer.invoke("team:create", url, token),
   teamJoin: (invite) => ipcRenderer.invoke("team:join", invite),
-  teamInvite: (ttlSec) => ipcRenderer.invoke("team:invite", ttlSec),
+  teamInvite: (role, ttlSec) => ipcRenderer.invoke("team:invite", role, ttlSec),
   teamMembers: () => ipcRenderer.invoke("team:members"),
   teamApprove: (memberId) => ipcRenderer.invoke("team:approve", memberId),
+  teamSetRole: (memberId, role) => ipcRenderer.invoke("team:setRole", memberId, role),
   teamRemove: (memberId) => ipcRenderer.invoke("team:remove", memberId),
 };
 

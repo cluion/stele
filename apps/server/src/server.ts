@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash, timingSafeEqual, randomBytes } from "node:crypto";
-import { decodeClientMessage, encodeServerMessage, verifyChallenge, type ClientMessage, type ServerMessage } from "@stele/sync";
+import { decodeClientMessage, encodeServerMessage, verifyChallenge, type ClientMessage, type ServerMessage, type MemberRole } from "@stele/sync";
 import { SyncStore, type ShareScope } from "./store.ts";
 
 /**
@@ -23,7 +23,7 @@ const ENROLL_TTL_MAX = 7 * 24 * 60 * 60;
 /** 團隊金鑰分發與成員管理訊息(需身分認證,授權按 owner/self 把關) */
 type TeamAdminMessage = Extract<
   ClientMessage,
-  { type: "claimOwner" | "envelopePush" | "envelopePull" | "memberList" | "memberRemove" | "enrollCreate" }
+  { type: "claimOwner" | "envelopePush" | "envelopePull" | "memberList" | "memberRemove" | "enrollCreate" | "memberSetRole" }
 >;
 
 const CONTENT_TYPE: Record<string, string> = {
@@ -105,6 +105,30 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
   // shareId → 以它認證的連線:撤銷要能即時踢人,否則作用域只在認證當下查一次,已連線者可續讀到天荒地老
   const shareConns = new Map<string, Set<WebSocket>>();
   const genShareId = (): string => randomBytes(16).toString("base64url");
+  // (vaultId → memberId → 連線):移除/改角色時即時踢對方活躍連線(2c),照 shareConns 的踢人 pattern
+  const memberConns = new Map<string, Map<string, Set<WebSocket>>>();
+  const trackMember = (vault: string, member: string, ws: WebSocket): void => {
+    const byMember = memberConns.get(vault) ?? new Map<string, Set<WebSocket>>();
+    const set = byMember.get(member) ?? new Set<WebSocket>();
+    set.add(ws);
+    byMember.set(member, set);
+    memberConns.set(vault, byMember);
+  };
+  const untrackMember = (vault: string, member: string, ws: WebSocket): void => {
+    const byMember = memberConns.get(vault);
+    const set = byMember?.get(member);
+    set?.delete(ws);
+    if (set && set.size === 0) byMember!.delete(member);
+    if (byMember && byMember.size === 0) memberConns.delete(vault);
+  };
+  /** 踢掉某成員在某 vault 的所有活躍連線(移除/降級用);不影響其他成員 */
+  const kickMember = (vault: string, member: string, code: string, message: string): void => {
+    for (const peer of memberConns.get(vault)?.get(member) ?? []) {
+      if (peer.readyState !== WebSocket.OPEN) continue;
+      peer.send(encodeServerMessage({ type: "error", code, message }));
+      peer.close();
+    }
+  };
 
   // 死連線偵測:兩輪沒回 pong 就終止,避免 vaults 累積殭屍連線
   const heartbeat = setInterval(() => {
@@ -125,6 +149,8 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
     let shareId: string | undefined;
     // 已認證的成員身分(authId 路徑);team 管理與金鑰信封的授權都比對它。share/legacy 連線為 undefined
     let memberId: string | undefined;
+    // 此連線的角色(2c),authProof 當下讀入;claimOwner 成功後更新為 owner。逐訊息讀寫授權據此把關
+    let memberRole: MemberRole | undefined;
     // 帶身分認證的兩階段中間態(challenge-response);存 closure 內不用全域 Map,免洩漏
     let pendingNonce: Uint8Array | undefined;
     let pendingIdentity:
@@ -234,21 +260,35 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
       }
       // team vault 的新成員准入閘:pubWrap 是 owner 包裝空間金鑰的信任錨,不可信純 TOFU 自註冊。
       // 已有 owner(=team)且此成員既非既有成員、也非 owner 本人 → 必須憑一次性邀請碼(綁此 vault、未用、未過期)。
-      // 個人/legacy vault(無 owner)與已註冊成員維持原行為,不需邀請碼。
+      // 邀請碼帶角色(2c):新成員的角色即碼指定的 editor/viewer。個人/legacy vault 與已註冊成員維持原行為。
       const owner = opts.store.ownerOf(p.vaultId);
-      const isNewMember = opts.store.getMember(p.vaultId, p.memberId) === undefined;
-      if (owner !== undefined && isNewMember && p.memberId !== owner) {
-        if (p.enrollmentToken === "" || !opts.store.consumeEnrollmentToken(p.enrollmentToken, p.vaultId)) {
+      const existing = opts.store.getMember(p.vaultId, p.memberId);
+      let role: MemberRole;
+      if (owner !== undefined && p.memberId === owner) {
+        // owner 永遠是 owner,不受 members.role 漂移影響。
+        // 自癒:0.9.0→2c 遷移把 role 預設為 viewer,owner 的 members.role 需回填,否則列表/後續讀取會錯
+        role = "owner";
+        if (existing && existing.role !== "owner") opts.store.setRole(p.vaultId, p.memberId, "owner");
+      } else if (existing) {
+        role = existing.role; // 既有成員:沿用 DB 角色(改角色走 setRole,enrollMember 不動既有 role)
+      } else if (owner !== undefined) {
+        const tokenRole = opts.store.consumeEnrollmentToken(p.enrollmentToken, p.vaultId);
+        if (p.enrollmentToken === "" || tokenRole === undefined) {
           refuse("enroll-required", "加入團隊 vault 需有效邀請碼");
           return;
         }
+        role = tokenRole;
+      } else {
+        role = "viewer"; // 個人 vault / 團隊創建者(claimOwner 隨後升 owner)
       }
-      if (opts.store.enrollMember(p.vaultId, p.memberId, p.pubSign, p.pubWrap) === "conflict") {
+      if (opts.store.enrollMember(p.vaultId, p.memberId, p.pubSign, p.pubWrap, role) === "conflict") {
         refuse("member-conflict", "此成員公鑰與註冊紀錄不符");
         return;
       }
       vaultId = p.vaultId;
       memberId = p.memberId;
+      memberRole = role;
+      trackMember(vaultId, memberId, ws);
       clearTimeout(authTimer);
       joinVault(vaultId);
       send({ type: "authOk", docs: opts.store.headSeqs(vaultId) });
@@ -343,11 +383,13 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         return true;
       };
       switch (msg.type) {
-        case "claimOwner":
-          // TOFU:首位認領者釘選為 owner;已有 owner 則回既有(claimOwner 回傳實際 owner,不覆蓋)
-          opts.store.claimOwner(vault, self);
+        case "claimOwner": {
+          // TOFU:首位認領者釘選為 owner + 升 owner 角色;已有 owner 則回既有(不覆蓋)
+          const ownerNow = opts.store.claimOwner(vault, self);
+          if (ownerNow === self) memberRole = "owner"; // 更新本連線快取,免創建者自身停在 viewer
           send({ type: "ok", reqId: msg.reqId });
           break;
+        }
         case "envelopePull":
           // 只回自己的信封:A 絕不能拉到 B 的 blob
           send({ type: "envelopeList", reqId: msg.reqId, envelopes: opts.store.envelopesFor(vault, self) });
@@ -372,8 +414,29 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
             refuse("bad-message", "不可移除自己");
             return;
           }
-          // 2b 只刪 member 列 + 其信封;既有連線續存到斷線、root 未輪換(留 2c),故被移除者的舊快取仍能離線解舊內容
+          // 刪 member 列 + 其信封,並**踢掉其活躍連線**(2c):被移除者重連落回新成員分支,舊碼已消耗 → 被拒。
+          // root 未輪換留 2c-2,故被移除者的離線舊快取仍能解舊內容(密碼層前向保密另切)。
           opts.store.removeMember(vault, msg.memberId);
+          kickMember(vault, msg.memberId, "removed", "已被移出此團隊 vault");
+          send({ type: "ok", reqId: msg.reqId });
+          break;
+        }
+        case "memberSetRole": {
+          if (!requireOwner()) return;
+          if (msg.memberId === self) {
+            refuse("bad-message", "不可改自己的角色"); // owner 轉移未做
+            return;
+          }
+          if (msg.role === "owner") {
+            refuse("bad-message", "不可指派 owner 角色"); // owner 唯一,由 claimOwner 釘選
+            return;
+          }
+          if (!opts.store.setRole(vault, msg.memberId, msg.role)) {
+            refuse("no-member", "查無此成員");
+            return;
+          }
+          // 踢掉對方活躍連線:其快取角色已過期(降級尤其危險),重連後以新角色生效
+          kickMember(vault, msg.memberId, "role-changed", "你的角色已變更,請重新連線");
           send({ type: "ok", reqId: msg.reqId });
           break;
         }
@@ -381,7 +444,9 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
           if (!requireOwner()) return;
           const token = randomBytes(24).toString("base64url");
           const ttl = Math.min(Math.max(msg.ttlSec, ENROLL_TTL_MIN), ENROLL_TTL_MAX);
-          opts.store.createEnrollmentToken(token, vault, Math.floor(Date.now() / 1000) + ttl);
+          // owner 不得用邀請碼發 owner 角色(owner 唯一);editor/viewer 皆可
+          const role: MemberRole = msg.role === "editor" ? "editor" : "viewer";
+          opts.store.createEnrollmentToken(token, vault, role, Math.floor(Date.now() / 1000) + ttl);
           send({ type: "enrollCreated", reqId: msg.reqId, token });
           break;
         }
@@ -395,7 +460,8 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         msg.type === "envelopePull" ||
         msg.type === "memberList" ||
         msg.type === "memberRemove" ||
-        msg.type === "enrollCreate"
+        msg.type === "enrollCreate" ||
+        msg.type === "memberSetRole"
       ) {
         if (scope !== undefined) {
           refuse("forbidden", "分享連線不得管理團隊");
@@ -431,6 +497,18 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
           refuse("forbidden", "唯讀分享不得寫入");
           return;
         }
+      }
+      // 角色寫入柵欄(2c):team vault(有 owner)上,只有 owner/editor 能寫 doc(含 vault-meta);viewer 唯讀。
+      // 個人 vault(無 owner)無角色概念,不套此柵欄。share 連線走上面的 scope 權限,不在此列。
+      if (
+        scope === undefined &&
+        (msg.type === "push" || msg.type === "snapshotPush") &&
+        opts.store.ownerOf(vault) !== undefined &&
+        memberRole !== "owner" &&
+        memberRole !== "editor"
+      ) {
+        refuse("forbidden", "唯讀成員不得寫入");
+        return;
       }
       switch (msg.type) {
         case "push": {
@@ -493,6 +571,7 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         if (conns && conns.size === 0) shareConns.delete(shareId); // 不留空 Set,shareConns 是強引用 Map
       }
       if (vaultId === undefined) return;
+      if (memberId !== undefined) untrackMember(vaultId, memberId, ws);
       const peers = vaults.get(vaultId);
       peers?.delete(ws);
       if (peers && peers.size === 0) vaults.delete(vaultId);

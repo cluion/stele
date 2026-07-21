@@ -84,7 +84,7 @@ class AdminClient {
     await this.next("authOk");
   }
   async makeInviteToken(): Promise<string> {
-    this.send({ type: "enrollCreate", reqId: 1, ttlSec: 3600 });
+    this.send({ type: "enrollCreate", reqId: 1, ttlSec: 3600, role: "editor" });
     return (await this.next("enrollCreated")).token;
   }
   async pushRootTo(vaultId: string, member: SyncIdentity, owner: SyncIdentity, root: Uint8Array): Promise<void> {

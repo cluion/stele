@@ -53,7 +53,7 @@ describe("TeamAdminSession(owner 管理連線,端對端)", () => {
     const root = await createTeamVault({ url: url(), token: TOKEN, vaultId, identity: owner, createSocket: wsSocket });
 
     const admin = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId, identity: owner, createSocket: wsSocket });
-    const inviteToken = await admin.inviteToken(3600);
+    const inviteToken = await admin.inviteToken(3600, "editor");
     expect(inviteToken).toBeTruthy();
 
     // 被邀者憑碼 bootstrap:enroll 成功但尚未被核准 → pending
@@ -80,7 +80,7 @@ describe("TeamAdminSession(owner 管理連線,端對端)", () => {
     const owner = await deriveIdentity(generateSeed());
     const root = await createTeamVault({ url: url(), token: TOKEN, vaultId, identity: owner, createSocket: wsSocket });
     const admin = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId, identity: owner, createSocket: wsSocket });
-    const tok = await admin.inviteToken(3600);
+    const tok = await admin.inviteToken(3600, "editor");
 
     const bob = await deriveIdentity(generateSeed());
     await bootstrapTeamKey({ url: url(), token: TOKEN, vaultId, identity: bob, ownerPubSign: owner.pubSign, enrollmentToken: tok, createSocket: wsSocket });
@@ -99,7 +99,7 @@ describe("TeamAdminSession(owner 管理連線,端對端)", () => {
     const owner = await deriveIdentity(generateSeed());
     await createTeamVault({ url: url(), token: TOKEN, vaultId, identity: owner, createSocket: wsSocket });
     const ownerAdmin = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId, identity: owner, createSocket: wsSocket });
-    const tok = await ownerAdmin.inviteToken(3600);
+    const tok = await ownerAdmin.inviteToken(3600, "editor");
 
     const bob = await deriveIdentity(generateSeed());
     await bootstrapTeamKey({ url: url(), token: TOKEN, vaultId, identity: bob, ownerPubSign: owner.pubSign, enrollmentToken: tok, createSocket: wsSocket });

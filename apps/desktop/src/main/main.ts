@@ -6,7 +6,7 @@ import path from "node:path";
 import WebSocket from "ws";
 import { VaultSession, type SessionCallbacks } from "./vault-session.ts";
 import { deriveVaultKey, MasterKeySpaces, bootstrapTeamKey, createTeamVault, TeamAdminSession } from "@stele/sync";
-import type { SocketLike } from "@stele/sync";
+import type { SocketLike, MemberRole } from "@stele/sync";
 import { SyncManager, type SyncSettings } from "./sync-manager.ts";
 import { encodeInvite, decodeInvite } from "./team-invite.ts";
 import { VaultMeta } from "./vault-meta.ts";
@@ -53,7 +53,7 @@ function sendAll(channel: string, ...args: unknown[]): void {
  */
 type LoadedSync =
   | { kind: "personal"; settings: SyncSettings; passphrase: string }
-  | { kind: "team"; settings: SyncSettings; ownerPubSign: Uint8Array; enrollmentToken?: string };
+  | { kind: "team"; settings: SyncSettings; ownerPubSign: Uint8Array; role: MemberRole; enrollmentToken?: string };
 
 const syncFile = (root: string): string => path.join(root, ".stele", "sync.json");
 
@@ -81,7 +81,9 @@ function loadSyncSettings(root: string): LoadedSync | undefined {
       const settings: SyncSettings = { url, token, vaultId: raw["vaultId"], deviceId: raw["deviceId"] as string };
       if (typeof raw["displayName"] === "string") settings.displayName = raw["displayName"];
       const enrollmentToken = typeof raw["enrollmentToken"] === "string" ? raw["enrollmentToken"] : undefined;
-      return { kind: "team", settings, ownerPubSign: new Uint8Array(Buffer.from(ownerPubSign, "base64")), enrollmentToken };
+      // 本人角色(供 renderer 收斂 viewer UI);owner 管理面走 memberList 取權威角色。舊檔缺 → viewer
+      const role: MemberRole = raw["role"] === "owner" ? "owner" : raw["role"] === "editor" ? "editor" : "viewer";
+      return { kind: "team", settings, ownerPubSign: new Uint8Array(Buffer.from(ownerPubSign, "base64")), role, enrollmentToken };
     }
 
     const passphrase = raw["passphrase"];
@@ -108,7 +110,7 @@ function loadSyncSettings(root: string): LoadedSync | undefined {
 }
 
 /** 目前 team vault 的執行態(供 owner 管理 IPC 與 pending 重試);切 vault 時重設 */
-let teamRuntime: { settings: SyncSettings; ownerPubSign: Uint8Array; root: Uint8Array | undefined } | undefined;
+let teamRuntime: { settings: SyncSettings; ownerPubSign: Uint8Array; role: MemberRole; root: Uint8Array | undefined } | undefined;
 
 /** 建 socket:與 SyncManager 給 SyncClient 的同形,供 bootstrap/admin 對伺服器握手 */
 const createTeamSocket = (url: string): SocketLike => new WebSocket(url) as unknown as SocketLike;
@@ -206,7 +208,7 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
       keySource = new MasterKeySpaces(await deriveVaultKey(loaded.passphrase, loaded.settings.vaultId));
     } else {
       // team:先跑獨立 bootstrap 拿 root(避開 SyncClient authOk 立即解 vault-meta 的死結)
-      teamRuntime = { settings: loaded.settings, ownerPubSign: loaded.ownerPubSign, root: undefined };
+      teamRuntime = { settings: loaded.settings, ownerPubSign: loaded.ownerPubSign, role: loaded.role, root: undefined };
       try {
         const res = await bootstrapTeamKey({
           url: loaded.settings.url,
@@ -375,6 +377,7 @@ ipcMain.handle("team:info", async () => {
     team: true as const,
     vaultId: teamRuntime.settings.vaultId,
     owner: await isTeamOwner(),
+    role: teamRuntime.role, // 本人角色(供 renderer 收斂 viewer UI)
     ready: teamRuntime.root !== undefined, // false = pending(等擁有者授權)
   };
 });
@@ -394,6 +397,7 @@ ipcMain.handle("team:create", async (_e, url: unknown, token: unknown) => {
     vaultId,
     vaultType: "team",
     ownerPubSign: Buffer.from(me.pubSign).toString("base64"),
+    role: "owner",
     deviceId: randomUUID(),
   });
   await switchVault(root); // 以 team 模式重載:bootstrap 由 self-envelope 復原 root → ready
@@ -411,6 +415,7 @@ ipcMain.handle("team:join", async (_e, inviteText: unknown) => {
     vaultId: invite.vaultId,
     vaultType: "team",
     ownerPubSign: invite.ownerPubSign,
+    role: invite.role,
     deviceId: randomUUID(),
     enrollmentToken: invite.enrollToken,
   });
@@ -418,27 +423,29 @@ ipcMain.handle("team:join", async (_e, inviteText: unknown) => {
   return { vaultId: invite.vaultId, ready: teamRuntime?.root !== undefined };
 });
 
-/** owner 產生邀請 bundle(含一次性邀請碼 + ownerPubSign 信任錨) */
-ipcMain.handle("team:invite", async (_e, ttlSec: unknown) => {
+/** owner 產生邀請 bundle(含一次性邀請碼 + ownerPubSign 信任錨 + 被邀者角色) */
+ipcMain.handle("team:invite", async (_e, role: unknown, ttlSec: unknown) => {
   if (!(await isTeamOwner()) || !teamRuntime) throw new Error("非團隊擁有者");
+  const inviteRole: "editor" | "viewer" = role === "editor" ? "editor" : "viewer";
   const me = await getIdentity();
   const ttl = typeof ttlSec === "number" && ttlSec > 0 ? ttlSec : 24 * 60 * 60;
   const admin = await TeamAdminSession.open({ ...teamRuntime.settings, identity: me, createSocket: createTeamSocket });
   try {
-    const enrollToken = await admin.inviteToken(ttl);
+    const enrollToken = await admin.inviteToken(ttl, inviteRole);
     return encodeInvite({
       url: teamRuntime.settings.url,
       token: teamRuntime.settings.token,
       vaultId: teamRuntime.settings.vaultId,
       ownerPubSign: Buffer.from(me.pubSign).toString("base64"),
       enrollToken,
+      role: inviteRole,
     });
   } finally {
     admin.close();
   }
 });
 
-/** owner 列成員(附 pubWrap 指紋,供核准前 out-of-band 核對) */
+/** owner 列成員(附角色與 pubWrap 指紋,供核准前 out-of-band 核對) */
 ipcMain.handle("team:members", async () => {
   if (!(await isTeamOwner()) || !teamRuntime) throw new Error("非團隊擁有者");
   const me = await getIdentity();
@@ -447,8 +454,22 @@ ipcMain.handle("team:members", async () => {
     return (await admin.members()).map((m) => ({
       memberId: m.memberId,
       fingerprint: fingerprintOf(m.pubWrap),
+      role: m.role,
       isOwner: m.memberId === me.memberId,
     }));
+  } finally {
+    admin.close();
+  }
+});
+
+/** owner 改成員角色(editor/viewer);伺服器會踢對方活躍連線,重連後以新角色生效 */
+ipcMain.handle("team:setRole", async (_e, memberId: unknown, role: unknown) => {
+  if (typeof memberId !== "string" || (role !== "editor" && role !== "viewer")) throw new Error("非法請求");
+  if (!(await isTeamOwner()) || !teamRuntime) throw new Error("非團隊擁有者");
+  const me = await getIdentity();
+  const admin = await TeamAdminSession.open({ ...teamRuntime.settings, identity: me, createSocket: createTeamSocket });
+  try {
+    await admin.setRole(memberId, role);
   } finally {
     admin.close();
   }

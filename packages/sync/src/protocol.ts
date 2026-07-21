@@ -9,6 +9,9 @@ import * as decoding from "lib0/decoding";
 /** 分享權限:唯讀連線的 push 一律被伺服器拒絕,可編輯連線才准寫 */
 export type SharePermission = "read" | "write";
 
+/** 團隊成員角色(2c):owner 全權 + 管理;editor 可讀寫 doc;viewer 只讀 */
+export type MemberRole = "owner" | "editor" | "viewer";
+
 export interface ShareInfo {
   shareId: string;
   docId: string;
@@ -23,11 +26,12 @@ export interface KeyEnvelope {
   blob: Uint8Array;
 }
 
-/** 一位成員的公開資料(owner 查對方 pubWrap 以包裝金鑰) */
+/** 一位成員的公開資料(owner 查對方 pubWrap 以包裝金鑰)+ 角色(2c) */
 export interface MemberInfo {
   memberId: string;
   pubSign: Uint8Array;
   pubWrap: Uint8Array;
+  role: MemberRole;
 }
 
 export type ClientMessage =
@@ -51,7 +55,10 @@ export type ClientMessage =
   | { type: "envelopePull"; reqId: number }
   | { type: "memberList"; reqId: number }
   | { type: "memberRemove"; reqId: number; memberId: string }
-  | { type: "enrollCreate"; reqId: number; ttlSec: number }
+  // enrollCreate 帶 role(2c):owner 產邀請碼時就決定被邀者加入後的角色(editor/viewer)
+  | { type: "enrollCreate"; reqId: number; ttlSec: number; role: MemberRole }
+  // 改成員角色(2c,owner-only);降級/移除會踢對方活躍連線
+  | { type: "memberSetRole"; reqId: number; memberId: string; role: MemberRole }
   | { type: "push"; docId: string; deviceId: string; counter: number; payload: Uint8Array }
   | { type: "pull"; docId: string; fromSeq: number }
   | { type: "snapshotPush"; docId: string; uptoSeq: number; payload: Uint8Array }
@@ -112,6 +119,7 @@ const CLIENT_TAG = {
   memberList: 15,
   memberRemove: 16,
   enrollCreate: 17,
+  memberSetRole: 18,
 } as const;
 const SERVER_TAG = {
   authOk: 0,
@@ -133,6 +141,9 @@ const SERVER_TAG = {
 
 const PERM_TAG: Record<SharePermission, number> = { read: 0, write: 1 };
 const permFromTag = (tag: number): SharePermission => (tag === 1 ? "write" : "read");
+
+const ROLE_TAG: Record<MemberRole, number> = { owner: 0, editor: 1, viewer: 2 };
+const roleFromTag = (tag: number): MemberRole => (tag === 0 ? "owner" : tag === 1 ? "editor" : "viewer");
 
 export function encodeClientMessage(msg: ClientMessage): Uint8Array {
   const enc = encoding.createEncoder();
@@ -176,6 +187,12 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
     case "enrollCreate":
       encoding.writeVarUint(enc, msg.reqId);
       encoding.writeVarUint(enc, msg.ttlSec);
+      encoding.writeVarUint(enc, ROLE_TAG[msg.role]);
+      break;
+    case "memberSetRole":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarString(enc, msg.memberId);
+      encoding.writeVarUint(enc, ROLE_TAG[msg.role]);
       break;
     case "push":
       encoding.writeVarString(enc, msg.docId);
@@ -254,7 +271,19 @@ export function decodeClientMessage(data: Uint8Array): ClientMessage {
     case CLIENT_TAG.memberRemove:
       return { type: "memberRemove", reqId: decoding.readVarUint(dec), memberId: decoding.readVarString(dec) };
     case CLIENT_TAG.enrollCreate:
-      return { type: "enrollCreate", reqId: decoding.readVarUint(dec), ttlSec: decoding.readVarUint(dec) };
+      return {
+        type: "enrollCreate",
+        reqId: decoding.readVarUint(dec),
+        ttlSec: decoding.readVarUint(dec),
+        role: roleFromTag(decoding.readVarUint(dec)),
+      };
+    case CLIENT_TAG.memberSetRole:
+      return {
+        type: "memberSetRole",
+        reqId: decoding.readVarUint(dec),
+        memberId: decoding.readVarString(dec),
+        role: roleFromTag(decoding.readVarUint(dec)),
+      };
     case CLIENT_TAG.push:
       return {
         type: "push",
@@ -372,6 +401,7 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
         encoding.writeVarString(enc, m.memberId);
         encoding.writeVarUint8Array(enc, m.pubSign);
         encoding.writeVarUint8Array(enc, m.pubWrap);
+        encoding.writeVarUint(enc, ROLE_TAG[m.role]);
       }
       break;
     case "enrollCreated":
@@ -476,6 +506,7 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
           memberId: decoding.readVarString(dec),
           pubSign: readPayload(dec),
           pubWrap: readPayload(dec),
+          role: roleFromTag(decoding.readVarUint(dec)),
         });
       }
       return { type: "memberCatalog", reqId, members };

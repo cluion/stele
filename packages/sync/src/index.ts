@@ -10,6 +10,7 @@ export {
   type ShareInfo,
   type KeyEnvelope,
   type MemberInfo,
+  type MemberRole,
 } from "./protocol.ts";
 export { identityCipher, digest, type Cipher } from "./cipher.ts";
 export {

@@ -1,4 +1,4 @@
-import { encodeClientMessage, decodeServerMessage, type ClientMessage, type ServerMessage, type MemberInfo } from "./protocol.ts";
+import { encodeClientMessage, decodeServerMessage, type ClientMessage, type ServerMessage, type MemberInfo, type MemberRole } from "./protocol.ts";
 import type { SocketLike } from "./client.ts";
 import { identityChallengeBytes, type SyncIdentity } from "./identity.ts";
 import { wrapKey } from "./crypto.ts";
@@ -81,16 +81,21 @@ export class TeamAdminSession {
     return session;
   }
 
-  /** 產生一次性邀請碼(owner-only),供 out-of-band 交付被邀請者 */
-  async inviteToken(ttlSec: number): Promise<string> {
-    const msg = await this.request((reqId) => ({ type: "enrollCreate", reqId, ttlSec }), "enrollCreated");
+  /** 產生一次性邀請碼(owner-only),帶被邀者加入後角色(editor/viewer),供 out-of-band 交付 */
+  async inviteToken(ttlSec: number, role: MemberRole): Promise<string> {
+    const msg = await this.request((reqId) => ({ type: "enrollCreate", reqId, ttlSec, role }), "enrollCreated");
     return msg.token;
   }
 
-  /** 列出成員(含 pubWrap,供核准時包裝 root) */
+  /** 列出成員(含角色與 pubWrap,供核准時包裝 root、UI 顯示角色) */
   async members(): Promise<MemberInfo[]> {
     const msg = await this.request((reqId) => ({ type: "memberList", reqId }), "memberCatalog");
     return msg.members;
+  }
+
+  /** 改某成員角色(owner-only);伺服器會踢對方活躍連線,重連後以新角色生效 */
+  async setRole(memberId: string, role: MemberRole): Promise<void> {
+    await this.request((reqId) => ({ type: "memberSetRole", reqId, memberId, role }), "ok");
   }
 
   /** 核准某成員:以其 pubWrap 把 root 包成 owner 簽章信封並 push(核准前 UI 應先讓 owner 核對 pubWrap 指紋) */
@@ -141,6 +146,7 @@ export class TeamAdminSession {
     build: (reqId: number) => ClientMessage,
     expect: K,
   ): Promise<ServerMessage & { type: K }> {
+    if (this.settled) return Promise.reject(new Error("團隊管理連線已關閉")); // 連線已收尾(如前一指令被拒關線),不再送
     const reqId = ++this.reqSeq;
     return new Promise((resolve, reject) => {
       this.pending.set(reqId, {

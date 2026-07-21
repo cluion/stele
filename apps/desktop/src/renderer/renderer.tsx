@@ -1138,6 +1138,7 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
   // 加入
   const [invite, setInvite] = useState("");
   // 擁有者:邀請碼與成員
+  const [inviteRole, setInviteRole] = useState<"editor" | "viewer">("editor");
   const [inviteOut, setInviteOut] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [members, setMembers] = useState<TeamMember[]>([]);
@@ -1182,13 +1183,19 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
   const makeInvite = (): void => {
     setCopied(false);
     run(async () => {
-      setInviteOut(await window.stele.teamInvite());
+      setInviteOut(await window.stele.teamInvite(inviteRole));
     });
   };
   const approve = (memberId: string): void => {
     if (!window.confirm(t("team.approveConfirm"))) return;
     run(async () => {
       await window.stele.teamApprove(memberId);
+      reload();
+    });
+  };
+  const setRole = (memberId: string, role: "editor" | "viewer"): void => {
+    run(async () => {
+      await window.stele.teamSetRole(memberId, role);
       reload();
     });
   };
@@ -1248,9 +1255,15 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
                   </button>
                 </div>
               ) : (
-                <button className="primary" disabled={busy} onClick={makeInvite}>
-                  {busy ? t("team.invite.busy") : t("team.invite.generate")}
-                </button>
+                <div className="team-invite-row">
+                  <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value as "editor" | "viewer")}>
+                    <option value="editor">{t("team.role.editor")}</option>
+                    <option value="viewer">{t("team.role.viewer")}</option>
+                  </select>
+                  <button className="primary" disabled={busy} onClick={makeInvite}>
+                    {busy ? t("team.invite.busy") : t("team.invite.generate")}
+                  </button>
+                </div>
               )}
             </section>
             <section className="team-section">
@@ -1266,7 +1279,7 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
                   <li key={m.memberId} className="team-member">
                     <div className="team-member-id">
                       <code>{m.memberId.slice(0, 12)}…</code>
-                      {m.isOwner && <span className="team-badge">{t("team.owner.badge")}</span>}
+                      <span className="team-badge">{m.isOwner ? t("team.owner.badge") : t(`team.role.${m.role}`)}</span>
                     </div>
                     <div className="team-fingerprint" title={t("team.member.fingerprintHint")}>
                       {m.fingerprint}
@@ -1276,6 +1289,15 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
                         <button disabled={busy} onClick={() => approve(m.memberId)}>
                           {t("team.member.approve")}
                         </button>
+                        {m.role === "viewer" ? (
+                          <button disabled={busy} onClick={() => setRole(m.memberId, "editor")}>
+                            {t("team.member.makeEditor")}
+                          </button>
+                        ) : (
+                          <button disabled={busy} onClick={() => setRole(m.memberId, "viewer")}>
+                            {t("team.member.makeViewer")}
+                          </button>
+                        )}
                         <button className="danger" disabled={busy} onClick={() => remove(m.memberId)}>
                           {t("team.member.remove")}
                         </button>
@@ -1289,7 +1311,13 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
         )}
 
         {info && info.team && !info.owner && (
-          <p className="placeholder">{info.ready ? t("team.member.status.ready") : t("team.member.status.pending")}</p>
+          <section className="team-section">
+            <p className="placeholder">{info.ready ? t("team.member.status.ready") : t("team.member.status.pending")}</p>
+            <p>
+              {t("team.member.yourRole")} <span className="team-badge">{t(`team.role.${info.role}`)}</span>
+              {info.role === "viewer" && ` — ${t("team.member.viewerNote")}`}
+            </p>
+          </section>
         )}
 
         {error && <p className="error">{error}</p>}

@@ -13,6 +13,8 @@ export interface TeamInvite {
   ownerPubSign: string;
   /** 一次性邀請碼 */
   enrollToken: string;
+  /** 被邀者加入後的角色(editor/viewer);2c owner 產碼時決定 */
+  role: "editor" | "viewer";
 }
 
 export function encodeInvite(invite: TeamInvite): string {
@@ -32,11 +34,14 @@ export function decodeInvite(text: string): TeamInvite {
   for (const key of ["url", "token", "vaultId", "ownerPubSign", "enrollToken"] as const) {
     if (typeof p[key] !== "string" || p[key].length === 0) throw new Error(`邀請碼缺欄位:${key}`);
   }
+  // role 舊 bundle 可能缺(向前相容)→ 預設 viewer;非法值也收斂為 viewer
+  const role: "editor" | "viewer" = p["role"] === "editor" ? "editor" : "viewer";
   return {
     url: p["url"] as string,
     token: p["token"] as string,
     vaultId: p["vaultId"] as string,
     ownerPubSign: p["ownerPubSign"] as string,
     enrollToken: p["enrollToken"] as string,
+    role,
   };
 }

@@ -7,6 +7,7 @@ const sample: TeamInvite = {
   vaultId: "team-vault-uuid",
   ownerPubSign: Buffer.from(new Uint8Array(32).fill(7)).toString("base64"),
   enrollToken: "一次性邀請碼-abc",
+  role: "editor",
 };
 
 describe("team invite bundle", () => {
@@ -22,5 +23,13 @@ describe("team invite bundle", () => {
     expect(() => decodeInvite("!!!不是 base64!!!")).toThrow();
     expect(() => decodeInvite(Buffer.from("{}", "utf8").toString("base64url"))).toThrow(/欄位/);
     expect(() => decodeInvite(Buffer.from(JSON.stringify({ ...sample, token: "" }), "utf8").toString("base64url"))).toThrow(/token/);
+  });
+
+  it("role 缺失或非法收斂為 viewer(向前相容舊 bundle)", () => {
+    const { role: _omit, ...noRole } = sample;
+    void _omit;
+    expect(decodeInvite(Buffer.from(JSON.stringify(noRole), "utf8").toString("base64url")).role).toBe("viewer");
+    expect(decodeInvite(Buffer.from(JSON.stringify({ ...sample, role: "owner" }), "utf8").toString("base64url")).role).toBe("viewer");
+    expect(decodeInvite(encodeInvite({ ...sample, role: "viewer" })).role).toBe("viewer");
   });
 });

@@ -47,7 +47,10 @@ const clientCases: ClientMessage[] = [
   { type: "envelopePull", reqId: 8 },
   { type: "memberList", reqId: 9 },
   { type: "memberRemove", reqId: 10, memberId: "e".repeat(64) },
-  { type: "enrollCreate", reqId: 11, ttlSec: 3600 },
+  { type: "enrollCreate", reqId: 11, ttlSec: 3600, role: "editor" },
+  { type: "enrollCreate", reqId: 12, ttlSec: 60, role: "viewer" },
+  { type: "memberSetRole", reqId: 13, memberId: "f".repeat(64), role: "viewer" },
+  { type: "memberSetRole", reqId: 14, memberId: "a".repeat(64), role: "editor" },
 ];
 
 const serverCases: ServerMessage[] = [
@@ -93,8 +96,8 @@ const serverCases: ServerMessage[] = [
     type: "memberCatalog",
     reqId: 9,
     members: [
-      { memberId: "a".repeat(64), pubSign: new Uint8Array(32).fill(11), pubWrap: new Uint8Array(32).fill(22) },
-      { memberId: "b".repeat(64), pubSign: new Uint8Array(32).fill(1), pubWrap: new Uint8Array(32).fill(2) },
+      { memberId: "a".repeat(64), pubSign: new Uint8Array(32).fill(11), pubWrap: new Uint8Array(32).fill(22), role: "owner" },
+      { memberId: "b".repeat(64), pubSign: new Uint8Array(32).fill(1), pubWrap: new Uint8Array(32).fill(2), role: "editor" },
     ],
   },
   { type: "enrollCreated", reqId: 11, token: "enroll-xyz-一次性" },

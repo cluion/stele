@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import type { SharePermission, ShareInfo, KeyEnvelope } from "@stele/sync";
+import type { SharePermission, ShareInfo, KeyEnvelope, MemberRole } from "@stele/sync";
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS members (
   member_id TEXT NOT NULL,
   pub_sign BLOB NOT NULL,
   pub_wrap BLOB NOT NULL,
+  role TEXT NOT NULL DEFAULT 'viewer',
   first_seen INTEGER NOT NULL DEFAULT (unixepoch()),
   last_seen INTEGER NOT NULL DEFAULT (unixepoch()),
   PRIMARY KEY (vault_id, member_id)
@@ -76,11 +77,26 @@ CREATE TABLE IF NOT EXISTS key_envelopes (
 CREATE TABLE IF NOT EXISTS enrollment_tokens (
   token TEXT PRIMARY KEY,
   vault_id TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'viewer',
   expires_at INTEGER,
   used INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 `;
+
+/** 對既有(0.9.0)DB 補上 2c 的 role 欄;欄已存在時 ALTER 失敗即忽略(冪等遷移) */
+function migrateRoles(db: Database.Database): void {
+  for (const sql of [
+    "ALTER TABLE members ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'",
+    "ALTER TABLE enrollment_tokens ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'",
+  ]) {
+    try {
+      db.exec(sql);
+    } catch {
+      // 欄位已存在(新建 DB 已含,或先前已遷移)——冪等,無妨
+    }
+  }
+}
 
 export interface StoredUpdate {
   seq: number;
@@ -99,11 +115,12 @@ export interface ShareScope {
   permission: SharePermission;
 }
 
-/** 某 vault 的一位成員(公開資料);Slice 2a 為 advisory,2b/2c 才升為授權邊界 */
+/** 某 vault 的一位成員(公開資料 + 角色);2c 起 role 成為伺服器授權邊界 */
 export interface MemberRecord {
   memberId: string;
   pubSign: Uint8Array;
   pubWrap: Uint8Array;
+  role: MemberRole;
 }
 
 export class SyncStore {
@@ -113,6 +130,7 @@ export class SyncStore {
     this.db = new Database(file);
     this.db.pragma("journal_mode = WAL");
     this.db.exec(SCHEMA);
+    migrateRoles(this.db);
   }
 
   /** 配發下一個 seq 並入庫;同一 device+counter 重送回傳既有 seq,冪等 */
@@ -218,8 +236,9 @@ export class SyncStore {
    * - 再見且 pub_sign 相同 → 更新 last_seen,回 "ok"
    * - 再見但 pub_sign 不同 → "conflict"(擋冒名/覆蓋),不改任何列
    * Slice 2a 是自註冊、advisory;釘選是唯一現在就給的硬保證,為 2c 留可信起點。
+   * role(2c):首見時以邀請碼帶來的 role 入表;再見既有成員不動其 role(改角色走 setRole)。
    */
-  enrollMember(vaultId: string, memberId: string, pubSign: Uint8Array, pubWrap: Uint8Array): "ok" | "conflict" {
+  enrollMember(vaultId: string, memberId: string, pubSign: Uint8Array, pubWrap: Uint8Array, role: MemberRole): "ok" | "conflict" {
     const enroll = this.db.transaction((): "ok" | "conflict" => {
       const existing = this.db
         .prepare("SELECT pub_sign FROM members WHERE vault_id = ? AND member_id = ?")
@@ -232,8 +251,8 @@ export class SyncStore {
         return "ok";
       }
       this.db
-        .prepare("INSERT INTO members (vault_id, member_id, pub_sign, pub_wrap) VALUES (?, ?, ?, ?)")
-        .run(vaultId, memberId, Buffer.from(pubSign), Buffer.from(pubWrap));
+        .prepare("INSERT INTO members (vault_id, member_id, pub_sign, pub_wrap, role) VALUES (?, ?, ?, ?, ?)")
+        .run(vaultId, memberId, Buffer.from(pubSign), Buffer.from(pubWrap), role);
       return "ok";
     });
     return enroll();
@@ -241,17 +260,31 @@ export class SyncStore {
 
   getMember(vaultId: string, memberId: string): MemberRecord | undefined {
     const row = this.db
-      .prepare("SELECT member_id, pub_sign, pub_wrap FROM members WHERE vault_id = ? AND member_id = ?")
-      .get(vaultId, memberId) as { member_id: string; pub_sign: Buffer; pub_wrap: Buffer } | undefined;
-    return row && { memberId: row.member_id, pubSign: new Uint8Array(row.pub_sign), pubWrap: new Uint8Array(row.pub_wrap) };
+      .prepare("SELECT member_id, pub_sign, pub_wrap, role FROM members WHERE vault_id = ? AND member_id = ?")
+      .get(vaultId, memberId) as { member_id: string; pub_sign: Buffer; pub_wrap: Buffer; role: MemberRole } | undefined;
+    return row && { memberId: row.member_id, pubSign: new Uint8Array(row.pub_sign), pubWrap: new Uint8Array(row.pub_wrap), role: row.role };
   }
 
-  /** 列出某 vault 全部成員,供 2b 邀請/包裝金鑰時查對方 wrap 公鑰 */
+  /** 某成員角色;查無此成員回 undefined(供逐訊息授權) */
+  roleOf(vaultId: string, memberId: string): MemberRole | undefined {
+    const row = this.db
+      .prepare("SELECT role FROM members WHERE vault_id = ? AND member_id = ?")
+      .get(vaultId, memberId) as { role: MemberRole } | undefined;
+    return row?.role;
+  }
+
+  /** 設某成員角色(owner-only,授權在 server 層把關);回傳是否確有此成員 */
+  setRole(vaultId: string, memberId: string, role: MemberRole): boolean {
+    const info = this.db.prepare("UPDATE members SET role = ? WHERE vault_id = ? AND member_id = ?").run(role, vaultId, memberId);
+    return info.changes > 0;
+  }
+
+  /** 列出某 vault 全部成員(含角色),供 owner 管理與包裝金鑰時查對方 wrap 公鑰 */
   listMembers(vaultId: string): MemberRecord[] {
     const rows = this.db
-      .prepare("SELECT member_id, pub_sign, pub_wrap FROM members WHERE vault_id = ? ORDER BY first_seen")
-      .all(vaultId) as Array<{ member_id: string; pub_sign: Buffer; pub_wrap: Buffer }>;
-    return rows.map((r) => ({ memberId: r.member_id, pubSign: new Uint8Array(r.pub_sign), pubWrap: new Uint8Array(r.pub_wrap) }));
+      .prepare("SELECT member_id, pub_sign, pub_wrap, role FROM members WHERE vault_id = ? ORDER BY first_seen")
+      .all(vaultId) as Array<{ member_id: string; pub_sign: Buffer; pub_wrap: Buffer; role: MemberRole }>;
+    return rows.map((r) => ({ memberId: r.member_id, pubSign: new Uint8Array(r.pub_sign), pubWrap: new Uint8Array(r.pub_wrap), role: r.role }));
   }
 
   /** 移除成員:刪 member 列 + 其所有金鑰信封(2b 只做移除;踢人後的 root 輪換留 2c) */
@@ -274,6 +307,8 @@ export class SyncStore {
         .get(vaultId) as { owner_member_id: string } | undefined;
       if (existing) return existing.owner_member_id;
       this.db.prepare("INSERT INTO vault_owners (vault_id, owner_member_id) VALUES (?, ?)").run(vaultId, memberId);
+      // 認領者角色即 owner(創建者 enroll 時無邀請碼 → 預設 viewer,claim 時升 owner)
+      this.db.prepare("UPDATE members SET role = 'owner' WHERE vault_id = ? AND member_id = ?").run(vaultId, memberId);
       return memberId;
     });
     return claim();
@@ -311,25 +346,26 @@ export class SyncStore {
     return rows.map((r) => ({ keyId: r.key_id, epoch: r.epoch, blob: new Uint8Array(r.wrapped_blob) }));
   }
 
-  /** 建立一次性邀請碼(綁 vault、可設有效期);token 由呼叫端產生的不可猜亂數 */
-  createEnrollmentToken(token: string, vaultId: string, expiresAt?: number): void {
+  /** 建立一次性邀請碼(綁 vault + 加入後角色、可設有效期);token 由呼叫端產生的不可猜亂數 */
+  createEnrollmentToken(token: string, vaultId: string, role: MemberRole, expiresAt?: number): void {
     this.db
-      .prepare("INSERT INTO enrollment_tokens (token, vault_id, expires_at) VALUES (?, ?, ?)")
-      .run(token, vaultId, expiresAt ?? null);
+      .prepare("INSERT INTO enrollment_tokens (token, vault_id, role, expires_at) VALUES (?, ?, ?, ?)")
+      .run(token, vaultId, role, expiresAt ?? null);
   }
 
   /**
-   * 消耗邀請碼:僅當 token 存在、未用、未過期且綁的正是此 vault 時,標記已用並回 true。
-   * 單次性由 UPDATE ... WHERE used = 0 的 changes 保證,並發下只有一次成功。
+   * 消耗邀請碼:僅當 token 存在、未用、未過期且綁的正是此 vault 時,標記已用並回其 role;否則 undefined。
+   * 單次性由 UPDATE ... WHERE used = 0 的 changes 保證,並發下只有一次成功;RETURNING 取回該碼指定的角色。
    */
-  consumeEnrollmentToken(token: string, vaultId: string): boolean {
-    const info = this.db
+  consumeEnrollmentToken(token: string, vaultId: string): MemberRole | undefined {
+    const row = this.db
       .prepare(
         "UPDATE enrollment_tokens SET used = 1 " +
-          "WHERE token = ? AND vault_id = ? AND used = 0 AND (expires_at IS NULL OR expires_at > unixepoch())",
+          "WHERE token = ? AND vault_id = ? AND used = 0 AND (expires_at IS NULL OR expires_at > unixepoch()) " +
+          "RETURNING role",
       )
-      .run(token, vaultId);
-    return info.changes > 0;
+      .get(token, vaultId) as { role: MemberRole } | undefined;
+    return row?.role;
   }
 
   close(): void {

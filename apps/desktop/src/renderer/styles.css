@@ -678,6 +678,8 @@ body {
 .team-section h3 { margin: 0; font-size: var(--fs-sm); font-weight: 600; color: var(--text); }
 .switcher.team input, .switcher.team textarea { width: 100%; padding: var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font: inherit; box-sizing: border-box; }
 .switcher.team textarea { resize: vertical; overflow-wrap: anywhere; }
+.team-invite-row { display: flex; gap: var(--sp-2); align-items: center; }
+.team-invite-row select { padding: var(--sp-1) var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font: inherit; }
 .link-btn { font-size: var(--fs-sm); color: var(--text-muted); font-weight: 400; }
 .link-btn:hover { color: var(--accent); }
 .team-members { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }

@@ -116,7 +116,7 @@ describe("團隊金鑰盲中繼分發(2b)", () => {
     const vaultId = "team-invite";
     const owner = await makeOwner(vaultId);
     // owner 產生一次性邀請碼
-    owner.client.send({ type: "enrollCreate", reqId: 10, ttlSec: 3600 });
+    owner.client.send({ type: "enrollCreate", reqId: 10, ttlSec: 3600, role: "editor" });
     const created = await owner.client.next("enrollCreated");
     expect(created.token).toBeTruthy();
 
@@ -177,7 +177,7 @@ describe("團隊金鑰盲中繼分發(2b)", () => {
   it("envelopePull 只回自己:成員拉不到別人的信封", async () => {
     const vaultId = "team-isolation";
     const owner = await makeOwner(vaultId);
-    owner.client.send({ type: "enrollCreate", reqId: 20, ttlSec: 3600 });
+    owner.client.send({ type: "enrollCreate", reqId: 20, ttlSec: 3600, role: "editor" });
     const tok = (await owner.client.next("enrollCreated")).token;
     const bob = await deriveIdentity(generateSeed());
     const bobClient = new TeamClient(server.port);
@@ -194,7 +194,7 @@ describe("團隊金鑰盲中繼分發(2b)", () => {
   it("owner-only:非 owner 成員的 envelopePush / memberList / memberRemove / enrollCreate 一律 forbidden", async () => {
     const vaultId = "team-authz";
     const owner = await makeOwner(vaultId);
-    owner.client.send({ type: "enrollCreate", reqId: 30, ttlSec: 3600 });
+    owner.client.send({ type: "enrollCreate", reqId: 30, ttlSec: 3600, role: "editor" });
     const tok = (await owner.client.next("enrollCreated")).token;
     const bob = await deriveIdentity(generateSeed());
     // bob 先憑碼加入成為成員(之後重連不需碼)
@@ -206,7 +206,7 @@ describe("團隊金鑰盲中繼分發(2b)", () => {
       { type: "envelopePush", reqId: 31, keyId: "root", memberId: bob.memberId, epoch: 0, blob: new Uint8Array([1]) },
       { type: "memberList", reqId: 32 },
       { type: "memberRemove", reqId: 33, memberId: owner.id.memberId },
-      { type: "enrollCreate", reqId: 34, ttlSec: 60 },
+      { type: "enrollCreate", reqId: 34, ttlSec: 60, role: "viewer" },
     ];
     for (const msg of attempts) {
       // forbidden 會關連線,每項用全新連線重試
@@ -223,7 +223,7 @@ describe("團隊金鑰盲中繼分發(2b)", () => {
   it("owner 移除成員:member 列與其信封皆消失", async () => {
     const vaultId = "team-remove";
     const owner = await makeOwner(vaultId);
-    owner.client.send({ type: "enrollCreate", reqId: 40, ttlSec: 3600 });
+    owner.client.send({ type: "enrollCreate", reqId: 40, ttlSec: 3600, role: "editor" });
     const tok = (await owner.client.next("enrollCreated")).token;
     const bob = await deriveIdentity(generateSeed());
     const bobClient = new TeamClient(server.port);

@@ -95,9 +95,9 @@ describe("SyncStore", () => {
     const store = makeStore();
     const sign1 = bytes(1, 1, 1);
     const wrap1 = bytes(2, 2, 2);
-    expect(store.enrollMember("v1", "m1", sign1, wrap1)).toBe("ok");
-    expect(store.enrollMember("v1", "m1", sign1, wrap1)).toBe("ok"); // 同公鑰再連,更新 last_seen
-    expect(store.enrollMember("v1", "m1", bytes(9, 9, 9), wrap1)).toBe("conflict"); // 換 pubSign 被釘選擋下
+    expect(store.enrollMember("v1", "m1", sign1, wrap1, "viewer")).toBe("ok");
+    expect(store.enrollMember("v1", "m1", sign1, wrap1, "viewer")).toBe("ok"); // 同公鑰再連,更新 last_seen
+    expect(store.enrollMember("v1", "m1", bytes(9, 9, 9), wrap1, "viewer")).toBe("conflict"); // 換 pubSign 被釘選擋下
 
     const rec = store.getMember("v1", "m1");
     expect(rec).toBeDefined();
@@ -105,7 +105,7 @@ describe("SyncStore", () => {
     expect([...rec!.pubWrap]).toEqual([2, 2, 2]);
 
     // 同 memberId 在別的 vault 是全新一列(複合鍵隔離),互不影響
-    expect(store.enrollMember("v2", "m1", bytes(9, 9, 9), wrap1)).toBe("ok");
+    expect(store.enrollMember("v2", "m1", bytes(9, 9, 9), wrap1, "viewer")).toBe("ok");
     expect([...store.getMember("v1", "m1")!.pubSign]).toEqual([1, 1, 1]); // v1 的 m1 不受 v2 影響
     expect([...store.getMember("v2", "m1")!.pubSign]).toEqual([9, 9, 9]);
     expect(store.listMembers("v1").map((m) => m.memberId)).toEqual(["m1"]);
@@ -141,8 +141,8 @@ describe("SyncStore", () => {
 
   it("removeMember 刪 member 列 + 其信封,不動他人", () => {
     const store = makeStore();
-    store.enrollMember("t", "mA", bytes(1), bytes(1));
-    store.enrollMember("t", "mB", bytes(2), bytes(2));
+    store.enrollMember("t", "mA", bytes(1), bytes(1), "editor");
+    store.enrollMember("t", "mB", bytes(2), bytes(2), "viewer");
     store.putEnvelope("t", "root", "mA", 0, bytes(1));
     store.putEnvelope("t", "root", "mB", 0, bytes(2));
     store.removeMember("t", "mA");
@@ -152,20 +152,44 @@ describe("SyncStore", () => {
     expect(store.envelopesFor("t", "mB")).toHaveLength(1);
   });
 
-  it("enrollment token:單次、綁 vault、過期各自失效", () => {
+  it("enrollment token:單次、綁 vault、過期各自失效,消耗回其角色", () => {
     const store = makeStore();
     const future = Math.floor(Date.now() / 1000) + 3600;
-    store.createEnrollmentToken("tok-1", "team1", future);
+    store.createEnrollmentToken("tok-1", "team1", "editor", future);
     // 跨 vault 不認
-    expect(store.consumeEnrollmentToken("tok-1", "team2")).toBe(false);
-    // 正確 vault:第一次成功
-    expect(store.consumeEnrollmentToken("tok-1", "team1")).toBe(true);
+    expect(store.consumeEnrollmentToken("tok-1", "team2")).toBeUndefined();
+    // 正確 vault:第一次成功,回該碼指定角色
+    expect(store.consumeEnrollmentToken("tok-1", "team1")).toBe("editor");
     // 單次:第二次失敗
-    expect(store.consumeEnrollmentToken("tok-1", "team1")).toBe(false);
+    expect(store.consumeEnrollmentToken("tok-1", "team1")).toBeUndefined();
     // 不存在的 token
-    expect(store.consumeEnrollmentToken("nope", "team1")).toBe(false);
+    expect(store.consumeEnrollmentToken("nope", "team1")).toBeUndefined();
     // 已過期
-    store.createEnrollmentToken("tok-2", "team1", Math.floor(Date.now() / 1000) - 1);
-    expect(store.consumeEnrollmentToken("tok-2", "team1")).toBe(false);
+    store.createEnrollmentToken("tok-2", "team1", "viewer", Math.floor(Date.now() / 1000) - 1);
+    expect(store.consumeEnrollmentToken("tok-2", "team1")).toBeUndefined();
+  });
+
+  it("角色:claimOwner 升 owner、enroll 帶角色、setRole 改角色、roleOf 查詢", () => {
+    const store = makeStore();
+    // 創建者 enroll 時預設 viewer,claimOwner 升 owner
+    store.enrollMember("t", "owner", bytes(1), bytes(1), "viewer");
+    expect(store.roleOf("t", "owner")).toBe("viewer");
+    store.claimOwner("t", "owner");
+    expect(store.roleOf("t", "owner")).toBe("owner");
+    // 邀請碼帶角色 → enroll 套用
+    store.enrollMember("t", "ed", bytes(2), bytes(2), "editor");
+    expect(store.roleOf("t", "ed")).toBe("editor");
+    // 既有成員再 enroll 不改角色(改角色走 setRole)
+    store.enrollMember("t", "ed", bytes(2), bytes(2), "viewer");
+    expect(store.roleOf("t", "ed")).toBe("editor");
+    // setRole 降級
+    expect(store.setRole("t", "ed", "viewer")).toBe(true);
+    expect(store.roleOf("t", "ed")).toBe("viewer");
+    expect(store.getMember("t", "ed")!.role).toBe("viewer");
+    // setRole 查無成員
+    expect(store.setRole("t", "nobody", "editor")).toBe(false);
+    expect(store.roleOf("t", "nobody")).toBeUndefined();
+    // listMembers 帶角色
+    expect(store.listMembers("t").find((m) => m.memberId === "owner")!.role).toBe("owner");
   });
 });

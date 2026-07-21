@@ -108,7 +108,7 @@ describe("團隊 vault 金牌:兩成員經真伺服器收斂", () => {
 
     // owner 產邀請碼 → bob 憑碼 enroll(pending)→ owner 核准 → bob bootstrap 得同一 root
     const admin = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId, identity: owner, createSocket: wsSocket });
-    const inviteToken = await admin.inviteToken(3600);
+    const inviteToken = await admin.inviteToken(3600, "editor");
     const pending = await bootstrapTeamKey({ url: url(), token: TOKEN, vaultId, identity: bob, ownerPubSign: owner.pubSign, enrollmentToken: inviteToken, createSocket: wsSocket });
     expect(pending.status).toBe("pending");
     const bobRec = (await admin.members()).find((m) => m.memberId === bob.memberId)!;
