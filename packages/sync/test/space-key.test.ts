@@ -69,3 +69,29 @@ describe("空間金鑰衍生", () => {
     expect(Buffer.from(await b.decrypt("doc-1", sealed)).toString("utf8")).toBe("同空間往返");
   });
 });
+
+describe("金鑰輪換(2c-2):MasterKeySpaces.rotate", () => {
+  const newRoot = () => new Uint8Array(32).map((_, i) => (i * 13 + 5) & 0xff);
+
+  it("rotate 後新密文舊 root 解不開、舊密文新 root 解不開(密碼層前向保密)", async () => {
+    const spaces = new MasterKeySpaces(master());
+    const before = await (await spaces.cipher(DEFAULT_SPACE_ID)).encrypt("doc-1", utf8("輪換前內容"));
+    spaces.rotate(newRoot());
+    const after = await (await spaces.cipher(DEFAULT_SPACE_ID)).encrypt("doc-1", utf8("輪換後內容"));
+    const oldSpaces = new MasterKeySpaces(master()); // 被移除者留存的舊 root
+    await expect((await oldSpaces.cipher(DEFAULT_SPACE_ID)).decrypt("doc-1", after)).rejects.toThrow();
+    await expect((await spaces.cipher(DEFAULT_SPACE_ID)).decrypt("doc-1", before)).rejects.toThrow();
+  });
+
+  it("rotate 清空間 cipher 快取:自訂空間也換到新 root 衍生的金鑰", async () => {
+    const spaces = new MasterKeySpaces(master());
+    const sealedOld = await (await spaces.cipher("work")).encrypt("doc-1", utf8("舊金鑰空間內容"));
+    spaces.rotate(newRoot());
+    // 新 root 下同 spaceId 的 cipher 已換金鑰,舊密文解不開
+    await expect((await spaces.cipher("work")).decrypt("doc-1", sealedOld)).rejects.toThrow();
+    // 與「直接以新 root 建的實例」互通:留任成員 rotate 與重啟重建等價
+    const fresh = new MasterKeySpaces(newRoot());
+    const sealedNew = await (await spaces.cipher("work")).encrypt("doc-1", utf8("新金鑰空間內容"));
+    expect(Buffer.from(await (await fresh.cipher("work")).decrypt("doc-1", sealedNew)).toString("utf8")).toBe("新金鑰空間內容");
+  });
+});

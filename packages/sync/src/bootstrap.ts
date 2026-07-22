@@ -14,9 +14,9 @@ import { wrapKey, type WrapContext } from "./crypto.ts";
 const HANDSHAKE_TIMEOUT_MS = 15_000;
 export const KEY_ID_ROOT = "root";
 
-/** root 信封的 WrapContext:2b 只有一把 root、epoch 恆 0 */
-export function rootWrapContext(vaultId: string, recipientMemberId: string): WrapContext {
-  return { vaultId, keyId: KEY_ID_ROOT, epoch: 0, recipientMemberId };
+/** root 信封的 WrapContext:epoch 為金鑰紀元(2c-2 輪換遞增;建立與 2b 相容預設 0) */
+export function rootWrapContext(vaultId: string, recipientMemberId: string, epoch = 0): WrapContext {
+  return { vaultId, keyId: KEY_ID_ROOT, epoch, recipientMemberId };
 }
 
 export interface TeamBootstrapOptions {
@@ -31,8 +31,8 @@ export interface TeamBootstrapOptions {
   createSocket: (url: string) => SocketLike;
 }
 
-/** ready=拿到 root 可協作;pending=已認證但 owner 尚未包 root 給我(等待授權,不可 start sync) */
-export type TeamBootstrapResult = { status: "ready"; root: Uint8Array } | { status: "pending" };
+/** ready=拿到 root 可協作(epoch 為信封的金鑰紀元,doc 寫入須帶它);pending=已認證但 owner 尚未包 root 給我 */
+export type TeamBootstrapResult = { status: "ready"; root: Uint8Array; epoch: number } | { status: "pending" };
 
 /**
  * 加入者/既有成員的 bootstrap:認證(可帶邀請碼)→ pull 自己的 root 信封 → 驗 owner 簽章後 unwrap。
@@ -54,8 +54,9 @@ export function bootstrapTeamKey(opts: TeamBootstrapOptions): Promise<TeamBootst
           done({ status: "pending" });
           return;
         }
-        const root = await identity.unwrap(env.blob, opts.ownerPubSign, rootWrapContext(vaultId, identity.memberId));
-        done({ status: "ready", root });
+        // context 用信封宣稱的 epoch:偽造 epoch 會使 HKDF info 不符 → GCM 驗不過而拒絕,不會靜默拿錯 root
+        const root = await identity.unwrap(env.blob, opts.ownerPubSign, rootWrapContext(vaultId, identity.memberId, env.epoch));
+        done({ status: "ready", root, epoch: env.epoch });
         break;
       }
       case "error":

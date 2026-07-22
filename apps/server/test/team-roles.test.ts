@@ -82,7 +82,7 @@ class RoleClient {
     await this.next("authOk");
   }
   pushDoc(docId: string, dev: string): void {
-    this.send({ type: "push", docId, deviceId: dev, counter: 1, payload: new Uint8Array([1, 2, 3]) });
+    this.send({ type: "push", docId, deviceId: dev, counter: 1, epoch: 0, payload: new Uint8Array([1, 2, 3]) });
   }
   close(): void {
     this.ws.close();

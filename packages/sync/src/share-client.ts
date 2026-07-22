@@ -235,6 +235,8 @@ export class ShareClient {
       docId: this.docId,
       deviceId: this.opts.deviceId,
       counter: this.counter,
+      // share 連線不套 epoch 柵欄(輪換時伺服器直接踢分享連線並作廢連結),恆送 0
+      epoch: 0,
       payload: await this.opts.cipher.encrypt(this.docId, diff),
     });
   }

@@ -32,6 +32,8 @@ export interface MemberInfo {
   pubSign: Uint8Array;
   pubWrap: Uint8Array;
   role: MemberRole;
+  /** 是否已持有金鑰信封(2c-2):輪換只重包已核准成員,pending 成員仍待 owner 核對指紋後 approve */
+  approved: boolean;
 }
 
 export type ClientMessage =
@@ -59,9 +61,14 @@ export type ClientMessage =
   | { type: "enrollCreate"; reqId: number; ttlSec: number; role: MemberRole }
   // 改成員角色(2c,owner-only);降級/移除會踢對方活躍連線
   | { type: "memberSetRole"; reqId: number; memberId: string; role: MemberRole }
-  | { type: "push"; docId: string; deviceId: string; counter: number; payload: Uint8Array }
+  // 金鑰輪換 commit(2c-2,owner-only):bump vault epoch 至指定值(須恰為當前+1),
+  // 伺服器隨即以 epoch 柵欄拒舊 epoch 寫入並廣播 keyRotated 給該 vault 全連線
+  | { type: "rotateKey"; reqId: number; epoch: number }
+  // doc 寫入帶 client epoch(2c-2 寫入柵欄):team vault 上伺服器拒 epoch≠當前,
+  // 防止輪換窗口內舊 root 密文污染共享日誌;個人 vault/share 連線恆送 0(不套柵欄)
+  | { type: "push"; docId: string; deviceId: string; counter: number; epoch: number; payload: Uint8Array }
   | { type: "pull"; docId: string; fromSeq: number }
-  | { type: "snapshotPush"; docId: string; uptoSeq: number; payload: Uint8Array }
+  | { type: "snapshotPush"; docId: string; uptoSeq: number; epoch: number; payload: Uint8Array }
   | { type: "snapshotPull"; docId: string }
   // awareness:游標/選取/在線,加密後轉發不落盤(ephemeral),伺服器只轉不存
   | { type: "awareness"; docId: string; payload: Uint8Array }
@@ -79,7 +86,8 @@ export interface DocHead {
 }
 
 export type ServerMessage =
-  | { type: "authOk"; docs: DocHead[] }
+  // epoch(2c-2):vault 當前金鑰紀元;client 若低於它表示錯過輪換,須重跑 bootstrap 取新 root。個人 vault 恆 0
+  | { type: "authOk"; docs: DocHead[]; epoch: number }
   // 身分認證第一階段:伺服器給每連線新生的 nonce,client 據此簽章
   | { type: "authChallenge"; nonce: Uint8Array }
   | { type: "update"; docId: string; seq: number; payload: Uint8Array }
@@ -97,8 +105,10 @@ export type ServerMessage =
   | { type: "envelopeList"; reqId: number; envelopes: KeyEnvelope[] }
   | { type: "memberCatalog"; reqId: number; members: MemberInfo[] }
   | { type: "enrollCreated"; reqId: number; token: string }
-  // 通用成功回執(envelopePush / memberRemove / claimOwner)
-  | { type: "ok"; reqId: number };
+  // 通用成功回執(envelopePush / memberRemove / claimOwner / rotateKey)
+  | { type: "ok"; reqId: number }
+  // 金鑰輪換廣播(2c-2):vault epoch 已 bump,成員應暫停推送、重跑 bootstrap 取新 root 後 repull
+  | { type: "keyRotated"; epoch: number };
 
 const CLIENT_TAG = {
   auth: 0,
@@ -120,6 +130,7 @@ const CLIENT_TAG = {
   memberRemove: 16,
   enrollCreate: 17,
   memberSetRole: 18,
+  rotateKey: 19,
 } as const;
 const SERVER_TAG = {
   authOk: 0,
@@ -137,6 +148,7 @@ const SERVER_TAG = {
   memberCatalog: 12,
   enrollCreated: 13,
   ok: 14,
+  keyRotated: 15,
 } as const;
 
 const PERM_TAG: Record<SharePermission, number> = { read: 0, write: 1 };
@@ -194,10 +206,15 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
       encoding.writeVarString(enc, msg.memberId);
       encoding.writeVarUint(enc, ROLE_TAG[msg.role]);
       break;
+    case "rotateKey":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarUint(enc, msg.epoch);
+      break;
     case "push":
       encoding.writeVarString(enc, msg.docId);
       encoding.writeVarString(enc, msg.deviceId);
       encoding.writeVarUint(enc, msg.counter);
+      encoding.writeVarUint(enc, msg.epoch);
       encoding.writeVarUint8Array(enc, msg.payload);
       break;
     case "pull":
@@ -207,6 +224,7 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
     case "snapshotPush":
       encoding.writeVarString(enc, msg.docId);
       encoding.writeVarUint(enc, msg.uptoSeq);
+      encoding.writeVarUint(enc, msg.epoch);
       encoding.writeVarUint8Array(enc, msg.payload);
       break;
     case "snapshotPull":
@@ -284,12 +302,15 @@ export function decodeClientMessage(data: Uint8Array): ClientMessage {
         memberId: decoding.readVarString(dec),
         role: roleFromTag(decoding.readVarUint(dec)),
       };
+    case CLIENT_TAG.rotateKey:
+      return { type: "rotateKey", reqId: decoding.readVarUint(dec), epoch: decoding.readVarUint(dec) };
     case CLIENT_TAG.push:
       return {
         type: "push",
         docId: decoding.readVarString(dec),
         deviceId: decoding.readVarString(dec),
         counter: decoding.readVarUint(dec),
+        epoch: decoding.readVarUint(dec),
         payload: readPayload(dec),
       };
     case CLIENT_TAG.pull:
@@ -299,6 +320,7 @@ export function decodeClientMessage(data: Uint8Array): ClientMessage {
         type: "snapshotPush",
         docId: decoding.readVarString(dec),
         uptoSeq: decoding.readVarUint(dec),
+        epoch: decoding.readVarUint(dec),
         payload: readPayload(dec),
       };
     case CLIENT_TAG.snapshotPull:
@@ -334,6 +356,7 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
         encoding.writeVarUint(enc, doc.headSeq);
         encoding.writeVarUint(enc, doc.snapshotSeq);
       }
+      encoding.writeVarUint(enc, msg.epoch);
       break;
     case "authChallenge":
       encoding.writeVarUint8Array(enc, msg.nonce);
@@ -402,6 +425,7 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
         encoding.writeVarUint8Array(enc, m.pubSign);
         encoding.writeVarUint8Array(enc, m.pubWrap);
         encoding.writeVarUint(enc, ROLE_TAG[m.role]);
+        encoding.writeVarUint(enc, m.approved ? 1 : 0);
       }
       break;
     case "enrollCreated":
@@ -410,6 +434,9 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
       break;
     case "ok":
       encoding.writeVarUint(enc, msg.reqId);
+      break;
+    case "keyRotated":
+      encoding.writeVarUint(enc, msg.epoch);
       break;
   }
   return encoding.toUint8Array(enc);
@@ -429,7 +456,7 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
           snapshotSeq: decoding.readVarUint(dec),
         });
       }
-      return { type: "authOk", docs };
+      return { type: "authOk", docs, epoch: decoding.readVarUint(dec) };
     }
     case SERVER_TAG.authChallenge:
       return { type: "authChallenge", nonce: readPayload(dec) };
@@ -507,6 +534,7 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
           pubSign: readPayload(dec),
           pubWrap: readPayload(dec),
           role: roleFromTag(decoding.readVarUint(dec)),
+          approved: decoding.readVarUint(dec) === 1,
         });
       }
       return { type: "memberCatalog", reqId, members };
@@ -515,6 +543,8 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
       return { type: "enrollCreated", reqId: decoding.readVarUint(dec), token: decoding.readVarString(dec) };
     case SERVER_TAG.ok:
       return { type: "ok", reqId: decoding.readVarUint(dec) };
+    case SERVER_TAG.keyRotated:
+      return { type: "keyRotated", epoch: decoding.readVarUint(dec) };
     default:
       throw new Error(`未知的 server 訊息類型:${tag}`);
   }

@@ -98,15 +98,26 @@ export class TeamAdminSession {
     await this.request((reqId) => ({ type: "memberSetRole", reqId, memberId, role }), "ok");
   }
 
-  /** 核准某成員:以其 pubWrap 把 root 包成 owner 簽章信封並 push(核准前 UI 應先讓 owner 核對 pubWrap 指紋) */
-  async approve(member: MemberInfo, root: Uint8Array): Promise<void> {
-    const blob = await wrapKey(root, member.pubWrap, this.identity.sign, rootWrapContext(this.vaultId, member.memberId));
-    await this.request((reqId) => ({ type: "envelopePush", reqId, keyId: KEY_ID_ROOT, memberId: member.memberId, epoch: 0, blob }), "ok");
+  /**
+   * 核准某成員:以其 pubWrap 把 root 包成 owner 簽章信封並 push(核准前 UI 應先讓 owner 核對 pubWrap 指紋)。
+   * epoch 須為 vault 當前金鑰紀元(2c-2 輪換時對留任成員逐一以新 epoch 重包)。
+   */
+  async approve(member: MemberInfo, root: Uint8Array, epoch = 0): Promise<void> {
+    const blob = await wrapKey(root, member.pubWrap, this.identity.sign, rootWrapContext(this.vaultId, member.memberId, epoch));
+    await this.request((reqId) => ({ type: "envelopePush", reqId, keyId: KEY_ID_ROOT, memberId: member.memberId, epoch, blob }), "ok");
   }
 
-  /** 移除成員(刪 member 列 + 其信封;root 未輪換,留 2c) */
+  /** 移除成員(刪 member 列 + 其信封 + 踢連線);密碼層前向保密由呼叫端接著 rotateKey 輪換補上 */
   async remove(memberId: string): Promise<void> {
     await this.request((reqId) => ({ type: "memberRemove", reqId, memberId }), "ok");
+  }
+
+  /**
+   * 金鑰輪換 commit(2c-2):bump vault epoch(須恰為當前+1,伺服器 CAS 把關)。
+   * 這是柵欄點——此後伺服器拒舊 epoch 寫入並廣播 keyRotated;呼叫前務必先把新 epoch 信封推給全部留任成員。
+   */
+  async rotateKey(epoch: number): Promise<void> {
+    await this.request((reqId) => ({ type: "rotateKey", reqId, epoch }), "ok");
   }
 
   close(): void {

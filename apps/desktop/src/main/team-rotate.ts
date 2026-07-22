@@ -1,0 +1,62 @@
+import { TeamAdminSession, type TeamAdminOptions } from "@stele/sync";
+
+/**
+ * 金鑰輪換編排(2c-2,owner 端):踢人後換 newRoot、重加密全部 docs,補上密碼層前向保密。
+ * 唯一安全順序(見 plan §9.2,防舊 root 密文污染共享日誌):
+ *   1. 前置:owner 對每個 doc 都已拉齊;任一不齊 → 中止、epoch 不 bump、舊 root 續用
+ *   2. 為所有「已核准」留任成員(含 owner 自己)推 epoch=N+1 信封
+ *   3. rotateKey commit:伺服器 bump epoch(柵欄點)、拒舊 epoch 寫入、廣播 keyRotated
+ *   4. owner 在柵欄下逐 doc 以新 root 重推快照(rekeyAll,全冪等)
+ * 崩潰復原:呼叫端在 commit 前落 marker、rekey 全完成後清除;重啟見 marker 就重跑 rekeyUntilDone。
+ */
+
+export interface RotateTarget {
+  allCaughtUp(): boolean;
+  rotateRoot(newRoot: Uint8Array, epoch: number, repull?: boolean): Promise<void>;
+  rekeyAll(): Promise<boolean>;
+}
+
+export interface RotateOptions {
+  admin: TeamAdminOptions;
+  currentEpoch: number;
+  target: RotateTarget;
+  /**
+   * commit 已成功(epoch 已 bump)後立刻回呼:呼叫端據此更新 teamRuntime 的 root/epoch——
+   * 之後就算 rekey 中途失敗,狀態也已前移到新紀元,重試/重啟續跑即可
+   */
+  onCommitted(root: Uint8Array, epoch: number): void;
+  /** 測試可注入決定性 root;預設隨機 32B */
+  generateRoot?: () => Uint8Array;
+  /** rekeyAll 未全數完成(暫時離線/未拉齊)時的重試間隔與次數上限 */
+  retryMs?: number;
+  maxRetries?: number;
+}
+
+/** 全套輪換;回傳新 root 與 epoch。commit 前的任何失敗都不留半套狀態(epoch 未動、舊 root 續用) */
+export async function rotateTeamRoot(opts: RotateOptions): Promise<{ root: Uint8Array; epoch: number }> {
+  if (!opts.target.allCaughtUp()) throw new Error("尚有筆記未拉齊,金鑰輪換中止(稍後重試)");
+  const newRoot = opts.generateRoot?.() ?? crypto.getRandomValues(new Uint8Array(32));
+  const epoch = opts.currentEpoch + 1;
+  const admin = await TeamAdminSession.open(opts.admin);
+  try {
+    // 只重包已核准成員:pending 成員仍待 owner 核對指紋後 approve,輪換不得繞過這道核可
+    const members = (await admin.members()).filter((m) => m.approved);
+    for (const m of members) await admin.approve(m, newRoot, epoch);
+    await admin.rotateKey(epoch); // 柵欄點:成功即 commit,不可回頭
+  } finally {
+    admin.close();
+  }
+  opts.onCommitted(newRoot, epoch);
+  await opts.target.rotateRoot(newRoot, epoch, false); // owner 自己重加密,不 repull
+  await rekeyUntilDone(opts.target, opts.retryMs ?? 3000, opts.maxRetries ?? 20);
+  return { root: newRoot, epoch };
+}
+
+/** 逐輪重跑 rekeyAll(冪等)直到每個 doc 都以新金鑰重推完成;供輪換本體與重啟續跑共用 */
+export async function rekeyUntilDone(target: Pick<RotateTarget, "rekeyAll">, retryMs: number, maxRetries: number): Promise<void> {
+  for (let i = 0; ; i++) {
+    if (await target.rekeyAll()) return;
+    if (i >= maxRetries) throw new Error("金鑰輪換後的重加密未全數完成,重啟後會自動續跑");
+    await new Promise((r) => setTimeout(r, retryMs));
+  }
+}

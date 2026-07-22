@@ -73,12 +73,21 @@ export interface SyncClientOptions {
   cipher?: Cipher;
   /** 提供時走帶身分認證(challenge-response);未提供則走 legacy token-only auth */
   identity?: SyncIdentity;
+  /** vault 當前金鑰紀元(2c-2;team vault 由 bootstrap 的信封取得,個人 vault 省略 = 0);doc 寫入都帶它 */
+  epoch?: number;
+  /**
+   * 金鑰已輪換(keyRotated 廣播,或重連 authOk 發現 epoch 落後):推送已自動暫停,
+   * 呼叫端應重跑 bootstrap 取新 root、rotate 金鑰來源後呼叫 applyRotation 恢復收斂
+   */
+  onKeyRotated?(epoch: number): void;
   onStatus?(status: SyncStatus): void;
   /** 某 doc 的 awareness 狀態集變化(含遠端加入/離開);states 的 key 是 Yjs clientID */
   onAwareness?(docId: string, states: Map<number, AwarenessState>): void;
   pushDebounceMs?: number;
   /** 增量日誌超過快照點多少筆就上傳新快照 */
   snapshotThreshold?: number;
+  /** 輪換 repull 撞到尚未重加密的舊快照時,隔多久重拉一次 */
+  repullRetryMs?: number;
 }
 
 interface AwarenessEntry {
@@ -94,6 +103,8 @@ interface DocRuntime {
   dirty: boolean;
   pushTimer: ReturnType<typeof setTimeout> | undefined;
   pushedSv: Uint8Array | undefined;
+  /** 上次收到跳號 update 時已發過增量 pull:再跳號表示增量已被快照截斷(如輪換 rekey),改拉快照 */
+  gapPulled: boolean;
   onUpdate: (update: Uint8Array, origin: unknown) => void;
 }
 
@@ -101,6 +112,7 @@ const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
 const DEFAULT_PUSH_DEBOUNCE_MS = 300;
 const DEFAULT_SNAPSHOT_THRESHOLD = 200;
+const DEFAULT_REPULL_RETRY_MS = 3000;
 
 export class SyncClient {
   private readonly cipher: Cipher;
@@ -119,9 +131,19 @@ export class SyncClient {
   private shareReqId = 0;
   /** 訊息依到達順序處理,避免非同步解密造成亂序套用 */
   private rx: Promise<void> = Promise.resolve();
+  /** vault 金鑰紀元(2c-2):doc 寫入都帶它,伺服器以柵欄拒不符者 */
+  private epoch: number;
+  /** 輪換窗口:收到 keyRotated(或 authOk 發現落後)後暫停一切寫入,等 applyRotation 才恢復 */
+  private rotationPending = false;
+  /** 輪換後待以新金鑰重拉的 doc;撞到尚未重加密的舊快照就排程重試,直到收斂 */
+  private readonly pendingRepull = new Set<string>();
+  private repullTimer: ReturnType<typeof setTimeout> | undefined;
+  /** rekey 等待伺服器 snapshotAck 的回呼(docId → waiters):ack 才算完成,斷線一律以 false 收尾 */
+  private readonly snapshotAckWaiters = new Map<string, Array<(ok: boolean) => void>>();
 
   constructor(private readonly opts: SyncClientOptions) {
     this.cipher = opts.cipher ?? identityCipher;
+    this.epoch = opts.epoch ?? 0;
   }
 
   start(): void {
@@ -133,6 +155,7 @@ export class SyncClient {
   async stop(): Promise<void> {
     this.stopped = true;
     clearTimeout(this.reconnectTimer);
+    clearTimeout(this.repullTimer);
     if (this.awarenessTimer !== undefined) clearInterval(this.awarenessTimer);
     // 趁連線還在,主動告知對端本地離場,對端據此即時清掉游標(否則要等逾時)
     await this.announceLeave();
@@ -152,6 +175,7 @@ export class SyncClient {
     this.online = false;
     this.setStatus("offline");
     this.rejectPendingShares();
+    this.flushSnapshotAcks(false);
     await this.rx;
   }
 
@@ -234,6 +258,7 @@ export class SyncClient {
       this.online = false;
       this.setStatus("offline");
       this.rejectPendingShares(); // 未回覆的分享請求不留懸空 promise
+      this.flushSnapshotAcks(false); // 等 ack 的 rekey 以失敗收尾,呼叫端重試
       this.scheduleReconnect();
     };
   }
@@ -253,16 +278,98 @@ export class SyncClient {
    */
   async rekey(docId: string): Promise<boolean> {
     const rt = await this.ensure(docId);
-    if (!rt || !this.online) return false;
+    if (!rt || !this.online || this.rotationPending) return false;
     const knownHead = this.serverHeads.get(docId)?.headSeq ?? rt.state.lastSeq;
     if (rt.state.lastSeq < knownHead) return false; // 未拉齊
     const uptoSeq = knownHead + 1;
     const payload = await this.cipher.encrypt(docId, Y.encodeStateAsUpdate(rt.doc));
-    this.send({ type: "snapshotPush", docId, uptoSeq, payload });
+    this.send({ type: "snapshotPush", docId, uptoSeq, epoch: this.epoch, payload });
+    // 等伺服器 snapshotAck 才算數:輪換的 rekey「完成」意味著快照確實落盤,
+    // 否則 owner 在飛行窗口崩潰會清掉續跑標記、留下一篇舊金鑰 doc 讓成員永遠解不開
+    if (!(await this.waitSnapshotAck(docId))) return false;
     rt.state = { ...rt.state, lastSeq: uptoSeq };
     this.opts.host.saveState(docId, rt.state);
     this.serverHeads.set(docId, { docId, headSeq: uptoSeq, snapshotSeq: uptoSeq });
     return true;
+  }
+
+  private waitSnapshotAck(docId: string, timeoutMs = 10_000): Promise<boolean> {
+    return new Promise((resolve) => {
+      const done = (ok: boolean): void => {
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      const timer = setTimeout(() => done(false), timeoutMs);
+      const list = this.snapshotAckWaiters.get(docId) ?? [];
+      list.push(done);
+      this.snapshotAckWaiters.set(docId, list);
+    });
+  }
+
+  /** ack 到(ok)或連線斷(!ok):喚醒該 doc(或全部)等待中的 rekey */
+  private flushSnapshotAcks(ok: boolean, docId?: string): void {
+    const entries = docId === undefined ? [...this.snapshotAckWaiters.keys()] : [docId];
+    for (const id of entries) {
+      const list = this.snapshotAckWaiters.get(id);
+      if (!list) continue;
+      this.snapshotAckWaiters.delete(id);
+      for (const w of list) w(ok);
+    }
+  }
+
+  /**
+   * 金鑰輪換後的全量重加密(2c-2,owner 在柵欄下執行):對每個 doc 以新金鑰重推快照。
+   * 全冪等——owner 崩潰重啟後整套重跑一遍即補完。回傳是否每個 doc 都完成(false = 有 doc 未拉齊或離線)。
+   */
+  async rekeyAll(): Promise<boolean> {
+    const ids = new Set([...(await this.opts.host.listDocIds()), ...this.serverHeads.keys()]);
+    let all = true;
+    for (const docId of ids) {
+      if (!(await this.rekey(docId))) all = false;
+    }
+    return all;
+  }
+
+  /** 是否已拉齊伺服器上所有 doc(輪換前置檢查:未拉齊就 rekey 會蓋掉別人的內容,必須中止) */
+  allCaughtUp(): boolean {
+    if (!this.online) return false;
+    for (const [docId, head] of this.serverHeads) {
+      const rt = this.runtimes.get(docId);
+      if (!rt || rt.state.lastSeq < head.headSeq) return false;
+    }
+    return true;
+  }
+
+  /**
+   * 輪換收斂(2c-2):上層拿到新 root 並 rotate 金鑰來源後呼叫。前移 epoch、恢復推送;
+   * repull 時把所有 doc 以新金鑰重拉快照(對齊 rekey 後的新序列),owner 端(自己重加密)傳 false 跳過。
+   */
+  async applyRotation(epoch: number, repull = true): Promise<void> {
+    if (epoch < this.epoch) return;
+    this.epoch = epoch;
+    this.rotationPending = false;
+    if (!this.online) return; // 離線:重連 authOk 的 epoch 已相符,走正常 reconcile
+    const local = await this.opts.host.listDocIds();
+    for (const docId of new Set([...local, ...this.serverHeads.keys()])) {
+      const rt = await this.ensure(docId);
+      if (!rt) continue;
+      if (repull && this.serverHeads.has(docId)) {
+        // 全量重拉而非增量 pull:輪換重加密會截斷舊增量並使 seq 出現空洞,只有快照能對齊新序列
+        this.pendingRepull.add(docId);
+        this.send({ type: "snapshotPull", docId });
+      }
+      this.schedulePush(rt);
+    }
+  }
+
+  /** 撞到尚未重加密的舊快照:隔一陣子把 pendingRepull 名單重拉一輪,直到 owner 補完 */
+  private scheduleRepullRetry(): void {
+    if (this.repullTimer !== undefined || this.stopped) return;
+    this.repullTimer = setTimeout(() => {
+      this.repullTimer = undefined;
+      if (!this.online) return; // 重連後 applyRotation/reconcile 會接手
+      for (const docId of this.pendingRepull) this.send({ type: "snapshotPull", docId });
+    }, this.opts.repullRetryMs ?? DEFAULT_REPULL_RETRY_MS);
   }
 
   /**
@@ -315,6 +422,13 @@ export class SyncClient {
         this.serverHeads = new Map(msg.docs.map((d) => [d.docId, d]));
         // 斷線期間卡住的 in-flight 推送作廢,重連後重推
         for (const rt of this.runtimes.values()) rt.pushing = false;
+        // 離線期間錯過金鑰輪換:本地 root 已解不開伺服器內容,暫停一切寫入並通知上層
+        // 重跑 bootstrap 取新 root;收斂(repull + 恢復推送)交給 applyRotation
+        if (msg.epoch > this.epoch) {
+          this.rotationPending = true;
+          this.opts.onKeyRotated?.(msg.epoch);
+          break;
+        }
         const local = await this.opts.host.listDocIds();
         for (const docId of new Set([...local, ...this.serverHeads.keys()])) {
           await this.reconcile(docId);
@@ -326,9 +440,17 @@ export class SyncClient {
         const rt = await this.ensure(msg.docId);
         if (!rt || msg.seq <= rt.state.lastSeq) return;
         if (msg.seq > rt.state.lastSeq + 1) {
-          this.send({ type: "pull", docId: msg.docId, fromSeq: rt.state.lastSeq });
+          // 跳號:先試增量補齊;補完仍跳號 = 中間的增量已被快照截斷(輪換 rekey 或壓縮),只有快照能對齊
+          if (rt.gapPulled) {
+            rt.gapPulled = false;
+            this.send({ type: "snapshotPull", docId: msg.docId });
+          } else {
+            rt.gapPulled = true;
+            this.send({ type: "pull", docId: msg.docId, fromSeq: rt.state.lastSeq });
+          }
           return;
         }
+        rt.gapPulled = false;
         Y.applyUpdate(rt.doc, await this.cipher.decrypt(msg.docId, msg.payload), "sync");
         rt.state = { ...rt.state, lastSeq: msg.seq };
         this.opts.host.saveState(msg.docId, rt.state);
@@ -337,14 +459,32 @@ export class SyncClient {
       }
       case "snapshot": {
         const rt = await this.ensure(msg.docId);
-        if (!rt || msg.payload.length === 0) return;
-        if (msg.uptoSeq > rt.state.lastSeq) {
-          Y.applyUpdate(rt.doc, await this.cipher.decrypt(msg.docId, msg.payload), "sync");
+        if (!rt) return;
+        if (msg.payload.length > 0 && msg.uptoSeq > rt.state.lastSeq) {
+          let update: Uint8Array;
+          try {
+            update = await this.cipher.decrypt(msg.docId, msg.payload);
+          } catch (err) {
+            // 輪換窗口:owner 尚未以新 root 重加密此 doc,快照仍是舊金鑰密文 → 稍後重拉,絕不套用壞資料
+            if (this.pendingRepull.has(msg.docId)) {
+              this.scheduleRepullRetry();
+              return;
+            }
+            throw err;
+          }
+          Y.applyUpdate(rt.doc, update, "sync");
           rt.state = { ...rt.state, lastSeq: msg.uptoSeq };
           this.opts.host.saveState(msg.docId, rt.state);
+          rt.gapPulled = false;
         }
         const head = this.serverHeads.get(msg.docId);
-        if (head && head.headSeq > rt.state.lastSeq) {
+        const caughtUp = !head || rt.state.lastSeq >= head.headSeq;
+        if (caughtUp) this.pendingRepull.delete(msg.docId);
+        if (this.pendingRepull.has(msg.docId)) {
+          // 輪換 repull 還沒等到新快照(空快照或舊快照點):增量已被截斷,只能等重加密後的快照
+          this.scheduleRepullRetry();
+        } else {
+          // 快照後補拉增量:本地 head 資訊可能過期(輪換 rekey 會前移 seq),以現況問一次最保險,沒新增量就是空回覆
           this.send({ type: "pull", docId: msg.docId, fromSeq: rt.state.lastSeq });
         }
         break;
@@ -363,6 +503,7 @@ export class SyncClient {
         break;
       }
       case "snapshotAck":
+        this.flushSnapshotAcks(true, msg.docId);
         break;
       case "awareness": {
         const entry = await this.ensureAwareness(msg.docId);
@@ -380,6 +521,14 @@ export class SyncClient {
       case "shareCatalog": {
         this.pendingShare.get(msg.reqId)?.resolve(msg.shares);
         this.pendingShare.delete(msg.reqId);
+        break;
+      }
+      case "keyRotated": {
+        // 金鑰已輪換:立即暫停一切寫入(柵欄下舊 epoch 會被拒,更重要的是不能拿舊 root 產生新密文)
+        // 上層 bootstrap 到新 root 後呼叫 applyRotation 恢復。舊 epoch 的重複廣播忽略
+        if (msg.epoch <= this.epoch) break;
+        this.rotationPending = true;
+        this.opts.onKeyRotated?.(msg.epoch);
         break;
       }
       case "error":
@@ -473,6 +622,7 @@ export class SyncClient {
       dirty: false,
       pushTimer: undefined,
       pushedSv: undefined,
+      gapPulled: false,
       onUpdate: (_update, origin) => {
         if (origin === "sync") return;
         rt.dirty = true;
@@ -495,7 +645,7 @@ export class SyncClient {
   }
 
   private async push(rt: DocRuntime): Promise<void> {
-    if (!this.online || rt.pushing) {
+    if (!this.online || rt.pushing || this.rotationPending) {
       rt.dirty = true;
       return;
     }
@@ -514,19 +664,21 @@ export class SyncClient {
       docId: rt.docId,
       deviceId: this.opts.deviceId,
       counter: rt.state.counter,
+      epoch: this.epoch,
       payload: await this.cipher.encrypt(rt.docId, diff),
     });
   }
 
   /** 增量日誌拉長且本端已拉齊時,上傳全量快照讓伺服器截斷 */
   private async maybeCompact(rt: DocRuntime): Promise<void> {
+    if (this.rotationPending) return;
     const head = this.serverHeads.get(rt.docId);
     const snapshotSeq = head?.snapshotSeq ?? 0;
     const knownHead = head?.headSeq ?? 0;
     const threshold = this.opts.snapshotThreshold ?? DEFAULT_SNAPSHOT_THRESHOLD;
     if (rt.state.lastSeq < knownHead || rt.state.lastSeq - snapshotSeq < threshold) return;
     const payload = await this.cipher.encrypt(rt.docId, Y.encodeStateAsUpdate(rt.doc));
-    this.send({ type: "snapshotPush", docId: rt.docId, uptoSeq: rt.state.lastSeq, payload });
+    this.send({ type: "snapshotPush", docId: rt.docId, uptoSeq: rt.state.lastSeq, epoch: this.epoch, payload });
     this.serverHeads.set(rt.docId, {
       docId: rt.docId,
       headSeq: Math.max(knownHead, rt.state.lastSeq),

@@ -1142,6 +1142,8 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
   const [inviteOut, setInviteOut] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [members, setMembers] = useState<TeamMember[]>([]);
+  // 金鑰輪換(2c-2)結果:移除後自動輪換或手動輪換的成敗提示
+  const [rotateNote, setRotateNote] = useState<{ ok: boolean; reason?: string } | null>(null);
 
   const reload = (): void => {
     void window.stele.teamInfo().then((i) => {
@@ -1202,8 +1204,16 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
   const remove = (memberId: string): void => {
     if (!window.confirm(t("team.removeConfirm"))) return;
     run(async () => {
-      await window.stele.teamRemove(memberId);
+      const res = await window.stele.teamRemove(memberId);
+      setRotateNote({ ok: res.rotated, reason: res.error });
       reload();
+    });
+  };
+  const rotate = (): void => {
+    if (!window.confirm(t("team.rotate.confirm"))) return;
+    run(async () => {
+      const res = await window.stele.teamRotate();
+      setRotateNote({ ok: res.rotated, reason: res.error });
     });
   };
 
@@ -1280,15 +1290,18 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
                     <div className="team-member-id">
                       <code>{m.memberId.slice(0, 12)}…</code>
                       <span className="team-badge">{m.isOwner ? t("team.owner.badge") : t(`team.role.${m.role}`)}</span>
+                      {!m.isOwner && !m.approved && <span className="team-badge pending">{t("team.member.pendingBadge")}</span>}
                     </div>
                     <div className="team-fingerprint" title={t("team.member.fingerprintHint")}>
                       {m.fingerprint}
                     </div>
                     {!m.isOwner && (
                       <div className="team-member-actions">
-                        <button disabled={busy} onClick={() => approve(m.memberId)}>
-                          {t("team.member.approve")}
-                        </button>
+                        {!m.approved && (
+                          <button disabled={busy} onClick={() => approve(m.memberId)}>
+                            {t("team.member.approve")}
+                          </button>
+                        )}
                         {m.role === "viewer" ? (
                           <button disabled={busy} onClick={() => setRole(m.memberId, "editor")}>
                             {t("team.member.makeEditor")}
@@ -1306,6 +1319,16 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
                   </li>
                 ))}
               </ul>
+              <div className="team-rotate-row">
+                <button disabled={busy} onClick={rotate}>
+                  {busy ? t("team.rotate.busy") : t("team.rotate.button")}
+                </button>
+              </div>
+              {rotateNote && (
+                <p className={rotateNote.ok ? "placeholder" : "error"}>
+                  {rotateNote.ok ? t("team.rotate.done") : t("team.rotate.failed", { reason: rotateNote.reason ?? "" })}
+                </p>
+              )}
             </section>
           </>
         )}

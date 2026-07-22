@@ -192,4 +192,40 @@ describe("SyncStore", () => {
     // listMembers 帶角色
     expect(store.listMembers("t").find((m) => m.memberId === "owner")!.role).toBe("owner");
   });
+
+  it("vault epoch:無 owner 恆 0;bumpEpoch CAS 只接受恰為當前+1", () => {
+    const store = makeStore();
+    // 非 team vault(無 owner 列):epoch 0,bump 一律失敗
+    expect(store.epochOf("t")).toBe(0);
+    expect(store.bumpEpoch("t", 1)).toBe(false);
+    // team vault:claimOwner 後 epoch 從 0 起
+    store.claimOwner("t", "owner");
+    expect(store.epochOf("t")).toBe(0);
+    // 跳號或原地都拒
+    expect(store.bumpEpoch("t", 0)).toBe(false);
+    expect(store.bumpEpoch("t", 2)).toBe(false);
+    expect(store.epochOf("t")).toBe(0);
+    // 恰為當前+1 才成功
+    expect(store.bumpEpoch("t", 1)).toBe(true);
+    expect(store.epochOf("t")).toBe(1);
+    // 重放同號(冪等重試場景)失敗但不破壞狀態
+    expect(store.bumpEpoch("t", 1)).toBe(false);
+    expect(store.bumpEpoch("t", 2)).toBe(true);
+    expect(store.epochOf("t")).toBe(2);
+  });
+
+  it("分享綁建立當下 epoch:輪換後舊分享失效(金鑰已換,連結內金鑰作廢)", () => {
+    const store = makeStore();
+    store.claimOwner("t", "owner");
+    store.createShare("s1", "t", "doc-1", "read");
+    expect(store.resolveShare("s1")).toBeDefined();
+    store.bumpEpoch("t", 1);
+    expect(store.resolveShare("s1")).toBeUndefined();
+    // 輪換後新建的分享有效
+    store.createShare("s2", "t", "doc-1", "write");
+    expect(store.resolveShare("s2")).toMatchObject({ vaultId: "t", docId: "doc-1", permission: "write" });
+    // 個人 vault(無 owner)不受影響
+    store.createShare("p1", "personal", "doc-9", "read");
+    expect(store.resolveShare("p1")).toBeDefined();
+  });
 });

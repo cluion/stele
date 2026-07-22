@@ -687,6 +687,10 @@ body {
 .team-member-id { display: flex; align-items: center; gap: var(--sp-2); }
 .team-member-id code { font-size: var(--fs-sm); color: var(--text-muted); }
 .team-badge { font-size: var(--fs-sm); padding: 0 var(--sp-1); border-radius: var(--radius-sm); background: var(--accent); color: var(--bg); }
+.team-badge.pending { background: var(--text-faint); }
+.team-rotate-row { margin-top: var(--sp-2); }
+.team-rotate-row button { font-size: var(--fs-sm); padding: var(--sp-1) var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); }
+.team-rotate-row button:hover { border-color: var(--accent); color: var(--accent); }
 .team-fingerprint { font-family: ui-monospace, monospace; font-size: var(--fs-sm); letter-spacing: 0.05em; color: var(--text); }
 .team-member-actions { display: flex; gap: var(--sp-2); }
 .team-member-actions button { font-size: var(--fs-sm); padding: var(--sp-1) var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); }

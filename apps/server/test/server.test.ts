@@ -104,7 +104,7 @@ describe("同步伺服器", () => {
   it("未認證就推送:拒絕並關閉", async () => {
     const client = new TestClient(server.port);
     await client.open();
-    client.send({ type: "push", docId: "d1", deviceId: "dev", counter: 1, payload: new Uint8Array([1]) });
+    client.send({ type: "push", docId: "d1", deviceId: "dev", counter: 1, epoch: 0, payload: new Uint8Array([1]) });
     const err = await client.next("error");
     expect(err.code).toBe("unauthorized");
     await client.closed;
@@ -127,7 +127,7 @@ describe("同步伺服器", () => {
     await b.auth("vault-廣播");
     await other.auth("vault-別人");
 
-    a.send({ type: "push", docId: "廣播-d1", deviceId: "devA", counter: 1, payload: new Uint8Array([42]) });
+    a.send({ type: "push", docId: "廣播-d1", deviceId: "devA", counter: 1, epoch: 0, payload: new Uint8Array([42]) });
     const ack = await a.next("ack");
     expect(ack).toMatchObject({ docId: "廣播-d1", counter: 1, seq: 1 });
 
@@ -147,7 +147,7 @@ describe("同步伺服器", () => {
     const a = new TestClient(server.port);
     await a.auth("vault-補齊");
     for (let i = 1; i <= 3; i++) {
-      a.send({ type: "push", docId: "補-d1", deviceId: "devA", counter: i, payload: new Uint8Array([i]) });
+      a.send({ type: "push", docId: "補-d1", deviceId: "devA", counter: i, epoch: 0, payload: new Uint8Array([i]) });
       await a.next("ack");
     }
     a.close();
@@ -165,10 +165,10 @@ describe("同步伺服器", () => {
     const a = new TestClient(server.port);
     await a.auth("vault-快照");
     for (let i = 1; i <= 4; i++) {
-      a.send({ type: "push", docId: "快-d1", deviceId: "devA", counter: i, payload: new Uint8Array([i]) });
+      a.send({ type: "push", docId: "快-d1", deviceId: "devA", counter: i, epoch: 0, payload: new Uint8Array([i]) });
       await a.next("ack");
     }
-    a.send({ type: "snapshotPush", docId: "快-d1", uptoSeq: 3, payload: new Uint8Array([9, 9]) });
+    a.send({ type: "snapshotPush", docId: "快-d1", uptoSeq: 3, epoch: 0, payload: new Uint8Array([9, 9]) });
     const snapAck = await a.next("snapshotAck");
     expect(snapAck.uptoSeq).toBe(3);
     a.close();
@@ -192,7 +192,7 @@ describe("同步伺服器", () => {
     await b.auth("vault-斷線");
     a.terminate();
     await new Promise((r) => setTimeout(r, 100));
-    b.send({ type: "push", docId: "斷-d1", deviceId: "devB", counter: 1, payload: new Uint8Array([1]) });
+    b.send({ type: "push", docId: "斷-d1", deviceId: "devB", counter: 1, epoch: 0, payload: new Uint8Array([1]) });
     expect((await b.next("ack")).seq).toBe(1);
     b.close();
   });
@@ -200,14 +200,14 @@ describe("同步伺服器", () => {
   it("超長與含穿越素材的 docId 被拒", async () => {
     const c = new TestClient(server.port);
     await c.auth("vault-長id");
-    c.send({ type: "push", docId: "x".repeat(129), deviceId: "dev", counter: 1, payload: new Uint8Array([1]) });
+    c.send({ type: "push", docId: "x".repeat(129), deviceId: "dev", counter: 1, epoch: 0, payload: new Uint8Array([1]) });
     const err = await c.next("error");
     expect(err.code).toBe("bad-message");
     await c.closed;
 
     const c2 = new TestClient(server.port);
     await c2.auth("vault-長id");
-    c2.send({ type: "push", docId: "a/../b", deviceId: "dev", counter: 1, payload: new Uint8Array([1]) });
+    c2.send({ type: "push", docId: "a/../b", deviceId: "dev", counter: 1, epoch: 0, payload: new Uint8Array([1]) });
     expect((await c2.next("error")).code).toBe("bad-message");
     await c2.closed;
   });
@@ -215,7 +215,7 @@ describe("同步伺服器", () => {
   it("vault 命名空間隔離:同名 doc 讀不到他人資料也互不干擾", async () => {
     const a = new TestClient(server.port);
     await a.auth("vault-甲");
-    a.send({ type: "push", docId: "共用名-d1", deviceId: "devA", counter: 1, payload: new Uint8Array([1]) });
+    a.send({ type: "push", docId: "共用名-d1", deviceId: "devA", counter: 1, epoch: 0, payload: new Uint8Array([1]) });
     await a.next("ack");
     a.close();
 
@@ -227,7 +227,7 @@ describe("同步伺服器", () => {
     const snap = await other.next("snapshot");
     expect(snap.payload.length).toBe(0); // 空快照,如同不存在
     expect(other.peekInbox().filter((m) => m.type === "update")).toEqual([]);
-    other.send({ type: "push", docId: "共用名-d1", deviceId: "devO", counter: 1, payload: new Uint8Array([7]) });
+    other.send({ type: "push", docId: "共用名-d1", deviceId: "devO", counter: 1, epoch: 0, payload: new Uint8Array([7]) });
     expect((await other.next("ack")).seq).toBe(1); // 自己命名空間的新 doc,從 1 起算
     other.close();
   });

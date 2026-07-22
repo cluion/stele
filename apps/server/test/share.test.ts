@@ -88,7 +88,7 @@ describe("分享連結", () => {
     const owner = new Client(server.port);
     await owner.auth(vaultId);
     // 先塞一筆內容讓 doc 存在
-    owner.send({ type: "push", docId, deviceId: "owner", counter: 1, payload: new Uint8Array([1, 2, 3]) });
+    owner.send({ type: "push", docId, deviceId: "owner", counter: 1, epoch: 0, payload: new Uint8Array([1, 2, 3]) });
     await owner.next("ack");
     owner.send({ type: "shareCreate", reqId: 7, docId, permission });
     const created = await owner.next("shareCreated");
@@ -107,7 +107,7 @@ describe("分享連結", () => {
     const update = await guest.next("update");
     expect(Array.from(update.payload)).toEqual([1, 2, 3]);
 
-    guest.send({ type: "push", docId: "doc-唯讀", deviceId: "guest", counter: 1, payload: new Uint8Array([9]) });
+    guest.send({ type: "push", docId: "doc-唯讀", deviceId: "guest", counter: 1, epoch: 0, payload: new Uint8Array([9]) });
     const err = await guest.next("error");
     expect(err.code).toBe("forbidden");
     await guest.closed;
@@ -119,7 +119,7 @@ describe("分享連結", () => {
     const guest = new Client(server.port);
     await guest.shareAuth(shareId);
     // snapshotPush 會呼叫 saveSnapshot 覆寫並截斷,是寫入操作,唯讀連線必須擋
-    guest.send({ type: "snapshotPush", docId: "doc-唯讀快照", uptoSeq: 1, payload: new Uint8Array([0, 0]) });
+    guest.send({ type: "snapshotPush", docId: "doc-唯讀快照", uptoSeq: 1, epoch: 0, payload: new Uint8Array([0, 0]) });
     expect((await guest.next("error")).code).toBe("forbidden");
     await guest.closed;
     owner.close();
@@ -130,7 +130,7 @@ describe("分享連結", () => {
     const guest = new Client(server.port);
     await guest.shareAuth(shareId);
 
-    guest.send({ type: "push", docId: "doc-可編輯", deviceId: "guest", counter: 1, payload: new Uint8Array([42]) });
+    guest.send({ type: "push", docId: "doc-可編輯", deviceId: "guest", counter: 1, epoch: 0, payload: new Uint8Array([42]) });
     expect((await guest.next("ack")).seq).toBe(2);
     const update = await owner.next("update");
     expect(Array.from(update.payload)).toEqual([42]);
@@ -151,7 +151,7 @@ describe("分享連結", () => {
   it("廣播按作用域過濾:分享連線只收得到自己那篇", async () => {
     const owner = new Client(server.port);
     await owner.auth("vault-過濾");
-    owner.send({ type: "push", docId: "分享篇", deviceId: "owner", counter: 1, payload: new Uint8Array([1]) });
+    owner.send({ type: "push", docId: "分享篇", deviceId: "owner", counter: 1, epoch: 0, payload: new Uint8Array([1]) });
     await owner.next("ack");
     owner.send({ type: "shareCreate", reqId: 1, docId: "分享篇", permission: "read" });
     const shareId = (await owner.next("shareCreated")).shareId;
@@ -160,10 +160,10 @@ describe("分享連結", () => {
     await guest.shareAuth(shareId);
 
     // owner 改動「別篇」——同 vault 但不在分享範圍,guest 不該收到
-    owner.send({ type: "push", docId: "別篇", deviceId: "owner", counter: 1, payload: new Uint8Array([2]) });
+    owner.send({ type: "push", docId: "別篇", deviceId: "owner", counter: 1, epoch: 0, payload: new Uint8Array([2]) });
     await owner.next("ack");
     // owner 改動「分享篇」——guest 應收到
-    owner.send({ type: "push", docId: "分享篇", deviceId: "owner", counter: 2, payload: new Uint8Array([3]) });
+    owner.send({ type: "push", docId: "分享篇", deviceId: "owner", counter: 2, epoch: 0, payload: new Uint8Array([3]) });
     await owner.next("ack");
 
     const update = await guest.next("update");
@@ -187,7 +187,7 @@ describe("分享連結", () => {
   it("撤銷後分享失效,收件人認證被拒", async () => {
     const owner = new Client(server.port);
     await owner.auth("vault-撤銷");
-    owner.send({ type: "push", docId: "doc-撤銷", deviceId: "owner", counter: 1, payload: new Uint8Array([1]) });
+    owner.send({ type: "push", docId: "doc-撤銷", deviceId: "owner", counter: 1, epoch: 0, payload: new Uint8Array([1]) });
     await owner.next("ack");
     owner.send({ type: "shareCreate", reqId: 1, docId: "doc-撤銷", permission: "read" });
     const shareId = (await owner.next("shareCreated")).shareId;
@@ -217,7 +217,7 @@ describe("分享連結", () => {
     await guest.closed;
 
     // 撤銷後 owner 續寫:已被踢的連線不可能再收到任何更新
-    owner.send({ type: "push", docId: "doc-撤銷即時", deviceId: "owner", counter: 2, payload: new Uint8Array([7]) });
+    owner.send({ type: "push", docId: "doc-撤銷即時", deviceId: "owner", counter: 2, epoch: 0, payload: new Uint8Array([7]) });
     await owner.next("ack");
     expect(guest.peekInbox().some((m) => m.type === "update")).toBe(false);
     owner.close();
@@ -238,7 +238,7 @@ describe("分享連結", () => {
     await victim.closed;
 
     // 另一則分享仍活著:續寫仍收得到
-    owner.send({ type: "push", docId: "doc-撤銷隔離", deviceId: "owner", counter: 2, payload: new Uint8Array([5]) });
+    owner.send({ type: "push", docId: "doc-撤銷隔離", deviceId: "owner", counter: 2, epoch: 0, payload: new Uint8Array([5]) });
     await owner.next("ack");
     const update = await bystander.next("update");
     expect(Array.from(update.payload)).toEqual([5]);
@@ -258,7 +258,7 @@ describe("分享連結", () => {
     await attacker.next("shareCatalog");
     await new Promise((r) => setTimeout(r, 150));
 
-    victimOwner.send({ type: "push", docId: "doc-受害", deviceId: "owner", counter: 2, payload: new Uint8Array([6]) });
+    victimOwner.send({ type: "push", docId: "doc-受害", deviceId: "owner", counter: 2, epoch: 0, payload: new Uint8Array([6]) });
     await victimOwner.next("ack");
     const update = await guest.next("update");
     expect(Array.from(update.payload)).toEqual([6]);
@@ -288,7 +288,7 @@ describe("分享連結", () => {
   it("shareList 列出本 vault 全部分享,異 vault 看不到", async () => {
     const owner = new Client(server.port);
     await owner.auth("vault-清單");
-    owner.send({ type: "push", docId: "d1", deviceId: "o", counter: 1, payload: new Uint8Array([1]) });
+    owner.send({ type: "push", docId: "d1", deviceId: "o", counter: 1, epoch: 0, payload: new Uint8Array([1]) });
     await owner.next("ack");
     owner.send({ type: "shareCreate", reqId: 1, docId: "d1", permission: "read" });
     await owner.next("shareCreated");

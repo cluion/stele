@@ -127,6 +127,12 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
       spaces?: SpaceKeySource;
       /** 成員身分:提供時走帶身分認證(challenge-response);未提供則走 legacy token-only auth */
       identity?: SyncIdentity;
+      /** vault 金鑰紀元(2c-2,team vault 由 bootstrap 取得;個人 vault 省略 = 0) */
+      epoch?: number;
+      /** 金鑰已輪換:推送已暫停,呼叫端應重跑 bootstrap 取新 root 後呼叫 rotateRoot 收斂 */
+      onKeyRotated?: (epoch: number) => void;
+      /** 輪換 repull 撞到尚未重加密的舊快照時的重試間隔(測試調短) */
+      repullRetryMs?: number;
     },
   ) {
     this.self = {
@@ -166,6 +172,9 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
       deviceId: settings.deviceId,
       host: this.makeHost(),
       identity: tuning?.identity,
+      epoch: tuning?.epoch,
+      onKeyRotated: tuning?.onKeyRotated,
+      repullRetryMs: tuning?.repullRetryMs,
       createSocket: (url) => new WebSocket(url) as unknown as SocketLike,
       onStatus: (status) => {
         const wasOffline = this.status !== "online";
@@ -256,6 +265,28 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
     const doc = this.loose.get(docId);
     if (doc) this.loose.delete(docId);
     return doc;
+  }
+
+  // ── 金鑰輪換(2c-2) ──
+
+  /**
+   * 換 root 收斂:原地 rotate 金鑰來源(routingCipher 閉包自動走新金鑰)、前移 epoch 恢復推送。
+   * 成員端 repull=true 全量重拉;owner 端(自己重加密)傳 false,隨後呼叫 rekeyAll。
+   */
+  async rotateRoot(newRoot: Uint8Array, epoch: number, repull = true): Promise<void> {
+    if (!this.spaces?.rotate) throw new Error("此 vault 的金鑰來源不支援輪換");
+    this.spaces.rotate(newRoot);
+    await this.client.applyRotation(epoch, repull);
+  }
+
+  /** 是否已拉齊伺服器上所有 doc(owner 輪換前置檢查;未拉齊必須中止輪換) */
+  allCaughtUp(): boolean {
+    return this.client.allCaughtUp();
+  }
+
+  /** owner 輪換後在柵欄下對每個 doc 以新金鑰重推快照(冪等);回傳是否全部完成 */
+  rekeyAll(): Promise<boolean> {
+    return this.client.rekeyAll();
   }
 
   /** 上線後補推移動當下未能重推的快照,直到成功才移出待辦 */

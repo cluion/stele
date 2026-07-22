@@ -267,13 +267,28 @@ export interface SpaceKeySource {
   spaceKey(spaceId: string): Promise<Uint8Array>;
   /** 該空間的密碼器,內部再依 docId 衍生每篇筆記金鑰(可 exportDocKey 供分享連結用) */
   cipher(spaceId: string): Promise<VaultCipher>;
+  /** 金鑰輪換(2c-2,團隊 vault):原地換 root,後續 cipher 全走新金鑰;不支援輪換的實作可缺席 */
+  rotate?(newMasterKey: Uint8Array): void;
 }
 
 /** Slice 1 實作:個人 vault,所有空間金鑰皆由主金鑰衍生(預設空間 = 主金鑰,零遷移) */
 export class MasterKeySpaces implements SpaceKeySource {
   private readonly ciphers = new Map<string, Promise<VaultCipher>>();
+  private masterKey: Uint8Array;
 
-  constructor(private readonly masterKey: Uint8Array) {}
+  constructor(masterKey: Uint8Array) {
+    this.masterKey = masterKey.slice();
+  }
+
+  /**
+   * 原地換 root(2c-2 金鑰輪換):清 cipher 快取,後續衍生全走新金鑰。
+   * 刻意 mutate 而非重建實例:SyncManager 的 routingCipher 閉包每次現算 cipher(spaceId),
+   * 換 root 自動生效,session/loose/awareness 全保留,不必拆重建 SyncManager。
+   */
+  rotate(newMasterKey: Uint8Array): void {
+    this.masterKey = newMasterKey.slice();
+    this.ciphers.clear();
+  }
 
   spaceKey(spaceId: string): Promise<Uint8Array> {
     return deriveSpaceKey(this.masterKey, spaceId);

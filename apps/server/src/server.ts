@@ -23,7 +23,7 @@ const ENROLL_TTL_MAX = 7 * 24 * 60 * 60;
 /** 團隊金鑰分發與成員管理訊息(需身分認證,授權按 owner/self 把關) */
 type TeamAdminMessage = Extract<
   ClientMessage,
-  { type: "claimOwner" | "envelopePush" | "envelopePull" | "memberList" | "memberRemove" | "enrollCreate" | "memberSetRole" }
+  { type: "claimOwner" | "envelopePush" | "envelopePull" | "memberList" | "memberRemove" | "enrollCreate" | "memberSetRole" | "rotateKey" }
 >;
 
 const CONTENT_TYPE: Record<string, string> = {
@@ -200,7 +200,7 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
       vaultId = msg.vaultId;
       clearTimeout(authTimer);
       joinVault(vaultId);
-      send({ type: "authOk", docs: opts.store.headSeqs(vaultId) });
+      send({ type: "authOk", docs: opts.store.headSeqs(vaultId), epoch: opts.store.epochOf(vaultId) });
     };
 
     // 帶身分認證第一階段:token 准入 + 宣稱身分 → 回每連線新生的 nonce 供簽章(防重放)
@@ -291,7 +291,8 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
       trackMember(vaultId, memberId, ws);
       clearTimeout(authTimer);
       joinVault(vaultId);
-      send({ type: "authOk", docs: opts.store.headSeqs(vaultId) });
+      // epoch 隨 authOk 告知:錯過輪換的成員(離線期間被 bump)據此發現須重跑 bootstrap 取新 root
+      send({ type: "authOk", docs: opts.store.headSeqs(vaultId), epoch: opts.store.epochOf(vaultId) });
     };
 
     // 收件人以 shareId 認證:解析出作用域後併入該 doc 所屬 vault 的 peer 集,只是廣播被 restrictedDoc 過濾
@@ -440,6 +441,28 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
           send({ type: "ok", reqId: msg.reqId });
           break;
         }
+        case "rotateKey": {
+          // 金鑰輪換 commit(2c-2):CAS bump epoch,即為寫入柵欄點——此後舊 epoch 寫入一律被拒。
+          // owner 呼叫前已為留任成員推好新 epoch 信封,故廣播 keyRotated 時成員必能 bootstrap 到新 root
+          if (!requireOwner()) return;
+          if (!opts.store.bumpEpoch(vault, msg.epoch)) {
+            refuse("bad-epoch", "epoch 須恰為當前+1");
+            return;
+          }
+          const rotated = encodeServerMessage({ type: "keyRotated", epoch: msg.epoch });
+          for (const peer of vaults.get(vault) ?? []) {
+            if (peer.readyState !== WebSocket.OPEN) continue;
+            if (restrictedDoc.has(peer)) {
+              // 分享連線:doc 金鑰由 root 衍生,輪換即作廢;當場踢掉,resolveShare 綁 epoch 擋重連
+              peer.send(encodeServerMessage({ type: "error", code: "no-share", message: "分享不存在或已失效" }));
+              peer.close();
+            } else if (peer !== ws) {
+              peer.send(rotated);
+            }
+          }
+          send({ type: "ok", reqId: msg.reqId });
+          break;
+        }
         case "enrollCreate": {
           if (!requireOwner()) return;
           const token = randomBytes(24).toString("base64url");
@@ -461,7 +484,8 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         msg.type === "memberList" ||
         msg.type === "memberRemove" ||
         msg.type === "enrollCreate" ||
-        msg.type === "memberSetRole"
+        msg.type === "memberSetRole" ||
+        msg.type === "rotateKey"
       ) {
         if (scope !== undefined) {
           refuse("forbidden", "分享連線不得管理團隊");
@@ -508,6 +532,18 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         memberRole !== "editor"
       ) {
         refuse("forbidden", "唯讀成員不得寫入");
+        return;
+      }
+      // epoch 寫入柵欄(2c-2):team vault 的 doc 寫入須帶當前 epoch,防輪換窗口內舊 root 密文
+      // 接在新快照後永久污染共享日誌。share 連線不套(輪換當下已被踢 + resolveShare 綁 epoch 擋重連);
+      // 個人 vault 無紀元概念(epochOf 恆 0、client 恆送 0),不受影響
+      if (
+        scope === undefined &&
+        (msg.type === "push" || msg.type === "snapshotPush") &&
+        opts.store.ownerOf(vault) !== undefined &&
+        msg.epoch !== opts.store.epochOf(vault)
+      ) {
+        refuse("stale-epoch", "金鑰已輪換,請重新取得團隊金鑰");
         return;
       }
       switch (msg.type) {

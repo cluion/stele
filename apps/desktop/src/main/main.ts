@@ -9,6 +9,7 @@ import { deriveVaultKey, MasterKeySpaces, bootstrapTeamKey, createTeamVault, Tea
 import type { SocketLike, MemberRole } from "@stele/sync";
 import { SyncManager, type SyncSettings } from "./sync-manager.ts";
 import { encodeInvite, decodeInvite } from "./team-invite.ts";
+import { rotateTeamRoot, rekeyUntilDone } from "./team-rotate.ts";
 import { VaultMeta } from "./vault-meta.ts";
 import { SpacesService } from "./spaces-service.ts";
 import { CommentStore } from "./comment-store.ts";
@@ -109,8 +110,15 @@ function loadSyncSettings(root: string): LoadedSync | undefined {
   }
 }
 
-/** 目前 team vault 的執行態(供 owner 管理 IPC 與 pending 重試);切 vault 時重設 */
-let teamRuntime: { settings: SyncSettings; ownerPubSign: Uint8Array; role: MemberRole; root: Uint8Array | undefined } | undefined;
+/** 目前 team vault 的執行態(供 owner 管理 IPC 與 pending 重試);切 vault 時重設。epoch = 當前金鑰紀元 */
+let teamRuntime:
+  | { settings: SyncSettings; ownerPubSign: Uint8Array; role: MemberRole; root: Uint8Array | undefined; epoch: number }
+  | undefined;
+/** 成員端收 keyRotated 後重試 bootstrap 的計時器;切 vault 時清除 */
+let rotateRetryTimer: NodeJS.Timeout | undefined;
+
+/** 輪換 commit 後、重加密完成前的崩潰復原標記(owner 端;rekey 全冪等,重啟見標記即續跑) */
+const rekeyMarkerFile = (vaultRoot: string): string => path.join(vaultRoot, ".stele", "rekey-pending.json");
 
 /** 建 socket:與 SyncManager 給 SyncClient 的同形,供 bootstrap/admin 對伺服器握手 */
 const createTeamSocket = (url: string): SocketLike => new WebSocket(url) as unknown as SocketLike;
@@ -200,6 +208,7 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
     if (rel) sendAll("comments:update", rel, update);
   });
   teamRuntime = undefined;
+  clearTimeout(rotateRetryTimer);
   const loaded = SMOKE ? undefined : loadSyncSettings(next.root);
   if (loaded) {
     const memberIdentity = await getIdentity();
@@ -208,7 +217,7 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
       keySource = new MasterKeySpaces(await deriveVaultKey(loaded.passphrase, loaded.settings.vaultId));
     } else {
       // team:先跑獨立 bootstrap 拿 root(避開 SyncClient authOk 立即解 vault-meta 的死結)
-      teamRuntime = { settings: loaded.settings, ownerPubSign: loaded.ownerPubSign, role: loaded.role, root: undefined };
+      teamRuntime = { settings: loaded.settings, ownerPubSign: loaded.ownerPubSign, role: loaded.role, root: undefined, epoch: 0 };
       try {
         const res = await bootstrapTeamKey({
           url: loaded.settings.url,
@@ -223,6 +232,7 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
         if (loaded.enrollmentToken) clearEnrollmentToken(next.root);
         if (res.status === "ready") {
           teamRuntime.root = res.root;
+          teamRuntime.epoch = res.epoch;
           keySource = new MasterKeySpaces(res.root);
         } else {
           // pending:owner 尚未包 root 給我。不 start sync、不碰 vault-meta;重連或重開 vault 時重試
@@ -237,6 +247,8 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
       syncManager = new SyncManager(next, loaded.settings, meta, broadcastSyncStatus, {
         spaces: keySource,
         identity: memberIdentity,
+        epoch: teamRuntime?.epoch,
+        onKeyRotated: teamRuntime ? (epoch) => void handleKeyRotated(epoch) : undefined,
         onPresence: (rel, participants) => {
           for (const w of windows) {
             if (!w.isDestroyed()) w.webContents.send("presence:update", rel, participants);
@@ -247,6 +259,14 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
       spaces.setSyncHooks(syncManager);
       comments.setSyncHooks(syncManager);
       syncManager.start();
+      // 上次輪換 commit 後重加密沒跑完(崩潰/斷線):owner 重啟續跑,rekey 全冪等
+      if (teamRuntime && existsSync(rekeyMarkerFile(next.root)) && Buffer.from(memberIdentity.pubSign).equals(Buffer.from(teamRuntime.ownerPubSign))) {
+        const manager = syncManager;
+        const markerPath = rekeyMarkerFile(next.root);
+        void rekeyUntilDone(manager, 3000, 200)
+          .then(() => rmSync(markerPath, { force: true }))
+          .catch((err: unknown) => console.error("輪換重加密續跑失敗:", err));
+      }
     }
   } else {
     broadcastSyncStatus("off");
@@ -370,6 +390,73 @@ ipcMain.handle("spaces:audit", () => spaces?.readAudit() ?? []);
 
 // ── 團隊(2b):建立/加入/邀請/核准/移除。owner 管理走短命 TeamAdminSession,不動 doc 同步連線 ──
 
+/**
+ * 成員端收到 keyRotated(或重連發現 epoch 落後):SyncClient 已暫停推送,
+ * 重跑 bootstrap 取新 epoch 的 root → rotateRoot 收斂(換金鑰 + 全量 repull)。
+ * 信封未到(理論上 owner 在 commit 前已推好,此為網路容錯)→ 稍後重試。
+ */
+async function handleKeyRotated(epoch: number): Promise<void> {
+  const rt = teamRuntime;
+  const manager = syncManager;
+  if (!rt || !manager || rt.epoch >= epoch) return; // owner 自己發起的輪換已就地處理
+  try {
+    const me = await getIdentity();
+    const res = await bootstrapTeamKey({
+      url: rt.settings.url,
+      token: rt.settings.token,
+      vaultId: rt.settings.vaultId,
+      identity: me,
+      ownerPubSign: rt.ownerPubSign,
+      createSocket: createTeamSocket,
+    });
+    if (teamRuntime !== rt || syncManager !== manager) return; // 期間切了 vault,作廢
+    if (res.status === "ready" && res.epoch >= epoch) {
+      rt.root = res.root;
+      rt.epoch = res.epoch;
+      await manager.rotateRoot(res.root, res.epoch);
+      return;
+    }
+  } catch (err) {
+    console.error("金鑰輪換後重新 bootstrap 失敗:", err);
+  }
+  clearTimeout(rotateRetryTimer);
+  rotateRetryTimer = setTimeout(() => void handleKeyRotated(epoch), 5000);
+}
+
+/**
+ * owner 端輪換(移除成員後自動觸發,或手動重試):換 newRoot、重包留任成員、commit、重加密全部 docs。
+ * 失敗回 rotated:false 與原因;commit 前失敗不留半套狀態,commit 後的 rekey 中斷由 marker 續跑。
+ */
+async function rotateNow(): Promise<{ rotated: boolean; error?: string }> {
+  const rt = teamRuntime;
+  const manager = syncManager;
+  if (!rt?.root || !manager) return { rotated: false, error: "尚未取得團隊金鑰或同步未啟用" };
+  const markerPath = rekeyMarkerFile(requireSession().root);
+  try {
+    const me = await getIdentity();
+    await rotateTeamRoot({
+      admin: { ...rt.settings, identity: me, createSocket: createTeamSocket },
+      currentEpoch: rt.epoch,
+      target: manager,
+      onCommitted: (root, epoch) => {
+        // commit 即不可回頭:先落 crash marker 再前移執行態,rekey 中斷也能重啟續跑
+        try {
+          writeFileSync(markerPath, JSON.stringify({ epoch, at: Date.now() }));
+        } catch (err) {
+          console.error("輪換標記落盤失敗:", err);
+        }
+        rt.root = root;
+        rt.epoch = epoch;
+      },
+    });
+    rmSync(markerPath, { force: true });
+    return { rotated: true };
+  } catch (err) {
+    console.error("金鑰輪換失敗:", err);
+    return { rotated: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /** 目前 vault 的 team 狀態,供 renderer 決定顯示哪些入口 */
 ipcMain.handle("team:info", async () => {
   if (!teamRuntime) return { team: false as const };
@@ -456,6 +543,7 @@ ipcMain.handle("team:members", async () => {
       fingerprint: fingerprintOf(m.pubWrap),
       role: m.role,
       isOwner: m.memberId === me.memberId,
+      approved: m.approved, // false = 已 enroll 但 owner 尚未核准(未持有金鑰信封)
     }));
   } finally {
     admin.close();
@@ -485,13 +573,13 @@ ipcMain.handle("team:approve", async (_e, memberId: unknown) => {
   try {
     const member = (await admin.members()).find((m) => m.memberId === memberId);
     if (!member) throw new Error("查無此成員");
-    await admin.approve(member, teamRuntime.root);
+    await admin.approve(member, teamRuntime.root, teamRuntime.epoch);
   } finally {
     admin.close();
   }
 });
 
-/** owner 移除成員(2b 只刪列與信封;root 未輪換,留 2c) */
+/** owner 移除成員,隨後自動輪換金鑰(密碼層前向保密:被移除者的離線舊 root 從此解不開新內容) */
 ipcMain.handle("team:remove", async (_e, memberId: unknown) => {
   if (typeof memberId !== "string") throw new Error("非法請求");
   if (!(await isTeamOwner()) || !teamRuntime) throw new Error("非團隊擁有者");
@@ -502,6 +590,14 @@ ipcMain.handle("team:remove", async (_e, memberId: unknown) => {
   } finally {
     admin.close();
   }
+  // 移除已生效(網路層隔離);輪換失敗不回滾,回報給 UI 讓 owner 稍後手動重試
+  return rotateNow();
+});
+
+/** owner 手動輪換金鑰(移除後自動輪換失敗時的重試入口,或例行輪換) */
+ipcMain.handle("team:rotate", async () => {
+  if (!(await isTeamOwner()) || !teamRuntime) throw new Error("非團隊擁有者");
+  return rotateNow();
 });
 
 ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {

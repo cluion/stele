@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS shares (
   permission TEXT NOT NULL,
   revoked INTEGER NOT NULL DEFAULT 0,
   expires_at INTEGER,
+  epoch INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS shares_by_vault ON shares (vault_id);
@@ -63,6 +64,7 @@ CREATE TABLE IF NOT EXISTS members (
 CREATE TABLE IF NOT EXISTS vault_owners (
   vault_id TEXT PRIMARY KEY,
   owner_member_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE TABLE IF NOT EXISTS key_envelopes (
@@ -84,11 +86,13 @@ CREATE TABLE IF NOT EXISTS enrollment_tokens (
 );
 `;
 
-/** 對既有(0.9.0)DB 補上 2c 的 role 欄;欄已存在時 ALTER 失敗即忽略(冪等遷移) */
+/** 對既有 DB 補欄:2c 的 role、2c-2 的 epoch;欄已存在時 ALTER 失敗即忽略(冪等遷移) */
 function migrateRoles(db: Database.Database): void {
   for (const sql of [
     "ALTER TABLE members ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'",
     "ALTER TABLE enrollment_tokens ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'",
+    "ALTER TABLE vault_owners ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE shares ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0",
   ]) {
     try {
       db.exec(sql);
@@ -121,6 +125,8 @@ export interface MemberRecord {
   pubSign: Uint8Array;
   pubWrap: Uint8Array;
   role: MemberRole;
+  /** 是否已持有任一金鑰信封(2c-2):false = 待 owner 核准;輪換只重包已核准者 */
+  approved: boolean;
 }
 
 export class SyncStore {
@@ -197,19 +203,20 @@ export class SyncStore {
     return rows;
   }
 
-  /** 建立分享:shareId 由伺服器產生的不可猜亂數,擁有者的憑證(可否分享)由 vault 認證把關 */
+  /** 建立分享:shareId 由伺服器產生的不可猜亂數,綁建立當下的 vault epoch(輪換後金鑰已換,舊連結作廢) */
   createShare(shareId: string, vaultId: string, docId: string, permission: SharePermission, expiresAt?: number): void {
     this.db
-      .prepare("INSERT INTO shares (share_id, vault_id, doc_id, permission, expires_at) VALUES (?, ?, ?, ?, ?)")
-      .run(shareId, vaultId, docId, permission, expiresAt ?? null);
+      .prepare("INSERT INTO shares (share_id, vault_id, doc_id, permission, expires_at, epoch) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(shareId, vaultId, docId, permission, expiresAt ?? null, this.epochOf(vaultId));
   }
 
-  /** 解析分享作用域;已撤銷或已過期一律視為不存在,收件人得到的是查無此分享 */
+  /** 解析分享作用域;已撤銷、已過期或建立後 vault 已輪換金鑰,一律視為不存在 */
   resolveShare(shareId: string): ShareScope | undefined {
     const row = this.db
       .prepare(
-        "SELECT vault_id, doc_id, permission FROM shares " +
-          "WHERE share_id = ? AND revoked = 0 AND (expires_at IS NULL OR expires_at > unixepoch())",
+        "SELECT vault_id, doc_id, permission FROM shares s " +
+          "WHERE share_id = ? AND revoked = 0 AND (expires_at IS NULL OR expires_at > unixepoch()) " +
+          "AND epoch = COALESCE((SELECT epoch FROM vault_owners vo WHERE vo.vault_id = s.vault_id), 0)",
       )
       .get(shareId) as { vault_id: string; doc_id: string; permission: SharePermission } | undefined;
     return row && { vaultId: row.vault_id, docId: row.doc_id, permission: row.permission };
@@ -260,9 +267,21 @@ export class SyncStore {
 
   getMember(vaultId: string, memberId: string): MemberRecord | undefined {
     const row = this.db
-      .prepare("SELECT member_id, pub_sign, pub_wrap, role FROM members WHERE vault_id = ? AND member_id = ?")
-      .get(vaultId, memberId) as { member_id: string; pub_sign: Buffer; pub_wrap: Buffer; role: MemberRole } | undefined;
-    return row && { memberId: row.member_id, pubSign: new Uint8Array(row.pub_sign), pubWrap: new Uint8Array(row.pub_wrap), role: row.role };
+      .prepare(
+        `SELECT member_id, pub_sign, pub_wrap, role,
+                EXISTS(SELECT 1 FROM key_envelopes e WHERE e.vault_id = members.vault_id AND e.member_id = members.member_id) AS approved
+         FROM members WHERE vault_id = ? AND member_id = ?`,
+      )
+      .get(vaultId, memberId) as { member_id: string; pub_sign: Buffer; pub_wrap: Buffer; role: MemberRole; approved: number } | undefined;
+    return (
+      row && {
+        memberId: row.member_id,
+        pubSign: new Uint8Array(row.pub_sign),
+        pubWrap: new Uint8Array(row.pub_wrap),
+        role: row.role,
+        approved: row.approved === 1,
+      }
+    );
   }
 
   /** 某成員角色;查無此成員回 undefined(供逐訊息授權) */
@@ -279,12 +298,22 @@ export class SyncStore {
     return info.changes > 0;
   }
 
-  /** 列出某 vault 全部成員(含角色),供 owner 管理與包裝金鑰時查對方 wrap 公鑰 */
+  /** 列出某 vault 全部成員(含角色與是否已核准),供 owner 管理與包裝金鑰時查對方 wrap 公鑰 */
   listMembers(vaultId: string): MemberRecord[] {
     const rows = this.db
-      .prepare("SELECT member_id, pub_sign, pub_wrap, role FROM members WHERE vault_id = ? ORDER BY first_seen")
-      .all(vaultId) as Array<{ member_id: string; pub_sign: Buffer; pub_wrap: Buffer; role: MemberRole }>;
-    return rows.map((r) => ({ memberId: r.member_id, pubSign: new Uint8Array(r.pub_sign), pubWrap: new Uint8Array(r.pub_wrap), role: r.role }));
+      .prepare(
+        `SELECT member_id, pub_sign, pub_wrap, role,
+                EXISTS(SELECT 1 FROM key_envelopes e WHERE e.vault_id = m.vault_id AND e.member_id = m.member_id) AS approved
+         FROM members m WHERE vault_id = ? ORDER BY first_seen`,
+      )
+      .all(vaultId) as Array<{ member_id: string; pub_sign: Buffer; pub_wrap: Buffer; role: MemberRole; approved: number }>;
+    return rows.map((r) => ({
+      memberId: r.member_id,
+      pubSign: new Uint8Array(r.pub_sign),
+      pubWrap: new Uint8Array(r.pub_wrap),
+      role: r.role,
+      approved: r.approved === 1,
+    }));
   }
 
   /** 移除成員:刪 member 列 + 其所有金鑰信封(2b 只做移除;踢人後的 root 輪換留 2c) */
@@ -320,6 +349,21 @@ export class SyncStore {
       .prepare("SELECT owner_member_id FROM vault_owners WHERE vault_id = ?")
       .get(vaultId) as { owner_member_id: string } | undefined;
     return row?.owner_member_id;
+  }
+
+  /** vault 當前金鑰紀元(2c-2);非 team vault 恆 0 */
+  epochOf(vaultId: string): number {
+    const row = this.db.prepare("SELECT epoch FROM vault_owners WHERE vault_id = ?").get(vaultId) as { epoch: number } | undefined;
+    return row?.epoch ?? 0;
+  }
+
+  /**
+   * 輪換 commit(CAS):僅當 next 恰為當前 epoch+1 才 bump,回傳是否成功。
+   * 併發或重放下只有一次成功——epoch 是柵欄的真相來源,絕不跳號或回捲。
+   */
+  bumpEpoch(vaultId: string, next: number): boolean {
+    const info = this.db.prepare("UPDATE vault_owners SET epoch = ? WHERE vault_id = ? AND epoch = ?").run(next, vaultId, next - 1);
+    return info.changes > 0;
   }
 
   /** 存一封金鑰信封(upsert 冪等:owner 重 wrap 同一 (vault,key,member,epoch) 直接覆蓋) */

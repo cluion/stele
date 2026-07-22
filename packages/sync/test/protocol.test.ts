@@ -10,11 +10,12 @@ import {
 
 const clientCases: ClientMessage[] = [
   { type: "auth", token: "祕密-token-1234567890", vaultId: "vault-uuid-1" },
-  { type: "push", docId: "doc-1", deviceId: "dev-1", counter: 42, payload: new Uint8Array([0, 1, 255, 128]) },
-  { type: "push", docId: "doc-1", deviceId: "dev-1", counter: 0, payload: new Uint8Array() },
+  { type: "push", docId: "doc-1", deviceId: "dev-1", counter: 42, epoch: 0, payload: new Uint8Array([0, 1, 255, 128]) },
+  { type: "push", docId: "doc-1", deviceId: "dev-1", counter: 0, epoch: 3, payload: new Uint8Array() },
   { type: "pull", docId: "doc-1", fromSeq: 0 },
   { type: "pull", docId: "中文檔名也是合法 id", fromSeq: 123456789 },
-  { type: "snapshotPush", docId: "doc-2", uptoSeq: 7, payload: new Uint8Array(1024).fill(9) },
+  { type: "snapshotPush", docId: "doc-2", uptoSeq: 7, epoch: 0, payload: new Uint8Array(1024).fill(9) },
+  { type: "snapshotPush", docId: "doc-2", uptoSeq: 9, epoch: 5, payload: new Uint8Array([1]) },
   { type: "snapshotPull", docId: "doc-2" },
   { type: "awareness", docId: "doc-1", payload: new Uint8Array([3, 1, 4, 1, 5]) },
   { type: "shareCreate", reqId: 1, docId: "doc-1", permission: "read" },
@@ -51,16 +52,19 @@ const clientCases: ClientMessage[] = [
   { type: "enrollCreate", reqId: 12, ttlSec: 60, role: "viewer" },
   { type: "memberSetRole", reqId: 13, memberId: "f".repeat(64), role: "viewer" },
   { type: "memberSetRole", reqId: 14, memberId: "a".repeat(64), role: "editor" },
+  { type: "rotateKey", reqId: 15, epoch: 1 },
+  { type: "rotateKey", reqId: 16, epoch: 42 },
 ];
 
 const serverCases: ServerMessage[] = [
-  { type: "authOk", docs: [] },
+  { type: "authOk", docs: [], epoch: 0 },
   {
     type: "authOk",
     docs: [
       { docId: "doc-1", headSeq: 5, snapshotSeq: 3 },
       { docId: "doc-2", headSeq: 0, snapshotSeq: 0 },
     ],
+    epoch: 2,
   },
   { type: "update", docId: "doc-1", seq: 6, payload: new Uint8Array([7, 7, 7]) },
   { type: "ack", docId: "doc-1", counter: 42, seq: 6 },
@@ -96,12 +100,14 @@ const serverCases: ServerMessage[] = [
     type: "memberCatalog",
     reqId: 9,
     members: [
-      { memberId: "a".repeat(64), pubSign: new Uint8Array(32).fill(11), pubWrap: new Uint8Array(32).fill(22), role: "owner" },
-      { memberId: "b".repeat(64), pubSign: new Uint8Array(32).fill(1), pubWrap: new Uint8Array(32).fill(2), role: "editor" },
+      { memberId: "a".repeat(64), pubSign: new Uint8Array(32).fill(11), pubWrap: new Uint8Array(32).fill(22), role: "owner", approved: true },
+      { memberId: "b".repeat(64), pubSign: new Uint8Array(32).fill(1), pubWrap: new Uint8Array(32).fill(2), role: "editor", approved: false },
     ],
   },
   { type: "enrollCreated", reqId: 11, token: "enroll-xyz-一次性" },
   { type: "ok", reqId: 6 },
+  { type: "keyRotated", epoch: 1 },
+  { type: "keyRotated", epoch: 7 },
 ];
 
 describe("同步協議編解碼", () => {
@@ -125,6 +131,7 @@ describe("同步協議編解碼", () => {
       docId: "doc-1",
       deviceId: "dev-1",
       counter: 1,
+      epoch: 0,
       payload: new Uint8Array([1, 2, 3]),
     });
     expect(() => decodeClientMessage(full.slice(0, full.length - 2))).toThrow();

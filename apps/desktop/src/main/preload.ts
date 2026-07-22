@@ -99,8 +99,16 @@ export interface SteleApi {
   teamApprove(memberId: string): Promise<void>;
   /** owner 改成員角色(editor/viewer);伺服器會踢對方活躍連線 */
   teamSetRole(memberId: string, role: "editor" | "viewer"): Promise<void>;
-  /** owner 移除成員 */
-  teamRemove(memberId: string): Promise<void>;
+  /** owner 移除成員;隨後自動輪換金鑰(2c-2),rotated=false 表示輪換未完成(可 teamRotate 重試) */
+  teamRemove(memberId: string): Promise<RotateResult>;
+  /** owner 手動輪換團隊金鑰(移除後輪換失敗的重試入口,或例行輪換) */
+  teamRotate(): Promise<RotateResult>;
+}
+
+/** 金鑰輪換結果(2c-2):失敗時 error 為可呈現的原因 */
+export interface RotateResult {
+  rotated: boolean;
+  error?: string;
 }
 
 export type TeamRole = "owner" | "editor" | "viewer";
@@ -113,6 +121,8 @@ export interface TeamMember {
   fingerprint: string;
   role: TeamRole;
   isOwner: boolean;
+  /** 已核准(持有金鑰信封);false = 待 owner 核對指紋後核准 */
+  approved: boolean;
 }
 
 export interface SpaceInfo {
@@ -262,6 +272,7 @@ const api: SteleApi = {
   teamApprove: (memberId) => ipcRenderer.invoke("team:approve", memberId),
   teamSetRole: (memberId, role) => ipcRenderer.invoke("team:setRole", memberId, role),
   teamRemove: (memberId) => ipcRenderer.invoke("team:remove", memberId),
+  teamRotate: () => ipcRenderer.invoke("team:rotate"),
 };
 
 contextBridge.exposeInMainWorld("stele", api);
