@@ -64,6 +64,9 @@ export type ClientMessage =
   // 金鑰輪換 commit(2c-2,owner-only):bump vault epoch 至指定值(須恰為當前+1),
   // 伺服器隨即以 epoch 柵欄拒舊 epoch 寫入並廣播 keyRotated 給該 vault 全連線
   | { type: "rotateKey"; reqId: number; epoch: number }
+  // 角色憑證(§9.5,owner-only):owner 簽章的 {vaultId,memberId,role,epoch} blob,伺服器存放並隨
+  // envelopeList 發還本人;成員對信任錨 ownerPubSign 驗證,使 role 指派防竄改(伺服器只中繼不解讀)
+  | { type: "credPush"; reqId: number; memberId: string; blob: Uint8Array }
   // doc 寫入帶 client epoch(2c-2 寫入柵欄):team vault 上伺服器拒 epoch≠當前,
   // 防止輪換窗口內舊 root 密文污染共享日誌;個人 vault/share 連線恆送 0(不套柵欄)
   | { type: "push"; docId: string; deviceId: string; counter: number; epoch: number; payload: Uint8Array }
@@ -101,8 +104,8 @@ export type ServerMessage =
   | { type: "shareCatalog"; reqId: number; shares: ShareInfo[] }
   // 分享認證成功:告知收件人此分享對應的 doc、權限與同步進度
   | { type: "shareAuthOk"; docId: string; permission: SharePermission; headSeq: number; snapshotSeq: number }
-  // 團隊金鑰分發與成員管理的回覆(2b)
-  | { type: "envelopeList"; reqId: number; envelopes: KeyEnvelope[] }
+  // 團隊金鑰分發與成員管理的回覆(2b);roleCred(§9.5)= 本人的 owner 簽章角色憑證,空 = 尚未簽發
+  | { type: "envelopeList"; reqId: number; envelopes: KeyEnvelope[]; roleCred: Uint8Array }
   | { type: "memberCatalog"; reqId: number; members: MemberInfo[] }
   | { type: "enrollCreated"; reqId: number; token: string }
   // 通用成功回執(envelopePush / memberRemove / claimOwner / rotateKey)
@@ -131,6 +134,7 @@ const CLIENT_TAG = {
   enrollCreate: 17,
   memberSetRole: 18,
   rotateKey: 19,
+  credPush: 20,
 } as const;
 const SERVER_TAG = {
   authOk: 0,
@@ -209,6 +213,11 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
     case "rotateKey":
       encoding.writeVarUint(enc, msg.reqId);
       encoding.writeVarUint(enc, msg.epoch);
+      break;
+    case "credPush":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarString(enc, msg.memberId);
+      encoding.writeVarUint8Array(enc, msg.blob);
       break;
     case "push":
       encoding.writeVarString(enc, msg.docId);
@@ -304,6 +313,8 @@ export function decodeClientMessage(data: Uint8Array): ClientMessage {
       };
     case CLIENT_TAG.rotateKey:
       return { type: "rotateKey", reqId: decoding.readVarUint(dec), epoch: decoding.readVarUint(dec) };
+    case CLIENT_TAG.credPush:
+      return { type: "credPush", reqId: decoding.readVarUint(dec), memberId: decoding.readVarString(dec), blob: readPayload(dec) };
     case CLIENT_TAG.push:
       return {
         type: "push",
@@ -416,6 +427,7 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
         encoding.writeVarUint(enc, e.epoch);
         encoding.writeVarUint8Array(enc, e.blob);
       }
+      encoding.writeVarUint8Array(enc, msg.roleCred);
       break;
     case "memberCatalog":
       encoding.writeVarUint(enc, msg.reqId);
@@ -522,7 +534,7 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
           blob: readPayload(dec),
         });
       }
-      return { type: "envelopeList", reqId, envelopes };
+      return { type: "envelopeList", reqId, envelopes, roleCred: readPayload(dec) };
     }
     case SERVER_TAG.memberCatalog: {
       const reqId = decoding.readVarUint(dec);

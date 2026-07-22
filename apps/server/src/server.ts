@@ -23,7 +23,18 @@ const ENROLL_TTL_MAX = 7 * 24 * 60 * 60;
 /** 團隊金鑰分發與成員管理訊息(需身分認證,授權按 owner/self 把關) */
 type TeamAdminMessage = Extract<
   ClientMessage,
-  { type: "claimOwner" | "envelopePush" | "envelopePull" | "memberList" | "memberRemove" | "enrollCreate" | "memberSetRole" | "rotateKey" }
+  {
+    type:
+      | "claimOwner"
+      | "envelopePush"
+      | "envelopePull"
+      | "memberList"
+      | "memberRemove"
+      | "enrollCreate"
+      | "memberSetRole"
+      | "rotateKey"
+      | "credPush";
+  }
 >;
 
 const CONTENT_TYPE: Record<string, string> = {
@@ -392,8 +403,13 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
           break;
         }
         case "envelopePull":
-          // 只回自己的信封:A 絕不能拉到 B 的 blob
-          send({ type: "envelopeList", reqId: msg.reqId, envelopes: opts.store.envelopesFor(vault, self) });
+          // 只回自己的信封與角色憑證:A 絕不能拉到 B 的 blob
+          send({
+            type: "envelopeList",
+            reqId: msg.reqId,
+            envelopes: opts.store.envelopesFor(vault, self),
+            roleCred: opts.store.roleCredentialFor(vault, self) ?? new Uint8Array(),
+          });
           break;
         case "envelopePush": {
           if (!requireOwner()) return;
@@ -402,6 +418,17 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
             return;
           }
           opts.store.putEnvelope(vault, msg.keyId, msg.memberId, msg.epoch, msg.blob);
+          send({ type: "ok", reqId: msg.reqId });
+          break;
+        }
+        case "credPush": {
+          // 角色憑證(§9.5):owner 簽章 blob,伺服器只存放與發還本人;授權真相在成員端驗簽
+          if (!requireOwner()) return;
+          if (!validId(msg.memberId)) {
+            refuse("bad-message", "非法 id");
+            return;
+          }
+          opts.store.putRoleCredential(vault, msg.memberId, msg.blob);
           send({ type: "ok", reqId: msg.reqId });
           break;
         }
@@ -485,7 +512,8 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         msg.type === "memberRemove" ||
         msg.type === "enrollCreate" ||
         msg.type === "memberSetRole" ||
-        msg.type === "rotateKey"
+        msg.type === "rotateKey" ||
+        msg.type === "credPush"
       ) {
         if (scope !== undefined) {
           refuse("forbidden", "分享連線不得管理團隊");

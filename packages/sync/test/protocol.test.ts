@@ -54,6 +54,7 @@ const clientCases: ClientMessage[] = [
   { type: "memberSetRole", reqId: 14, memberId: "a".repeat(64), role: "editor" },
   { type: "rotateKey", reqId: 15, epoch: 1 },
   { type: "rotateKey", reqId: 16, epoch: 42 },
+  { type: "credPush", reqId: 17, memberId: "b".repeat(64), blob: new Uint8Array(67).fill(3) },
 ];
 
 const serverCases: ServerMessage[] = [
@@ -86,7 +87,7 @@ const serverCases: ServerMessage[] = [
   { type: "shareAuthOk", docId: "doc-1", permission: "read", headSeq: 5, snapshotSeq: 3 },
   { type: "shareAuthOk", docId: "doc-2", permission: "write", headSeq: 0, snapshotSeq: 0 },
   { type: "authChallenge", nonce: new Uint8Array(32).fill(5) },
-  { type: "envelopeList", reqId: 8, envelopes: [] },
+  { type: "envelopeList", reqId: 8, envelopes: [], roleCred: new Uint8Array() },
   {
     type: "envelopeList",
     reqId: 8,
@@ -94,6 +95,7 @@ const serverCases: ServerMessage[] = [
       { keyId: "root", epoch: 0, blob: new Uint8Array([9, 9, 9, 0, 255]) },
       { keyId: "root", epoch: 1, blob: new Uint8Array(200).fill(4) },
     ],
+    roleCred: new Uint8Array(67).fill(6),
   },
   { type: "memberCatalog", reqId: 9, members: [] },
   {

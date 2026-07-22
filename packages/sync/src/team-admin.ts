@@ -3,6 +3,7 @@ import type { SocketLike } from "./client.ts";
 import { identityChallengeBytes, type SyncIdentity } from "./identity.ts";
 import { wrapKey } from "./crypto.ts";
 import { rootWrapContext, KEY_ID_ROOT } from "./bootstrap.ts";
+import { signRoleCredential } from "./role-credential.ts";
 
 /**
  * 團隊擁有者的管理連線(2b):一條認證好的連線,發邀請碼、列成員、核准(把 root 包給成員)、移除成員。
@@ -93,18 +94,30 @@ export class TeamAdminSession {
     return msg.members;
   }
 
-  /** 改某成員角色(owner-only);伺服器會踢對方活躍連線,重連後以新角色生效 */
-  async setRole(memberId: string, role: MemberRole): Promise<void> {
+  /**
+   * 改某成員角色(owner-only)並重簽其角色憑證(§9.5);伺服器會踢對方活躍連線,重連後以新角色生效。
+   * epoch 為 vault 當前金鑰紀元(憑證綁 epoch,輪換即作廢整代)。
+   */
+  async setRole(memberId: string, role: MemberRole, epoch = 0): Promise<void> {
     await this.request((reqId) => ({ type: "memberSetRole", reqId, memberId, role }), "ok");
+    await this.pushCredential(memberId, role, epoch);
   }
 
   /**
-   * 核准某成員:以其 pubWrap 把 root 包成 owner 簽章信封並 push(核准前 UI 應先讓 owner 核對 pubWrap 指紋)。
-   * epoch 須為 vault 當前金鑰紀元(2c-2 輪換時對留任成員逐一以新 epoch 重包)。
+   * 核准某成員:以其 pubWrap 把 root 包成 owner 簽章信封並 push(核准前 UI 應先讓 owner 核對 pubWrap 指紋),
+   * 並簽發其角色憑證(§9.5,成員據此對信任錨驗證自己的角色)。
+   * epoch 須為 vault 當前金鑰紀元(2c-2 輪換時對留任成員逐一以新 epoch 重包重簽)。
    */
   async approve(member: MemberInfo, root: Uint8Array, epoch = 0): Promise<void> {
     const blob = await wrapKey(root, member.pubWrap, this.identity.sign, rootWrapContext(this.vaultId, member.memberId, epoch));
     await this.request((reqId) => ({ type: "envelopePush", reqId, keyId: KEY_ID_ROOT, memberId: member.memberId, epoch, blob }), "ok");
+    await this.pushCredential(member.memberId, member.role, epoch);
+  }
+
+  /** 簽發並上傳某成員的角色憑證(owner 簽 {vaultId,memberId,role,epoch}) */
+  private async pushCredential(memberId: string, role: MemberRole, epoch: number): Promise<void> {
+    const blob = signRoleCredential(this.identity.sign, { vaultId: this.vaultId, memberId, role, epoch });
+    await this.request((reqId) => ({ type: "credPush", reqId, memberId, blob }), "ok");
   }
 
   /** 移除成員(刪 member 列 + 其信封 + 踢連線);密碼層前向保密由呼叫端接著 rotateKey 輪換補上 */

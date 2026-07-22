@@ -76,6 +76,13 @@ CREATE TABLE IF NOT EXISTS key_envelopes (
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   PRIMARY KEY (vault_id, key_id, member_id, epoch)
 );
+CREATE TABLE IF NOT EXISTS role_credentials (
+  vault_id TEXT NOT NULL,
+  member_id TEXT NOT NULL,
+  blob BLOB NOT NULL,
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (vault_id, member_id)
+);
 CREATE TABLE IF NOT EXISTS enrollment_tokens (
   token TEXT PRIMARY KEY,
   vault_id TEXT NOT NULL,
@@ -316,13 +323,32 @@ export class SyncStore {
     }));
   }
 
-  /** 移除成員:刪 member 列 + 其所有金鑰信封(2b 只做移除;踢人後的 root 輪換留 2c) */
+  /** 移除成員:刪 member 列 + 其所有金鑰信封與角色憑證(密碼層前向保密由呼叫端接著輪換補上) */
   removeMember(vaultId: string, memberId: string): void {
     const remove = this.db.transaction(() => {
       this.db.prepare("DELETE FROM members WHERE vault_id = ? AND member_id = ?").run(vaultId, memberId);
       this.db.prepare("DELETE FROM key_envelopes WHERE vault_id = ? AND member_id = ?").run(vaultId, memberId);
+      this.db.prepare("DELETE FROM role_credentials WHERE vault_id = ? AND member_id = ?").run(vaultId, memberId);
     });
     remove();
+  }
+
+  /** 存某成員的角色憑證(owner 簽章 blob,伺服器只中繼不解讀;upsert 冪等) */
+  putRoleCredential(vaultId: string, memberId: string, blob: Uint8Array): void {
+    this.db
+      .prepare(
+        "INSERT INTO role_credentials (vault_id, member_id, blob) VALUES (?, ?, ?) " +
+          "ON CONFLICT (vault_id, member_id) DO UPDATE SET blob = excluded.blob, updated_at = unixepoch()",
+      )
+      .run(vaultId, memberId, Buffer.from(blob));
+  }
+
+  /** 某成員的角色憑證;未簽發回 undefined */
+  roleCredentialFor(vaultId: string, memberId: string): Uint8Array | undefined {
+    const row = this.db
+      .prepare("SELECT blob FROM role_credentials WHERE vault_id = ? AND member_id = ?")
+      .get(vaultId, memberId) as { blob: Buffer } | undefined;
+    return row && new Uint8Array(row.blob);
   }
 
   /**

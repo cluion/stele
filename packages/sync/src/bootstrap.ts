@@ -1,7 +1,8 @@
-import { encodeClientMessage, decodeServerMessage, type ClientMessage, type ServerMessage } from "./protocol.ts";
+import { encodeClientMessage, decodeServerMessage, type ClientMessage, type ServerMessage, type MemberRole } from "./protocol.ts";
 import type { SocketLike } from "./client.ts";
 import { identityChallengeBytes, type SyncIdentity } from "./identity.ts";
 import { wrapKey, type WrapContext } from "./crypto.ts";
+import { verifyRoleCredential } from "./role-credential.ts";
 
 /**
  * 團隊 vault 的金鑰 bootstrap(2b):在建 SyncManager **之前**跑完的獨立握手。
@@ -31,8 +32,12 @@ export interface TeamBootstrapOptions {
   createSocket: (url: string) => SocketLike;
 }
 
-/** ready=拿到 root 可協作(epoch 為信封的金鑰紀元,doc 寫入須帶它);pending=已認證但 owner 尚未包 root 給我 */
-export type TeamBootstrapResult = { status: "ready"; root: Uint8Array; epoch: number } | { status: "pending" };
+/**
+ * ready=拿到 root 可協作(epoch 為信封的金鑰紀元,doc 寫入須帶它);pending=已認證但 owner 尚未包 root 給我。
+ * role(§9.5)= 驗過 owner 簽章的角色憑證所載角色;undefined = owner 尚未簽發(升級前核准的舊成員),
+ * 呼叫端 fallback 本地既知角色。憑證存在但驗不過(偽造/挪用)→ 整個 bootstrap 拋錯。
+ */
+export type TeamBootstrapResult = { status: "ready"; root: Uint8Array; epoch: number; role?: MemberRole } | { status: "pending" };
 
 /**
  * 加入者/既有成員的 bootstrap:認證(可帶邀請碼)→ pull 自己的 root 信封 → 驗 owner 簽章後 unwrap。
@@ -56,7 +61,14 @@ export function bootstrapTeamKey(opts: TeamBootstrapOptions): Promise<TeamBootst
         }
         // context 用信封宣稱的 epoch:偽造 epoch 會使 HKDF info 不符 → GCM 驗不過而拒絕,不會靜默拿錯 root
         const root = await identity.unwrap(env.blob, opts.ownerPubSign, rootWrapContext(vaultId, identity.memberId, env.epoch));
-        done({ status: "ready", root, epoch: env.epoch });
+        // 角色憑證(§9.5):驗 owner 簽章;偽造/挪用即拋(擋盲中繼捏造角色)。
+        // 憑證 epoch 必須等於信封 epoch——舊紀元憑證(真簽但已被輪換作廢)視同未簽發,擋降級/升級重放
+        let role: MemberRole | undefined;
+        if (msg.roleCred.length > 0) {
+          const cred = verifyRoleCredential(msg.roleCred, opts.ownerPubSign, vaultId, identity.memberId);
+          if (cred.epoch === env.epoch) role = cred.role;
+        }
+        done({ status: "ready", root, epoch: env.epoch, role });
         break;
       }
       case "error":

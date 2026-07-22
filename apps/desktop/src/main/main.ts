@@ -130,6 +130,19 @@ async function isTeamOwner(): Promise<boolean> {
   return Buffer.from(me.pubSign).equals(Buffer.from(teamRuntime.ownerPubSign));
 }
 
+/** 把驗證過的角色(owner 簽章憑證,§9.5)寫回 sync.json,離線重開也顯示對的角色 */
+function persistVerifiedRole(root: string, role: MemberRole): void {
+  const file = syncFile(root);
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    if (raw["role"] === role) return;
+    raw["role"] = role;
+    writeFileSync(file, JSON.stringify(raw, null, 2));
+  } catch (err) {
+    console.error("寫回驗證角色失敗:", err);
+  }
+}
+
 /** 首次 enroll 後把已消耗的一次性邀請碼從 sync.json 移除 */
 function clearEnrollmentToken(root: string): void {
   const file = syncFile(root);
@@ -233,6 +246,11 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
         if (res.status === "ready") {
           teamRuntime.root = res.root;
           teamRuntime.epoch = res.epoch;
+          // 驗過 owner 簽章的角色憑證(§9.5)蓋過 sync.json 的本地宣稱;舊成員未簽發則沿用既有
+          if (res.role) {
+            teamRuntime.role = res.role;
+            persistVerifiedRole(next.root, res.role);
+          }
           keySource = new MasterKeySpaces(res.root);
         } else {
           // pending:owner 尚未包 root 給我。不 start sync、不碰 vault-meta;重連或重開 vault 時重試
@@ -413,6 +431,7 @@ async function handleKeyRotated(epoch: number): Promise<void> {
     if (res.status === "ready" && res.epoch >= epoch) {
       rt.root = res.root;
       rt.epoch = res.epoch;
+      if (res.role) rt.role = res.role; // 輪換重簽的角色憑證(§9.5)一併帶回
       await manager.rotateRoot(res.root, res.epoch);
       return;
     }
@@ -557,7 +576,7 @@ ipcMain.handle("team:setRole", async (_e, memberId: unknown, role: unknown) => {
   const me = await getIdentity();
   const admin = await TeamAdminSession.open({ ...teamRuntime.settings, identity: me, createSocket: createTeamSocket });
   try {
-    await admin.setRole(memberId, role);
+    await admin.setRole(memberId, role, teamRuntime.epoch); // 一併重簽該成員的角色憑證(§9.5)
   } finally {
     admin.close();
   }
