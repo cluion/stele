@@ -93,13 +93,22 @@ describe("金牌:金鑰輪換(2c-2)", () => {
       repullRetryMs: 100,
       onKeyRotated: (newEpoch) => {
         if ((member.epoch ?? 0) >= newEpoch) return; // owner 自己發起的輪換已就地處理(同 main.ts 防護)
-        void (async () => {
-          const res = await bootstrapTeamKey({ url: url(), token: TOKEN, vaultId, identity, ownerPubSign, createSocket: wsSocket });
-          if (res.status === "ready" && res.epoch >= newEpoch) {
-            member.epoch = res.epoch;
-            await manager.rotateRoot(res.root, res.epoch);
-          }
-        })();
+        // 失敗要重試(同 main.ts 的 retry 迴圈):並行測試負載下單次 bootstrap 可能逾時,沒重試就永遠停在暫停態
+        const attempt = (left: number): void => {
+          void bootstrapTeamKey({ url: url(), token: TOKEN, vaultId, identity, ownerPubSign, createSocket: wsSocket })
+            .then(async (res) => {
+              if (res.status === "ready" && res.epoch >= newEpoch) {
+                member.epoch = res.epoch;
+                await manager.rotateRoot(res.root, res.epoch);
+              } else if (left > 0) {
+                setTimeout(() => attempt(left - 1), 300);
+              }
+            })
+            .catch(() => {
+              if (left > 0) setTimeout(() => attempt(left - 1), 300);
+            });
+        };
+        attempt(20);
       },
     });
     manager.start();

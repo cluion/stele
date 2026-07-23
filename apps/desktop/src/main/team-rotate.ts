@@ -12,7 +12,13 @@ import { TeamAdminSession, type TeamAdminOptions } from "@stele/sync";
 
 export interface RotateTarget {
   allCaughtUp(): boolean;
-  rotateRoot(newRoot: Uint8Array, epoch: number, repull?: boolean, spaceKeys?: ReadonlyMap<string, Uint8Array>): Promise<void>;
+  rotateRoot(
+    newRoot: Uint8Array,
+    epoch: number,
+    repull?: boolean,
+    spaceKeys?: ReadonlyMap<string, Uint8Array>,
+    restrictedSpaceIds?: readonly string[],
+  ): Promise<void>;
   rekeyAll(): Promise<boolean>;
 }
 
@@ -65,7 +71,7 @@ export async function rotateTeamRoot(opts: RotateOptions): Promise<{ root: Uint8
     admin.close();
   }
   opts.onCommitted(newRoot, epoch, spaceKeys);
-  await opts.target.rotateRoot(newRoot, epoch, false, spaceKeys); // owner 自己重加密,不 repull
+  await opts.target.rotateRoot(newRoot, epoch, false, spaceKeys, [...spaceKeys.keys()]); // owner 自己重加密,不 repull
   await rekeyUntilDone(opts.target, opts.retryMs ?? 3000, opts.maxRetries ?? 20);
   return { root: newRoot, epoch };
 }

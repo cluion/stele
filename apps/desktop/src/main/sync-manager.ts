@@ -6,6 +6,7 @@ import {
   SyncClient,
   spaceOf,
   spaceMembersOf,
+  readSpaces,
   DOC_SPACES_MAP,
   type AwarenessState,
   type Cipher,
@@ -108,6 +109,8 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
   private readonly pendingRekey = new Set<string>();
   /** 目前開著的筆記:切換時把在場宣告從舊 doc 移到新 doc */
   private activeRel: string | undefined;
+  /** 本人 memberId(團隊 vault):判「空間名單是否明確排除我」用,避免授權競態窗口誤刪本地檔 */
+  private readonly memberId: string | undefined;
 
   constructor(
     private readonly session: VaultSession,
@@ -132,6 +135,8 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
       epoch?: number;
       /** 金鑰已輪換:推送已暫停,呼叫端應重跑 bootstrap 取新 root 後呼叫 rotateRoot 收斂 */
       onKeyRotated?: (epoch: number) => void;
+      /** 被移出團隊(伺服器 removed/enroll-required):同步已停,呼叫端通知使用者 */
+      onRevoked?: (code: string) => void;
       /** 輪換 repull 撞到尚未重加密的舊快照時的重試間隔(測試調短) */
       repullRetryMs?: number;
     },
@@ -143,14 +148,20 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
     };
     this.onPresence = tuning?.onPresence;
     this.spaces = tuning?.spaces;
+    this.memberId = tuning?.identity?.memberId;
     this.shareBase = httpBaseFrom(settings.url);
     this.stateFile = path.join(session.root, ".stele", "sync-state.json");
     this.paths = this.meta.getMap("paths");
     this.comments = tuning?.comments;
     this.docSpaces = this.meta.getMap(DOC_SPACES_MAP);
     // 空間路由:每篇筆記以其所屬空間的金鑰加解密;meta/留言/未指派筆記歸屬皆為預設空間 → master 金鑰(零遷移)
+    // encrypt 端硬性防線:受限空間且我無其金鑰 → 一律拒絕加密。否則任何殘留路徑(輪換後還活著的
+    // runtime 重推 diff 等)都會把整份內容以 root fallback 金鑰重新加密推上共享日誌 = 洩漏給全 vault
     const routingCipher: Cipher | undefined = this.spaces && {
-      encrypt: (docId, plain) => this.spaces!.cipher(spaceOf(this.meta, docId)).then((c) => c.encrypt(docId, plain)),
+      encrypt: (docId, plain) => {
+        if (!this.canDecrypt(docId)) return Promise.reject(new Error(`無此空間的金鑰,拒絕加密:${docId}`));
+        return this.spaces!.cipher(spaceOf(this.meta, docId)).then((c) => c.encrypt(docId, plain));
+      },
       decrypt: (docId, data) => this.spaces!.cipher(spaceOf(this.meta, docId)).then((c) => c.decrypt(docId, data)),
     };
     this.exportDocKey = this.spaces
@@ -162,11 +173,13 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
       if (tx.origin === "sync") this.applyRemoteMeta(Array.from(event.keysChanged as Set<string>));
     });
     // 遠端得知某筆記換了空間 → 該 docId 的伺服器 blob 已改用新空間金鑰,強制 repull 以新金鑰重解;
-    // 移進了我無金鑰的受限空間 → 卸下同步(拿密文也解不開,本地檔案停在最後可讀狀態)
+    // 確定無權(信封+名單三重確認)→ 卸同步並把本地檔案移入回收桶;
+    // 「名單說我在但金鑰還沒輪換到」的窗口只 forget 停同步、不刪檔——馬上就要拿到金鑰補物化了
     this.docSpaces.observe((event, tx) => {
       if (tx.origin !== "sync") return;
       for (const docId of event.keysChanged as Set<string>) {
         if (this.canDecrypt(docId)) this.client.repull(docId);
+        else if (this.definitelyInaccessible(docId)) this.purgeLocal(docId);
         else this.client.forget(docId);
       }
     });
@@ -180,6 +193,7 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
       identity: tuning?.identity,
       epoch: tuning?.epoch,
       onKeyRotated: tuning?.onKeyRotated,
+      onRevoked: tuning?.onRevoked,
       repullRetryMs: tuning?.repullRetryMs,
       createSocket: (url) => new WebSocket(url) as unknown as SocketLike,
       onStatus: (status) => {
@@ -277,14 +291,31 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
 
   /**
    * 我能否解開某 doc:未受限空間(含個人 vault)恆可;受限空間看是否持有其獨立金鑰。
-   * 判定用 meta 的空間名單 + 金鑰來源的實際持有——名單說我在但金鑰未到(輪換未達)一樣不可,
-   * 絕不拿 root fallback 去解受限空間的密文(解不開,徒留噪音與空檔)。
+   * 受限與否以**信封層清單為權威**(bootstrap 與金鑰原子取得)——meta 的空間名單是最終一致的,
+   * 名單還沒同步到的窗口若誤判「未受限」,會拿 root fallback 金鑰加密內容推上共享日誌(洩漏 + 毒日誌)。
+   * meta 名單仍留作第二判準(信封清單也缺席時的防禦深度)。
    */
   private canDecrypt(docId: string): boolean {
     if (!this.spaces?.hasSpaceKey) return true;
     const spaceId = spaceOf(this.meta, docId);
-    if (spaceMembersOf(this.meta, spaceId) === undefined) return true;
-    return this.spaces.hasSpaceKey(spaceId);
+    if (this.spaces.hasSpaceKey(spaceId)) return true;
+    if (this.spaces.isRestricted?.(spaceId)) return false;
+    return spaceMembersOf(this.meta, spaceId) === undefined;
+  }
+
+  /**
+   * 是否**確定**無權——用於「刪本地檔」這種不可逆動作,寧可漏刪(留本地舊明文,已知限制)不可誤刪。
+   * 三重確認:信封層說受限 + 我沒金鑰 + meta 名單「明確排除我」。
+   * 第三項擋授權競態:owner 輪換時先 approveSpace 自己再 approve 名單成員,成員 bootstrap 撞進
+   * 「restricted 已置位、自己的空間信封還沒到」的窗口會誤判無金鑰;但名單此時已含我 → 不刪。
+   * 名單為 undefined(未同步或恢復開放)= 不確定 → 不刪。
+   */
+  private definitelyInaccessible(docId: string): boolean {
+    if (!this.spaces?.isRestricted) return false;
+    const spaceId = spaceOf(this.meta, docId);
+    if (!this.spaces.isRestricted(spaceId) || (this.spaces.hasSpaceKey?.(spaceId) ?? false)) return false;
+    const members = spaceMembersOf(this.meta, spaceId);
+    return members !== undefined && this.memberId !== undefined && !members.includes(this.memberId);
   }
 
   /**
@@ -292,12 +323,54 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
    * 成員端 repull=true 全量重拉;owner 端(自己重加密)傳 false,隨後呼叫 rekeyAll。
    * spaceKeys = 這一紀元我拿到的受限空間金鑰(整組換到位);新獲授權的空間筆記隨後補物化。
    */
-  async rotateRoot(newRoot: Uint8Array, epoch: number, repull = true, spaceKeys?: ReadonlyMap<string, Uint8Array>): Promise<void> {
+  async rotateRoot(
+    newRoot: Uint8Array,
+    epoch: number,
+    repull = true,
+    spaceKeys?: ReadonlyMap<string, Uint8Array>,
+    restrictedSpaceIds?: readonly string[],
+  ): Promise<void> {
     if (!this.spaces?.rotate) throw new Error("此 vault 的金鑰來源不支援輪換");
-    this.spaces.rotate(newRoot, spaceKeys);
+    this.spaces.rotate(newRoot, spaceKeys, restrictedSpaceIds);
+    // 輪換後金鑰塵埃落定。失去金鑰的 doc 兩種處置:
+    // 卸 runtime(canDecrypt=false 皆卸)——openDoc 的金鑰檢查只擋「新建」,輪換前就活著的 runtime 會被
+    //   ensure 快取命中繞過,applyRotation 的重推會把整份內容以 fallback 金鑰重新加密外洩;
+    // 移本地檔(僅 definitelyInaccessible)——確定無權才刪,授權競態下的暫態不刪(留舊明文,已知限制)。
+    for (const docId of [...this.session.allDocIds(), ...(this.comments?.ids() ?? []), ...this.loose.keys()]) {
+      if (this.definitelyInaccessible(docId)) this.purgeLocal(docId);
+      else if (!this.canDecrypt(docId)) this.client.forget(docId);
+    }
     await this.client.applyRotation(epoch, repull);
     // 先前因無金鑰而跳過物化的筆記,這一紀元可能獲授權了:重套 meta 補落地
     this.applyRemoteMeta([...this.paths.keys()]);
+  }
+
+  /**
+   * 卸下某 doc 並把其本地筆記檔案移入回收桶(失去空間金鑰時):forget 停同步,
+   * 有對應筆記檔就 trash(不動 meta 歸屬——那是共享事實,owner 仍持有)。伴生留言 doc 無檔,只 forget。
+   * 走 fsOps 佇列與遠端 meta 套用序列化,不互相踩。
+   */
+  private purgeLocal(docId: string): void {
+    this.client.forget(docId);
+    const rel = this.session.relForDocId(docId);
+    if (rel === undefined) return;
+    this.fsOps = this.fsOps
+      .then(() => this.session.delete(rel))
+      .catch((err: unknown) => console.error(`移除失去授權的筆記失敗 ${docId}:`, err));
+  }
+
+  /**
+   * 我目前無金鑰的受限空間 id(供 UI 從側欄與空間清單隱藏):受限(信封層權威或 meta 名單)且未持金鑰。
+   * 名單外成員據此完全看不到該空間的存在——雖然空間登記在共享 meta 裡人人可讀,但呈現層不揭露。
+   */
+  inaccessibleSpaceIds(): Set<string> {
+    const out = new Set<string>();
+    if (!this.spaces?.hasSpaceKey) return out;
+    for (const space of readSpaces(this.meta)) {
+      if (space.isDefault || this.spaces.hasSpaceKey(space.id)) continue;
+      if (this.spaces.isRestricted?.(space.id) || space.members !== undefined) out.add(space.id);
+    }
+    return out;
   }
 
   /** 是否已拉齊伺服器上所有 doc(owner 輪換前置檢查;未拉齊必須中止輪換) */
@@ -402,6 +475,12 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
     } else {
       const id = this.session.peekDocId(event.rel);
       if (id && this.paths.get(id) === event.rel) {
+        // 失去授權而被 purge 的本地移除:只卸同步,**絕不**從共享 meta 刪 path——
+        // 那是我這端看不到了,不是大家都該刪;傳成共享刪除會連鎖刪掉名單內成員(含 owner)的筆記
+        if (!this.canDecrypt(id)) {
+          this.client.forget(id);
+          return;
+        }
         this.meta.transact(() => this.paths.delete(id), "local-meta");
         this.client.forget(id);
       }

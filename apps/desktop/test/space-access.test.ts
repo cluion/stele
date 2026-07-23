@@ -49,10 +49,11 @@ function wsSocket(url: string): SocketLike {
   return sock;
 }
 
-async function until(cond: () => boolean, label: string, timeoutMs = 8000): Promise<void> {
+// pnpm check 全 workspace 並行時 CPU 最緊,輪換收斂鏈(bootstrap+rotate+repull+gap-fill)拉長,上限放寬
+async function until(cond: () => boolean, label: string | (() => string), timeoutMs = 40_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!cond()) {
-    if (Date.now() > deadline) throw new Error(`逾時等待:${label}`);
+    if (Date.now() > deadline) throw new Error(`逾時等待:${typeof label === "function" ? label() : label}`);
     await new Promise((r) => setTimeout(r, 25));
   }
 }
@@ -90,14 +91,23 @@ describe("金牌:空間存取(per-space 成員子集)", () => {
       repullRetryMs: 100,
       onKeyRotated: (newEpoch) => {
         if ((member.epoch ?? 0) >= newEpoch) return; // owner 自己發起的輪換已就地處理(同 main.ts 防護)
-        void (async () => {
-          const res = await bootstrapTeamKey({ url: url(), token: TOKEN, vaultId, identity, ownerPubSign, createSocket: wsSocket });
-          if (res.status === "ready" && res.epoch >= newEpoch) {
-            member.epoch = res.epoch;
-            member.spaceKeys = res.spaceKeys;
-            await manager.rotateRoot(res.root, res.epoch, true, res.spaceKeys);
-          }
-        })();
+        // 失敗要重試(同 main.ts 的 retry 迴圈):並行測試負載下單次 bootstrap 可能逾時,沒重試就永遠停在暫停態
+        const attempt = (left: number): void => {
+          void bootstrapTeamKey({ url: url(), token: TOKEN, vaultId, identity, ownerPubSign, createSocket: wsSocket })
+            .then(async (res) => {
+              if (res.status === "ready" && res.epoch >= newEpoch) {
+                member.epoch = res.epoch;
+                member.spaceKeys = res.spaceKeys;
+                await manager.rotateRoot(res.root, res.epoch, true, res.spaceKeys, res.restrictedSpaceIds);
+              } else if (left > 0) {
+                setTimeout(() => attempt(left - 1), 300);
+              }
+            })
+            .catch(() => {
+              if (left > 0) setTimeout(() => attempt(left - 1), 300);
+            });
+        };
+        attempt(20);
       },
     });
     const spacesService = new SpacesService(meta, session);
@@ -179,7 +189,17 @@ describe("金牌:空間存取(per-space 成員子集)", () => {
     Y.applyUpdate(replica, o.session.openDoc("機密.md"));
     replica.getText("md").insert(replica.getText("md").length, "受限後新增\n");
     o.session.pushUpdate("機密.md", Y.encodeStateAsUpdate(replica));
-    await until(() => content(a.dir, "機密.md") === "# 機密\n受限前內容\n受限後新增\n", "alice 收到受限空間的新編輯");
+    {
+      // 失敗診斷:server 端該 doc 的增量作者與快照點
+      const docId = o.session.docId("機密.md");
+      const db = (store as unknown as { db: { prepare(sql: string): { all(...args: unknown[]): unknown[] } } }).db;
+      const dump = (): string =>
+        JSON.stringify({
+          updates: db.prepare("SELECT seq, device_id FROM updates WHERE vault_id=? AND doc_id=?").all(vaultId, docId),
+          snap: store.snapshot(vaultId, docId)?.uptoSeq,
+        });
+      await until(() => content(a.dir, "機密.md") === "# 機密\n受限前內容\n受限後新增\n", () => `alice 收到受限空間的新編輯 ${dump()}`);
+    }
 
     // bob:檔案停在受限前狀態(新內容解不開也不套用),稍等確認不再前進
     await new Promise((r) => setTimeout(r, 400));

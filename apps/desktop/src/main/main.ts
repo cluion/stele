@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { readFileSync, existsSync, statSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { randomUUID, createHash } from "node:crypto";
+import { userInfo } from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
 import { VaultSession, type SessionCallbacks } from "./vault-session.ts";
@@ -23,6 +24,9 @@ const SMOKE = process.argv.includes("--smoke");
 // smoke 固定 zh-TW locale:CI runner 多為 en,navigator.language 會讓 i18n 走英文,
 // 令選單/檔名等中文斷言落空;正式執行不設,仍尊重使用者 OS locale
 if (SMOKE) app.commandLine.appendSwitch("lang", "zh-TW");
+// 開發用:同機多開時各實例獨立 userData(身分 identity.json 在其中;共用會變成同一位成員)
+const USER_DATA_OVERRIDE = process.env["STELE_USER_DATA"];
+if (USER_DATA_OVERRIDE) app.setPath("userData", path.resolve(USER_DATA_OVERRIDE));
 const FIXTURES_VAULT = path.resolve(__dirname, "..", "..", "..", "prototypes", "mirror", "fixtures", "vault");
 
 let session: VaultSession | undefined;
@@ -156,6 +160,16 @@ function clearEnrollmentToken(root: string): void {
   }
 }
 
+/** 協作顯示名預設值:OS 使用者名(取不到就留空,fallback 回「訪客-xxxx」) */
+function defaultDisplayName(): string | undefined {
+  try {
+    const name = userInfo().username.trim();
+    return name.length > 0 ? name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** 把設定物件寫入某 vault 的 .stele/sync.json(建立/加入 team vault 用) */
 function writeSyncConfig(root: string, config: Record<string, unknown>): void {
   const file = syncFile(root);
@@ -201,6 +215,128 @@ function requireSession(): VaultSession {
   return session;
 }
 
+/** pending 成員的背景輪詢計時器:owner 核准後免重開 app 自動就緒;切 vault 時清除 */
+let pendingRetryTimer: NodeJS.Timeout | undefined;
+
+/** bootstrap ready 結果落進 teamRuntime(root/epoch/驗證過的角色) */
+function adoptTeamBootstrap(next: VaultSession, res: { root: Uint8Array; epoch: number; role?: MemberRole }): void {
+  if (!teamRuntime) return;
+  teamRuntime.root = res.root;
+  teamRuntime.epoch = res.epoch;
+  // 驗過 owner 簽章的角色憑證(§9.5)蓋過 sync.json 的本地宣稱;舊成員未簽發則沿用既有
+  if (res.role) {
+    teamRuntime.role = res.role;
+    persistVerifiedRole(next.root, res.role);
+  }
+}
+
+/** 金鑰就緒後把 SyncManager 接上目前 vault(personal 與 team 共用);含輪換續跑檢查 */
+function attachSyncManager(next: VaultSession, settings: SyncSettings, keySource: SpaceKeySource, memberIdentity: SyncIdentity): void {
+  if (!meta || !spaces || !comments) return; // vault 生命週期物件尚未就緒(理論上不會發生)
+  const onStatus = (status: string): void => {
+    broadcastSyncStatus(status);
+    // 重連常肇因於角色變更被踢(memberSetRole 即踢線):上線後背景重驗 owner 簽章的角色憑證,
+    // 讓降級/升級即時反映到 UI(viewer 唯讀收斂),不必等重開 vault
+    if (status === "online" && teamRuntime) void refreshTeamRole(next, memberIdentity);
+  };
+  syncManager = new SyncManager(next, settings, meta, onStatus, {
+    spaces: keySource,
+    identity: memberIdentity,
+    epoch: teamRuntime?.epoch,
+    onKeyRotated: teamRuntime ? (epoch) => void handleKeyRotated(epoch) : undefined,
+    onRevoked: teamRuntime ? () => handleRevoked(next) : undefined,
+    onPresence: (rel, participants) => {
+      for (const w of windows) {
+        if (!w.isDestroyed()) w.webContents.send("presence:update", rel, participants);
+      }
+    },
+    comments,
+  });
+  spaces.setSyncHooks(syncManager);
+  comments.setSyncHooks(syncManager);
+  syncManager.start();
+  // 上次輪換 commit 後重加密沒跑完(崩潰/斷線):owner 重啟續跑,rekey 全冪等
+  if (teamRuntime && existsSync(rekeyMarkerFile(next.root)) && Buffer.from(memberIdentity.pubSign).equals(Buffer.from(teamRuntime.ownerPubSign))) {
+    const manager = syncManager;
+    const markerPath = rekeyMarkerFile(next.root);
+    void rekeyUntilDone(manager, 3000, 200)
+      .then(() => rmSync(markerPath, { force: true }))
+      .catch((err: unknown) => console.error("輪換重加密續跑失敗:", err));
+  }
+  sendAll("team:changed"); // pending→ready 或初次就緒:renderer 刷新 team 狀態(角色、ready)
+}
+
+/**
+ * 被移出團隊(伺服器踢線或重連被拒):停止一切重試,狀態切 revoked 讓 UI 誠實提示。
+ * 本地既有筆記檔案是解密過的明文,密碼學上收不回——只能告知使用者已失去存取,不再同步新內容。
+ */
+function handleRevoked(next: VaultSession): void {
+  if (session !== next) return;
+  clearTimeout(rotateRetryTimer);
+  clearTimeout(pendingRetryTimer);
+  broadcastSyncStatus("revoked");
+  sendAll("team:changed");
+}
+
+/** 重連上線後重驗本人角色憑證(同紀元;跨紀元交給 keyRotated 自癒):角色有變即更新並通知 UI */
+let roleRefreshInFlight = false;
+async function refreshTeamRole(next: VaultSession, memberIdentity: SyncIdentity): Promise<void> {
+  const rt = teamRuntime;
+  if (!rt || rt.root === undefined || roleRefreshInFlight) return;
+  roleRefreshInFlight = true;
+  try {
+    const res = await bootstrapTeamKey({
+      url: rt.settings.url,
+      token: rt.settings.token,
+      vaultId: rt.settings.vaultId,
+      identity: memberIdentity,
+      ownerPubSign: rt.ownerPubSign,
+      createSocket: createTeamSocket,
+    });
+    if (session !== next || teamRuntime !== rt) return;
+    if (res.status === "ready" && res.epoch === rt.epoch && res.role && res.role !== rt.role) {
+      rt.role = res.role;
+      persistVerifiedRole(next.root, res.role);
+      sendAll("team:changed");
+    }
+  } catch (err) {
+    console.error("重驗團隊角色失敗:", err);
+  } finally {
+    roleRefreshInFlight = false;
+  }
+}
+
+/** pending(已 enroll、等 owner 核准)背景輪詢:每 5 秒重試 bootstrap,核准即自動接上同步 */
+function schedulePendingRetry(next: VaultSession, memberIdentity: SyncIdentity): void {
+  clearTimeout(pendingRetryTimer);
+  pendingRetryTimer = setTimeout(() => void retryPendingBootstrap(next, memberIdentity), 5000);
+}
+
+async function retryPendingBootstrap(next: VaultSession, memberIdentity: SyncIdentity): Promise<void> {
+  const rt = teamRuntime;
+  // 期間切了 vault、或已就緒(其他路徑接上)就收手
+  if (session !== next || !rt || rt.root !== undefined || syncManager) return;
+  try {
+    const res = await bootstrapTeamKey({
+      url: rt.settings.url,
+      token: rt.settings.token,
+      vaultId: rt.settings.vaultId,
+      identity: memberIdentity,
+      ownerPubSign: rt.ownerPubSign,
+      createSocket: createTeamSocket,
+    });
+    if (session !== next || teamRuntime !== rt || syncManager) return;
+    if (res.status === "ready") {
+      adoptTeamBootstrap(next, res);
+      attachSyncManager(next, rt.settings, new WrappedKeySpaces(res.root, res.spaceKeys, res.restrictedSpaceIds), memberIdentity);
+      return;
+    }
+  } catch (err) {
+    console.error("等待核准的重試 bootstrap 失敗:", err);
+  }
+  schedulePendingRetry(next, memberIdentity);
+}
+
 /** 換 vault:先建新 session 再拆舊的,新目錄無效時拋錯、原狀不動 */
 async function switchVault(dir: string): Promise<{ vault: string; files: string[] }> {
   const next = new VaultSession(dir, callbacks);
@@ -222,12 +358,12 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
   });
   teamRuntime = undefined;
   clearTimeout(rotateRetryTimer);
+  clearTimeout(pendingRetryTimer);
   const loaded = SMOKE ? undefined : loadSyncSettings(next.root);
   if (loaded) {
     const memberIdentity = await getIdentity();
-    let keySource: SpaceKeySource | undefined;
     if (loaded.kind === "personal") {
-      keySource = new MasterKeySpaces(await deriveVaultKey(loaded.passphrase, loaded.settings.vaultId));
+      attachSyncManager(next, loaded.settings, new MasterKeySpaces(await deriveVaultKey(loaded.passphrase, loaded.settings.vaultId)), memberIdentity);
     } else {
       // team:先跑獨立 bootstrap 拿 root(避開 SyncClient authOk 立即解 vault-meta 的死結)
       teamRuntime = { settings: loaded.settings, ownerPubSign: loaded.ownerPubSign, role: loaded.role, root: undefined, epoch: 0 };
@@ -244,47 +380,16 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
         // 首次以邀請碼 enroll 後,碼已被伺服器消耗;清出 sync.json(單次、留著無益)
         if (loaded.enrollmentToken) clearEnrollmentToken(next.root);
         if (res.status === "ready") {
-          teamRuntime.root = res.root;
-          teamRuntime.epoch = res.epoch;
-          // 驗過 owner 簽章的角色憑證(§9.5)蓋過 sync.json 的本地宣稱;舊成員未簽發則沿用既有
-          if (res.role) {
-            teamRuntime.role = res.role;
-            persistVerifiedRole(next.root, res.role);
-          }
-          // 團隊 vault 用 WrappedKeySpaces:root 之外帶受限空間的獨立金鑰(per-space 成員子集)
-          keySource = new WrappedKeySpaces(res.root, res.spaceKeys);
+          adoptTeamBootstrap(next, res);
+          attachSyncManager(next, loaded.settings, new WrappedKeySpaces(res.root, res.spaceKeys, res.restrictedSpaceIds), memberIdentity);
         } else {
-          // pending:owner 尚未包 root 給我。不 start sync、不碰 vault-meta;重連或重開 vault 時重試
+          // pending:owner 尚未包 root 給我。不 start sync、不碰 vault-meta;背景輪詢,核准後免重開自動就緒
           broadcastSyncStatus("pending");
+          schedulePendingRetry(next, memberIdentity);
         }
       } catch (err) {
         console.error("團隊金鑰 bootstrap 失敗:", err);
         broadcastSyncStatus("error");
-      }
-    }
-    if (keySource) {
-      syncManager = new SyncManager(next, loaded.settings, meta, broadcastSyncStatus, {
-        spaces: keySource,
-        identity: memberIdentity,
-        epoch: teamRuntime?.epoch,
-        onKeyRotated: teamRuntime ? (epoch) => void handleKeyRotated(epoch) : undefined,
-        onPresence: (rel, participants) => {
-          for (const w of windows) {
-            if (!w.isDestroyed()) w.webContents.send("presence:update", rel, participants);
-          }
-        },
-        comments,
-      });
-      spaces.setSyncHooks(syncManager);
-      comments.setSyncHooks(syncManager);
-      syncManager.start();
-      // 上次輪換 commit 後重加密沒跑完(崩潰/斷線):owner 重啟續跑,rekey 全冪等
-      if (teamRuntime && existsSync(rekeyMarkerFile(next.root)) && Buffer.from(memberIdentity.pubSign).equals(Buffer.from(teamRuntime.ownerPubSign))) {
-        const manager = syncManager;
-        const markerPath = rekeyMarkerFile(next.root);
-        void rekeyUntilDone(manager, 3000, 200)
-          .then(() => rmSync(markerPath, { force: true }))
-          .catch((err: unknown) => console.error("輪換重加密續跑失敗:", err));
       }
     }
   } else {
@@ -381,7 +486,18 @@ ipcMain.on("comments:push", (_e, rel: unknown, update: unknown) => {
   if (comments && typeof rel === "string" && update instanceof Uint8Array) comments.push(rel, update);
 });
 
-ipcMain.handle("spaces:overview", () => spaces?.overview() ?? null);
+ipcMain.handle("spaces:overview", () => {
+  const overview = spaces?.overview();
+  if (!overview) return null;
+  // 名單外成員完全看不到受限空間:雖然空間登記在共享 meta 裡人人可讀,呈現層不揭露無權空間與其筆記
+  const hidden = syncManager?.inaccessibleSpaceIds() ?? new Set<string>();
+  if (hidden.size === 0) return overview;
+  const assignments: Record<string, string> = {};
+  for (const [rel, spaceId] of Object.entries(overview.assignments)) {
+    if (!hidden.has(spaceId)) assignments[rel] = spaceId;
+  }
+  return { spaces: overview.spaces.filter((s) => !hidden.has(s.id)), assignments };
+});
 
 ipcMain.handle("spaces:create", (_e, name: unknown, color: unknown) => {
   if (!spaces || typeof name !== "string" || name.trim().length === 0) throw new Error("非法請求");
@@ -448,7 +564,10 @@ async function handleKeyRotated(epoch: number): Promise<void> {
       rt.root = res.root;
       rt.epoch = res.epoch;
       if (res.role) rt.role = res.role; // 輪換重簽的角色憑證(§9.5)一併帶回
-      await manager.rotateRoot(res.root, res.epoch, true, res.spaceKeys); // 受限空間金鑰整組換到位
+      await manager.rotateRoot(res.root, res.epoch, true, res.spaceKeys, res.restrictedSpaceIds); // 受限空間金鑰與受限清單整組換到位
+      // 空間存取可能變了(獲授權補物化、失授權移檔並隱藏空間):通知 renderer 重載側欄空間與檔案清單
+      sendAll("spaces:changed");
+      sendAll("index:updated");
       return;
     }
   } catch (err) {
@@ -528,6 +647,7 @@ ipcMain.handle("team:create", async (_e, url: unknown, token: unknown) => {
     ownerPubSign: Buffer.from(me.pubSign).toString("base64"),
     role: "owner",
     deviceId: randomUUID(),
+    displayName: defaultDisplayName(), // 免得協作游標旁都叫「訪客-xxxx」;之後可在 sync.json 改
   });
   await switchVault(root); // 以 team 模式重載:bootstrap 由 self-envelope 復原 root → ready
   return { vaultId };
@@ -547,6 +667,7 @@ ipcMain.handle("team:join", async (_e, inviteText: unknown) => {
     role: invite.role,
     deviceId: randomUUID(),
     enrollmentToken: invite.enrollToken,
+    displayName: defaultDisplayName(),
   });
   await switchVault(root);
   return { vaultId: invite.vaultId, ready: teamRuntime?.root !== undefined };

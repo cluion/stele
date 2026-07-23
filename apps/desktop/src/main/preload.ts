@@ -87,6 +87,8 @@ export interface SteleApi {
   // ── 團隊(2b)──
   /** 目前 vault 的 team 狀態(是否 team、是否 owner、金鑰是否就緒) */
   teamInfo(): Promise<TeamInfo>;
+  /** team 狀態有變(核准就緒、角色重驗後改變等);回傳退訂函式 */
+  onTeamChanged(cb: () => void): () => void;
   /** 把目前 vault 轉為 team vault(建立者);回傳新 vaultId */
   teamCreate(url: string, token: string): Promise<{ vaultId: string }>;
   /** 以邀請 bundle 加入 team vault;ready=false 表示已 enroll 但等擁有者核准 */
@@ -272,6 +274,11 @@ const api: SteleApi = {
     return () => ipcRenderer.off("spaces:changed", handler);
   },
   teamInfo: () => ipcRenderer.invoke("team:info"),
+  onTeamChanged: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("team:changed", handler);
+    return () => ipcRenderer.off("team:changed", handler);
+  },
   teamCreate: (url, token) => ipcRenderer.invoke("team:create", url, token),
   teamJoin: (invite) => ipcRenderer.invoke("team:join", invite),
   teamInvite: (role, ttlSec) => ipcRenderer.invoke("team:invite", role, ttlSec),
