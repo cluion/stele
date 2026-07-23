@@ -41,8 +41,10 @@ to acknowledge within 72 hours.
 - **A removed team member** who kept an offline copy of the old key.
 - **A member outside a restricted space's access list.**
 - **Another team member acting maliciously** — bounded: they can decrypt what
-  their role and space access allow, and (see §4.1) the system does not yet
-  cryptographically constrain what they *write*.
+  their role and space access allow. Their *writes* are now author-signed and
+  role-checked end-to-end (§2.8), so a viewer cannot forge accepted writes; a
+  legitimate editor writing unwanted content remains an audit/social matter, not
+  one cryptography prevents (§4.1).
 
 ### 1.3 Trust assumptions
 
@@ -142,6 +144,46 @@ and permanently poison the shared log. Rotation is idempotent and crash-safe:
 nothing half-applies before the commit, and an interrupted re-encryption resumes
 on restart.
 
+### 2.8 Per-write author signatures (since 0.15–0.16)
+
+Every write (incremental update and snapshot) in a team vault carries an
+**Ed25519 author signature** over `domain ‖ kind ‖ docId ‖ epoch ‖ SHA-256(ciphertext)`
+(domain `stele-update-v1`). The signature is over the *ciphertext hash*, so a
+recipient verifies authorship **before decrypting**.
+
+To verify a write, a member must know the author's trusted signing key. This is
+established by a **member-certificate directory** (since 0.15): the owner
+endorses each `memberId ↔ pubSign` binding with a signature over
+`domain ‖ vaultId ‖ pubSign ‖ role ‖ epoch` (domain `stele-member-cert-v1`), and
+any authenticated member may pull the full directory. Public signing keys are
+not secret; the owner signature on each certificate is what prevents a malicious
+relay from injecting a forged member. `memberId = hex(SHA-256(pubSign))`, so the
+binding is self-certifying and the id is never trusted from the blob.
+
+Verification (before `applyUpdate`): look up the author's current-epoch member
+certificate → confirm role ∈ {owner, editor} → verify the write signature. A
+write that fails any step is dropped and skipped via the existing poison-skip
+path (re-snapshot over the offending sequence), so an injected write cannot stall
+the CRDT sequence. This makes **viewer read-only enforcement client-verifiable**,
+not merely server-enforced (§3.2): a viewer's write is rejected on every
+recipient even if a malicious server relays it.
+
+**Snapshots** are compaction of many members' merged operations and have no
+single original author; a snapshot is signed by the compactor (an editor+ member)
+as a *witness* of that state. Snapshot content authenticity therefore reduces to
+"the compactor is a trusted editor," not per-operation authorship.
+
+**Forced signing mode (since 0.16, §7.3 of the design).** During the upgrade
+window, recipients tolerate *unsigned* writes (empty author) for backward
+compatibility with pre-0.16 clients — a transitional gap a malicious relay could
+exploit by clearing the author field on an injected write. The owner closes this
+gap with a per-vault, owner-signed **policy** (`stele-vault-policy-v1`, epoch-bound,
+delivered atomically with the key envelopes): once `requireSignedWrites` is set,
+recipients reject all unsigned writes, and the honest server rejects them too as
+defense-in-depth. The verified policy is persisted locally, so a malicious server
+that later suppresses it cannot silently downgrade a client that has already seen
+it. Owners should enable it after confirming every member has upgraded.
+
 ---
 
 ## 3. Trust boundaries
@@ -157,6 +199,7 @@ are server-enforced (hold only if the server is honest).**
 | Confidentiality of content & file names | AES-256-GCM; server sees only ciphertext |
 | Authenticity of key distribution | Owner Ed25519 signature on every envelope |
 | Authenticity of role *assignment* | Owner-signed role credentials (§2.6) |
+| Authenticity of individual writes | Per-write author signatures + member-cert directory (§2.8) |
 | Forward secrecy on member removal | Key rotation + re-encryption (§2.7) |
 | Per-space confidentiality | Independent per-space key, wrapped only to the access list |
 | No cross-vault / cross-epoch key replay | Context binding in the envelope HKDF |
@@ -167,10 +210,12 @@ These protect against abuse and mistakes, but a **compromised server could
 bypass them.** They are defense-in-depth, not end-to-end guarantees:
 
 - **Role-based read/write enforcement.** The server rejects writes from viewers
-  and drops connections of removed/demoted members. But a viewer physically
-  holds the team key, so a malicious server could choose to accept their writes.
-  Role *assignment* is cryptographically verifiable (§2.6); role *enforcement* is
-  not.
+  and drops connections of removed/demoted members. A viewer physically holds the
+  team key, so a malicious server could choose to relay their writes — but since
+  0.16 recipients also verify the author's role from the owner-signed member-cert
+  directory (§2.8), so a viewer's (or removed member's) write is rejected
+  end-to-end, not only at the server. In forced-signing mode this holds for every
+  write; during the transitional window it holds for every *signed* write.
 - **Kicking active connections** on removal or demotion.
 - **DoS protections**: payload size caps, id validation, one-time invite tokens,
   rate-relevant limits.
@@ -189,24 +234,26 @@ plaintext.
 
 We document these explicitly rather than let them be assumed away.
 
-### 4.1 Write authenticity is not yet cryptographic ⚠️ (largest open item)
+### 4.1 Write authenticity: implemented, with bounded residuals
 
-Individual CRDT updates are **encrypted but not individually author-signed.**
-Consequences:
+Individual writes are now author-signed and verified end-to-end (§2.8), which
+closes the former largest open item. What remains bounded:
 
-- A **compromised server** cannot read content, but for a document it is relaying
-  it could attempt to inject or reorder ciphertext. Injected garbage fails to
-  decrypt and is dropped; but the server can still suppress or delay updates
-  (availability), and the authorship of any given edit is not cryptographically
-  attributable.
-- A **malicious member** who can legitimately decrypt a document could craft
-  updates that others will accept as coming from the shared document, without a
-  per-edit signature proving who authored them.
-
-Confidentiality and forward secrecy hold. **Per-write authenticity and authorship
-attribution are the next planned piece of work** (a design is being drafted).
-Until then, treat write integrity within a trusted team as a social, not
-cryptographic, property.
+- **Legitimate editors are not content-audited.** A member with a legitimate
+  editor/owner role holds the key and can write any content; the signature proves
+  *who* wrote it (attribution), not that the content is *desired*. This is an
+  audit-and-social matter by design, not something cryptography prevents.
+- **Transitional tolerance until forced mode.** For backward compatibility,
+  recipients tolerate unsigned writes until the owner enables forced signing
+  (§2.8). Within that window a malicious relay could inject an unsigned write with
+  a cleared author field. Enabling `requireSignedWrites` closes it; the verified
+  policy is persisted locally to resist later suppression by a malicious server.
+- **Availability is still not guaranteed.** A malicious server cannot forge or
+  read content, but it can still suppress, delay, or reorder delivery. Signatures
+  provide authenticity and integrity, not availability.
+- **Fine-grained (per-character) blame is out of scope.** Authorship is verified
+  at the write level; mapping individual CRDT operations back to authors after
+  merge/compaction is deliberately not attempted.
 
 ### 4.2 Restriction is forward-only
 
