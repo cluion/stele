@@ -110,6 +110,8 @@ export interface SteleApi {
    * 應在確認全員升級後再開;否則舊版用戶端的寫入會被擋。
    */
   teamSetRequireSigned(enabled: boolean): Promise<{ requireSigned: boolean }>;
+  /** 已驗證的成員目錄(P4 attribution):供標記留言作者是否為 owner 背書的合法成員及角色;非團隊 vault 為空 */
+  teamDirectory(): Promise<VerifiedMemberInfo[]>;
   /**
    * owner 設定空間成員子集並立即輪換金鑰:memberIds = 受限名單(owner 恆含);null = 恢復開放全團隊。
    * 名單外成員從此(前向)解不開該空間內容,該空間的筆記也不再物化到他們的裝置。
@@ -169,6 +171,14 @@ export interface CommentIdentity {
   deviceId: string;
   name: string;
   color: string;
+  /** 密碼學成員身分(團隊 vault):留言作者綁它,收件端可對成員目錄驗;個人/本地 vault 為空 */
+  memberId: string;
+}
+
+/** 已驗證成員目錄的一筆(P4 attribution):memberId ↔ 角色,由 owner 簽章憑證背書 */
+export interface VerifiedMemberInfo {
+  memberId: string;
+  role: TeamRole;
 }
 
 export type SharePermission = "read" | "write";
@@ -295,6 +305,7 @@ const api: SteleApi = {
   teamRemove: (memberId) => ipcRenderer.invoke("team:remove", memberId),
   teamRotate: () => ipcRenderer.invoke("team:rotate"),
   teamSetRequireSigned: (enabled) => ipcRenderer.invoke("team:setRequireSigned", enabled),
+  teamDirectory: () => ipcRenderer.invoke("team:directory"),
   spacesSetMembers: (spaceId, memberIds) => ipcRenderer.invoke("spaces:setMembers", spaceId, memberIds),
 };
 

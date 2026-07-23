@@ -117,6 +117,12 @@ describe("金牌:逐 update 作者驗證(P4)", () => {
     const b = makeMember(vaultId, "bob-dev", root, bob, owner.pubSign);
     await until(() => content(b.dir, "團隊筆記.md") === "# 團隊筆記\n合法內容\n", "bob 收斂合法內容");
 
+    // attribution:bob 的已驗證成員目錄含 owner 與 bob 及正確角色(留言/協作作者標記的資料來源)
+    await until(() => b.manager.memberDirectory().length >= 2, "bob 目錄拉齊");
+    const dir = new Map(b.manager.memberDirectory().map((m) => [m.memberId, m.role]));
+    expect(dir.get(owner.memberId)).toBe("owner");
+    expect(dir.get(bob.memberId)).toBe("editor");
+
     const noteDocId = a.session.docId("團隊筆記.md");
 
     // (b) 惡意注入:mallory(非此 vault 成員)以團隊 root 加密一筆「污染」內容,偽造 authorMemberId 塞進 server。

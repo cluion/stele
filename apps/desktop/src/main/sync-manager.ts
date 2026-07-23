@@ -18,6 +18,7 @@ import {
   type SyncDocState,
   type SyncHost,
   type SyncStatus,
+  type MemberRole,
 } from "@stele/sync";
 import type { VaultSession, VaultFileEvent } from "./vault-session.ts";
 import { VaultMeta, setPath } from "./vault-meta.ts";
@@ -431,9 +432,14 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
     this.loose.clear();
   }
 
-  /** 目前使用者身分,供 renderer 標記留言作者 */
-  identity(): { deviceId: string; name: string; color: string } {
-    return { ...this.self };
+  /** 目前使用者身分,供 renderer 標記留言作者;memberId 為密碼學身分(團隊 vault),個人 vault 為空 */
+  identity(): { deviceId: string; name: string; color: string; memberId: string } {
+    return { ...this.self, memberId: this.memberId ?? "" };
+  }
+
+  /** 已驗證的成員目錄(P4 attribution):供 renderer 標記留言作者是否為 owner 背書的合法成員及角色 */
+  memberDirectory(): { memberId: string; role: MemberRole }[] {
+    return this.client.directory().map((m) => ({ memberId: m.memberId, role: m.role }));
   }
 
   private makeHost(): SyncHost {

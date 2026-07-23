@@ -825,6 +825,9 @@ ipcMain.handle("team:setRequireSigned", async (_e, enabled: unknown) => {
   return { requireSigned: enabled };
 });
 
+/** 已驗證的成員目錄(P4 attribution):供 renderer 標記留言作者;非團隊 vault 或未同步為空 */
+ipcMain.handle("team:directory", () => (teamRuntime ? (syncManager?.memberDirectory() ?? []) : []));
+
 ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {
   if (typeof rel !== "string") throw new Error("非法參數");
   return requireSession().backlinks(rel);

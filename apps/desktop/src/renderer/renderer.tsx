@@ -98,6 +98,7 @@ function CommentsPanel({
   available,
   canAdd,
   readOnly,
+  directory,
   onAdd,
   onReply,
   onResolve,
@@ -110,6 +111,8 @@ function CommentsPanel({
   canAdd: boolean;
   /** viewer 角色:讀得到討論串,但不給任何寫入入口 */
   readOnly: boolean;
+  /** 已驗證成員目錄(memberId → 角色):作者是背書成員時標記已驗證徽章(P4 attribution);非團隊 vault 為空 */
+  directory: Map<string, "owner" | "editor" | "viewer">;
   onAdd: (body: string) => void;
   onReply: (threadId: string, body: string) => void;
   onResolve: (threadId: string, resolved: boolean) => void;
@@ -131,6 +134,17 @@ function CommentsPanel({
     if (!body) return;
     onReply(id, body);
     setReplyText((r) => ({ ...r, [id]: "" }));
+  };
+
+  /** 作者是 owner 背書的當紀元成員 → 顯示已驗證徽章(含角色);否則不標記(舊 deviceId 作者、未知或已移除者) */
+  const verified = (author: string) => {
+    const role = directory.get(author);
+    if (!role) return null;
+    return (
+      <span className="comment-verified" title={t("comments.verified.title")}>
+        ✓ {t(`team.role.${role}`)}
+      </span>
+    );
   };
 
   return (
@@ -177,12 +191,18 @@ function CommentsPanel({
                 <span className="comment-quote orphaned">{t("comments.orphaned")}</span>
               )}
               <div className="comment-msg">
-                <span className="comment-author">{thread.name}</span>
+                <span className="comment-author">
+                  {thread.name}
+                  {verified(thread.author)}
+                </span>
                 <p>{thread.body}</p>
               </div>
               {thread.replies.map((r) => (
                 <div key={r.id} className="comment-msg reply">
-                  <span className="comment-author">{r.name}</span>
+                  <span className="comment-author">
+                    {r.name}
+                    {verified(r.author)}
+                  </span>
                   <p>{r.body}</p>
                 </div>
               ))}
@@ -262,6 +282,8 @@ function Editor({
   const [threadViews, setThreadViews] = useState<ThreadView[]>([]);
   /** 留言需要啟用同步(伴生 doc 由 SyncManager 管理);未啟用時面板提示而非靜默失效 */
   const [commentsAvailable, setCommentsAvailable] = useState(true);
+  /** 已驗證成員目錄(memberId → 角色):標記留言作者為 owner 背書成員(P4 attribution);非團隊 vault 為空 */
+  const [directory, setDirectory] = useState<Map<string, "owner" | "editor" | "viewer">>(new Map());
 
   const mutateComments = (fn: (doc: Y.Doc) => void): void => {
     if (readOnly) return; // viewer:留言也是 doc 寫入,伺服器會拒;UI 層一併擋
@@ -273,7 +295,8 @@ function Editor({
     const me = meRef.current;
     if (!ytext || !doc || !me || !selRange) return;
     const anchor = encodeAnchor(ytext, selRange.from, selRange.to);
-    mutateComments((c) => addThread(c, { id: crypto.randomUUID(), anchor, author: me.deviceId, name: me.name, body, createdAt: Date.now() }));
+    // 作者綁密碼學 memberId(團隊 vault):收件端可對成員目錄驗;個人/本地 vault 無 memberId,退回 deviceId
+    mutateComments((c) => addThread(c, { id: crypto.randomUUID(), anchor, author: me.memberId || me.deviceId, name: me.name, body, createdAt: Date.now() }));
   };
 
   // ── [[ 自動完成 ──
@@ -391,6 +414,17 @@ function Editor({
       setThreads([]);
       setSelRange(null);
     };
+  }, [rel]);
+
+  // 已驗證成員目錄(P4 attribution):載入並在團隊變更(核准/移除/輪換)時刷新;開新筆記時一併重取
+  useEffect(() => {
+    const load = (): void =>
+      void window.stele
+        .teamDirectory()
+        .then((list) => setDirectory(new Map(list.map((m) => [m.memberId, m.role]))))
+        .catch(() => setDirectory(new Map()));
+    load();
+    return window.stele.onTeamChanged(load);
   }, [rel]);
 
   // 投影生命週期:依模式掛 PM 或 CM,真相永遠是 ytext
@@ -610,12 +644,13 @@ function Editor({
           available={commentsAvailable}
           canAdd={commentsAvailable && !readOnly && selRange !== null}
           readOnly={readOnly}
+          directory={directory}
           onAdd={addCommentFromSelection}
           onReply={(id, body) =>
             mutateComments((c) =>
               addReply(c, id, {
                 id: crypto.randomUUID(),
-                author: meRef.current?.deviceId ?? "",
+                author: meRef.current ? meRef.current.memberId || meRef.current.deviceId : "",
                 name: meRef.current?.name ?? "",
                 body,
                 createdAt: Date.now(),

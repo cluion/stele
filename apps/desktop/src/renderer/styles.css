@@ -689,6 +689,7 @@ body {
 .comment-msg { margin-bottom: var(--sp-2); }
 .comment-msg.reply { padding-left: var(--sp-3); border-left: 1px solid var(--border); }
 .comment-author { font-size: var(--fs-sm); font-weight: 600; color: var(--text); }
+.comment-verified { margin-left: var(--sp-1); font-size: var(--fs-xs, 0.75rem); font-weight: 500; color: var(--accent); vertical-align: middle; }
 .comment-msg p { margin: 2px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .comment-actions { display: flex; gap: var(--sp-2); margin: var(--sp-2) 0; }
 .comment-actions button { font-size: var(--fs-sm); color: var(--text-muted); }

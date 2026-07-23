@@ -42,9 +42,10 @@ export function saveSettings(patch: Settings): void {
  * 形狀與 SyncManager.identity() 一致(含 color,同一 deviceId 得同色),
  * 兩者都填 renderer 的 CommentIdentity,純本地留言作者才不會缺色。
  */
-export function localIdentity(): { deviceId: string; name: string; color: string } {
+export function localIdentity(): { deviceId: string; name: string; color: string; memberId: string } {
   const saved = loadSettings();
   const deviceId = saved.deviceId ?? randomUUID();
   if (!saved.deviceId) saveSettings({ deviceId });
-  return { deviceId, name: saved.displayName ?? `我-${deviceId.slice(0, 4)}`, color: colorFor(deviceId) };
+  // memberId 為空:純本地/個人 vault 無團隊成員身分,留言作者不可驗(顯示端不標記已驗證)
+  return { deviceId, name: saved.displayName ?? `我-${deviceId.slice(0, 4)}`, color: colorFor(deviceId), memberId: "" };
 }
