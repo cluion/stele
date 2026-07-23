@@ -235,7 +235,7 @@ function requireSession(): VaultSession {
 let pendingRetryTimer: NodeJS.Timeout | undefined;
 
 /** bootstrap ready 結果落進 teamRuntime(root/epoch/驗證過的角色) */
-function adoptTeamBootstrap(next: VaultSession, res: { root: Uint8Array; epoch: number; role?: MemberRole; requireSignedWrites: boolean }): void {
+function adoptTeamBootstrap(next: VaultSession, res: { root: Uint8Array; epoch: number; role?: MemberRole; requireSignedWrites: boolean | undefined }): void {
   if (!teamRuntime) return;
   teamRuntime.root = res.root;
   teamRuntime.epoch = res.epoch;
@@ -244,9 +244,11 @@ function adoptTeamBootstrap(next: VaultSession, res: { root: Uint8Array; epoch: 
     teamRuntime.role = res.role;
     persistVerifiedRole(next.root, res.role);
   }
-  // 強制簽章政策(§7.3):驗過的當代政策蓋過本地宣稱並持久化(重開先套、抗惡意伺服器抑制)
-  teamRuntime.requireSigned = res.requireSignedWrites;
-  persistRequireSigned(next.root, res.requireSignedWrites);
+  // 強制簽章政策(§7.3):只有收到當代 owner 簽章政策才變更並持久化;政策缺席(undefined)保留既有 pin,
+  // 擋惡意伺服器抑制政策把已 pin true 的成員偷降級(fail-closed)。首次加入無 pin → 沿用 sync.json 預設 false
+  const nextReq = res.requireSignedWrites ?? teamRuntime.requireSigned;
+  teamRuntime.requireSigned = nextReq;
+  persistRequireSigned(next.root, nextReq);
 }
 
 /** 金鑰就緒後把 SyncManager 接上目前 vault(personal 與 team 共用);含輪換續跑檢查 */
@@ -321,11 +323,13 @@ async function refreshTeamRole(next: VaultSession, memberIdentity: SyncIdentity)
         persistVerifiedRole(next.root, res.role);
         sendAll("team:changed");
       }
-      // 強制簽章政策(§7.3)同紀元變更:owner 切換後成員重連即近即時套用(不必等輪換)
-      if (res.requireSignedWrites !== rt.requireSigned) {
-        rt.requireSigned = res.requireSignedWrites;
-        persistRequireSigned(next.root, res.requireSignedWrites);
-        syncManager?.setRequireSignedWrites(res.requireSignedWrites);
+      // 強制簽章政策(§7.3)同紀元變更:owner 切換後成員重連即近即時套用(不必等輪換);
+      // 政策缺席(undefined)保留既有 pin,不因抑制而降級(fail-closed)
+      const nextReq = res.requireSignedWrites ?? rt.requireSigned;
+      if (nextReq !== rt.requireSigned) {
+        rt.requireSigned = nextReq;
+        persistRequireSigned(next.root, nextReq);
+        syncManager?.setRequireSignedWrites(nextReq);
         sendAll("team:changed");
       }
     }
@@ -594,10 +598,11 @@ async function handleKeyRotated(epoch: number): Promise<void> {
       rt.root = res.root;
       rt.epoch = res.epoch;
       if (res.role) rt.role = res.role; // 輪換重簽的角色憑證(§9.5)一併帶回
-      // 強制簽章政策(§7.3)綁 epoch,輪換重簽:以新代政策熱更新,並持久化
-      rt.requireSigned = res.requireSignedWrites;
-      if (session) persistRequireSigned(session.root, res.requireSignedWrites);
-      manager.setRequireSignedWrites(res.requireSignedWrites);
+      // 強制簽章政策(§7.3)綁 epoch,輪換重簽:以新代政策熱更新並持久化;缺席保留既有 pin(fail-closed)
+      const nextReq = res.requireSignedWrites ?? rt.requireSigned;
+      rt.requireSigned = nextReq;
+      if (session) persistRequireSigned(session.root, nextReq);
+      manager.setRequireSignedWrites(nextReq);
       await manager.rotateRoot(res.root, res.epoch, true, res.spaceKeys, res.restrictedSpaceIds); // 受限空間金鑰與受限清單整組換到位
       // 空間存取可能變了(獲授權補物化、失授權移檔並隱藏空間):通知 renderer 重載側欄空間與檔案清單
       sendAll("spaces:changed");

@@ -68,8 +68,10 @@ export async function rotateTeamRoot(opts: RotateOptions): Promise<{ root: Uint8
         if (allowed.has(m.memberId)) await admin.approveSpace(m, s.spaceId, spaceKeys.get(s.spaceId)!, epoch);
       }
     }
-    // 強制簽章政策綁 epoch:開啟狀態須以新 epoch 重簽(在柵欄前推妥,commit 後成員 bootstrap 即見當代政策)
-    if (opts.requireSignedWrites) await admin.setRequireSignedWrites(true, epoch);
+    // 強制簽章政策綁 epoch:每次輪換都以新 epoch 重簽當前狀態(on 或 off),在柵欄前推妥。
+    // 為何連 off 也重簽:成員以「政策缺席即保留既有 pin」抗降級(fail-closed),若只重簽 on,
+    // 「owner 關閉後又輪換」會使新紀元無政策 → 錯過關閉的成員永久卡在 pin true。重簽 off 讓關閉也跨紀元傳播。
+    await admin.setRequireSignedWrites(opts.requireSignedWrites ?? false, epoch);
     await admin.rotateKey(epoch); // 柵欄點:成功即 commit,不可回頭
   } finally {
     admin.close();

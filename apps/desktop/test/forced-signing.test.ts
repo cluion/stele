@@ -109,28 +109,38 @@ describe("金牌:強制簽章模式(P4 §7.3)", () => {
     store.close();
   });
 
-  it("owner 開啟後:bootstrap 回報強制、伺服器軟拒 unsigned 寫入", async () => {
+  it("政策 tri-state:缺席/抑制→undefined(保留 pin)、開啟→true、關閉→false", async () => {
     const vaultId = "forced-wiring";
     const owner = await deriveIdentity(generateSeed());
     const root = await createTeamVault({ url: url(), token: TOKEN, vaultId, identity: owner, createSocket: wsSocket });
+    const boot = () => bootstrapTeamKey({ url: url(), token: TOKEN, vaultId, identity: owner, ownerPubSign: owner.pubSign, createSocket: wsSocket });
+    const admin = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId, identity: owner, createSocket: wsSocket });
 
-    // 開啟前:政策未設,bootstrap 回 requireSignedWrites=false,伺服器不擋 unsigned
-    const before = await bootstrapTeamKey({ url: url(), token: TOKEN, vaultId, identity: owner, ownerPubSign: owner.pubSign, createSocket: wsSocket });
-    expect(before.status).toBe("ready");
-    if (before.status === "ready") expect(before.requireSignedWrites).toBe(false);
+    // 政策未設:bootstrap 回 undefined(非 false)——呼叫端據此保留既有 pin,不誤把「缺席」當關閉
+    const before = await boot();
+    if (before.status === "ready") expect(before.requireSignedWrites).toBeUndefined();
     expect(store.requiresSignedWrites(vaultId)).toBe(false);
 
-    // owner 開啟強制簽章(綁 epoch 0)
-    const admin = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId, identity: owner, createSocket: wsSocket });
+    // 開啟:當代政策明確 true,伺服器記錄要求簽章
     await admin.setRequireSignedWrites(true, 0);
-    admin.close();
-
-    // 開啟後:bootstrap 驗過政策回 true,伺服器記錄要求簽章
-    const after = await bootstrapTeamKey({ url: url(), token: TOKEN, vaultId, identity: owner, ownerPubSign: owner.pubSign, createSocket: wsSocket });
-    expect(after.status).toBe("ready");
-    if (after.status === "ready") expect(after.requireSignedWrites).toBe(true);
+    const on = await boot();
+    if (on.status === "ready") expect(on.requireSignedWrites).toBe(true);
     expect(store.requiresSignedWrites(vaultId)).toBe(true);
-    // 驗證用到 root 才不觸發 lint 未用變數;root 就是自封信封解出的團隊金鑰
+
+    // 惡意伺服器抑制政策(直接刪掉存放的 blob):bootstrap 回 undefined 而非 false,
+    // 呼叫端「?? 既有值」保留 pin true——這是反回滾的關鍵訊號,不讓抑制偷降級
+    const db = (store as unknown as { db: { prepare(sql: string): { run(...a: unknown[]): unknown } } }).db;
+    db.prepare("DELETE FROM vault_policy WHERE vault_id = ?").run(vaultId);
+    const suppressed = await boot();
+    if (suppressed.status === "ready") expect(suppressed.requireSignedWrites).toBeUndefined();
+
+    // 明確關閉:owner 簽發當代 off 政策 → bootstrap 回 false(明確關閉,才允許降級)
+    await admin.setRequireSignedWrites(false, 0);
+    const off = await boot();
+    if (off.status === "ready") expect(off.requireSignedWrites).toBe(false);
+    expect(store.requiresSignedWrites(vaultId)).toBe(false);
+
+    admin.close();
     expect(root.length).toBe(32);
   });
 
