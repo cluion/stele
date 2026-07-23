@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS updates (
   device_id TEXT NOT NULL,
   counter INTEGER NOT NULL,
   payload BLOB NOT NULL,
+  author_member_id TEXT NOT NULL DEFAULT '',
+  sig BLOB NOT NULL DEFAULT x'',
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   PRIMARY KEY (vault_id, doc_id, seq),
   UNIQUE (vault_id, doc_id, device_id, counter)
@@ -37,6 +39,8 @@ CREATE TABLE IF NOT EXISTS snapshots (
   doc_id TEXT NOT NULL,
   upto_seq INTEGER NOT NULL,
   payload BLOB NOT NULL,
+  author_member_id TEXT NOT NULL DEFAULT '',
+  sig BLOB NOT NULL DEFAULT x'',
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   PRIMARY KEY (vault_id, doc_id)
 );
@@ -90,6 +94,12 @@ CREATE TABLE IF NOT EXISTS member_certs (
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
   PRIMARY KEY (vault_id, member_id)
 );
+CREATE TABLE IF NOT EXISTS vault_policy (
+  vault_id TEXT PRIMARY KEY,
+  blob BLOB NOT NULL,
+  require_signed INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
 CREATE TABLE IF NOT EXISTS enrollment_tokens (
   token TEXT PRIMARY KEY,
   vault_id TEXT NOT NULL,
@@ -107,6 +117,10 @@ function migrateRoles(db: Database.Database): void {
     "ALTER TABLE enrollment_tokens ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'",
     "ALTER TABLE vault_owners ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE shares ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE updates ADD COLUMN author_member_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE updates ADD COLUMN sig BLOB NOT NULL DEFAULT x''",
+    "ALTER TABLE snapshots ADD COLUMN author_member_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE snapshots ADD COLUMN sig BLOB NOT NULL DEFAULT x''",
   ]) {
     try {
       db.exec(sql);
@@ -118,11 +132,15 @@ function migrateRoles(db: Database.Database): void {
 
 export interface StoredUpdate {
   seq: number;
+  authorMemberId: string;
+  sig: Uint8Array;
   payload: Uint8Array;
 }
 
 export interface StoredSnapshot {
   uptoSeq: number;
+  authorMemberId: string;
+  sig: Uint8Array;
   payload: Uint8Array;
 }
 
@@ -153,8 +171,16 @@ export class SyncStore {
     migrateRoles(this.db);
   }
 
-  /** 配發下一個 seq 並入庫;同一 device+counter 重送回傳既有 seq,冪等 */
-  appendUpdate(vaultId: string, docId: string, deviceId: string, counter: number, payload: Uint8Array): number {
+  /** 配發下一個 seq 並入庫(連同作者簽章 P4);同一 device+counter 重送回傳既有 seq,冪等 */
+  appendUpdate(
+    vaultId: string,
+    docId: string,
+    deviceId: string,
+    counter: number,
+    payload: Uint8Array,
+    authorMemberId = "",
+    sig: Uint8Array = new Uint8Array(),
+  ): number {
     const append = this.db.transaction((): number => {
       this.db.prepare("INSERT OR IGNORE INTO docs (vault_id, doc_id) VALUES (?, ?)").run(vaultId, docId);
       const existing = this.db
@@ -163,8 +189,8 @@ export class SyncStore {
       if (existing) return existing.seq;
       const seq = this.headSeq(vaultId, docId) + 1;
       this.db
-        .prepare("INSERT INTO updates (vault_id, doc_id, seq, device_id, counter, payload) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(vaultId, docId, seq, deviceId, counter, payload);
+        .prepare("INSERT INTO updates (vault_id, doc_id, seq, device_id, counter, payload, author_member_id, sig) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(vaultId, docId, seq, deviceId, counter, payload, authorMemberId, Buffer.from(sig));
       return seq;
     });
     return append();
@@ -172,9 +198,9 @@ export class SyncStore {
 
   updatesSince(vaultId: string, docId: string, fromSeq: number): StoredUpdate[] {
     const rows = this.db
-      .prepare("SELECT seq, payload FROM updates WHERE vault_id = ? AND doc_id = ? AND seq > ? ORDER BY seq")
-      .all(vaultId, docId, fromSeq) as Array<{ seq: number; payload: Buffer }>;
-    return rows.map((r) => ({ seq: r.seq, payload: new Uint8Array(r.payload) }));
+      .prepare("SELECT seq, payload, author_member_id, sig FROM updates WHERE vault_id = ? AND doc_id = ? AND seq > ? ORDER BY seq")
+      .all(vaultId, docId, fromSeq) as Array<{ seq: number; payload: Buffer; author_member_id: string; sig: Buffer }>;
+    return rows.map((r) => ({ seq: r.seq, authorMemberId: r.author_member_id, sig: new Uint8Array(r.sig), payload: new Uint8Array(r.payload) }));
   }
 
   /**
@@ -182,7 +208,7 @@ export class SyncStore {
    * **同一快照點覆蓋**:同 upto 的快照內容等價(同一序列前綴),但金鑰可能不同——
    * 輪換重加密撞上既有快照點時必須以新密文為準,否則 rekey 被靜默忽略,舊金鑰快照留存即安全洞。
    */
-  saveSnapshot(vaultId: string, docId: string, uptoSeq: number, payload: Uint8Array): void {
+  saveSnapshot(vaultId: string, docId: string, uptoSeq: number, payload: Uint8Array, authorMemberId = "", sig: Uint8Array = new Uint8Array()): void {
     const save = this.db.transaction(() => {
       this.db.prepare("INSERT OR IGNORE INTO docs (vault_id, doc_id) VALUES (?, ?)").run(vaultId, docId);
       const current = this.db
@@ -191,10 +217,11 @@ export class SyncStore {
       if (current && current.upto_seq > uptoSeq) return;
       this.db
         .prepare(
-          "INSERT INTO snapshots (vault_id, doc_id, upto_seq, payload) VALUES (?, ?, ?, ?) " +
-            "ON CONFLICT (vault_id, doc_id) DO UPDATE SET upto_seq = excluded.upto_seq, payload = excluded.payload, created_at = unixepoch()",
+          "INSERT INTO snapshots (vault_id, doc_id, upto_seq, payload, author_member_id, sig) VALUES (?, ?, ?, ?, ?, ?) " +
+            "ON CONFLICT (vault_id, doc_id) DO UPDATE SET upto_seq = excluded.upto_seq, payload = excluded.payload, " +
+            "author_member_id = excluded.author_member_id, sig = excluded.sig, created_at = unixepoch()",
         )
-        .run(vaultId, docId, uptoSeq, payload);
+        .run(vaultId, docId, uptoSeq, payload, authorMemberId, Buffer.from(sig));
       this.db.prepare("DELETE FROM updates WHERE vault_id = ? AND doc_id = ? AND seq <= ?").run(vaultId, docId, uptoSeq);
     });
     save();
@@ -202,9 +229,9 @@ export class SyncStore {
 
   snapshot(vaultId: string, docId: string): StoredSnapshot | undefined {
     const row = this.db
-      .prepare("SELECT upto_seq, payload FROM snapshots WHERE vault_id = ? AND doc_id = ?")
-      .get(vaultId, docId) as { upto_seq: number; payload: Buffer } | undefined;
-    return row && { uptoSeq: row.upto_seq, payload: new Uint8Array(row.payload) };
+      .prepare("SELECT upto_seq, payload, author_member_id, sig FROM snapshots WHERE vault_id = ? AND doc_id = ?")
+      .get(vaultId, docId) as { upto_seq: number; payload: Buffer; author_member_id: string; sig: Buffer } | undefined;
+    return row && { uptoSeq: row.upto_seq, authorMemberId: row.author_member_id, sig: new Uint8Array(row.sig), payload: new Uint8Array(row.payload) };
   }
 
   /** vault 內每個 doc 的最新 seq 與快照點,client 據此決定要 pull 什麼 */
@@ -379,6 +406,31 @@ export class SyncStore {
       .prepare("SELECT blob FROM member_certs WHERE vault_id = ? ORDER BY member_id")
       .all(vaultId) as Array<{ blob: Buffer }>;
     return rows.map((r) => new Uint8Array(r.blob));
+  }
+
+  /**
+   * 存 vault 政策(P4 §7.3,owner 簽章 blob):伺服器只存放與發還成員,授權真相在成員端驗簽。
+   * require_signed 另存明碼供伺服器自身縱深防禦(拒 unsigned 寫入);upsert 冪等。
+   */
+  putVaultPolicy(vaultId: string, blob: Uint8Array, requireSigned: boolean): void {
+    this.db
+      .prepare(
+        "INSERT INTO vault_policy (vault_id, blob, require_signed) VALUES (?, ?, ?) " +
+          "ON CONFLICT (vault_id) DO UPDATE SET blob = excluded.blob, require_signed = excluded.require_signed, updated_at = unixepoch()",
+      )
+      .run(vaultId, Buffer.from(blob), requireSigned ? 1 : 0);
+  }
+
+  /** 某 vault 的政策 blob(隨 envelopeList 發還成員驗簽);未設回 undefined */
+  vaultPolicy(vaultId: string): Uint8Array | undefined {
+    const row = this.db.prepare("SELECT blob FROM vault_policy WHERE vault_id = ?").get(vaultId) as { blob: Buffer } | undefined;
+    return row && new Uint8Array(row.blob);
+  }
+
+  /** 此 vault 是否要求簽章寫入(伺服器自身縱深防禦用的明碼旗標;非安全邊界,真相在成員驗簽) */
+  requiresSignedWrites(vaultId: string): boolean {
+    const row = this.db.prepare("SELECT require_signed FROM vault_policy WHERE vault_id = ?").get(vaultId) as { require_signed: number } | undefined;
+    return row?.require_signed === 1;
   }
 
   /**

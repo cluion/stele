@@ -4,6 +4,7 @@ import { identityChallengeBytes, type SyncIdentity } from "./identity.ts";
 import { wrapKey } from "./crypto.ts";
 import { rootWrapContext, KEY_ID_ROOT } from "./bootstrap.ts";
 import { signRoleCredential, signMemberCredential, verifyMemberCredential, memberIdFromPubSign, type VerifiedMember } from "./role-credential.ts";
+import { signVaultPolicy } from "./vault-policy.ts";
 
 /**
  * 團隊擁有者的管理連線(2b):一條認證好的連線,發邀請碼、列成員、核准(把 root 包給成員)、移除成員。
@@ -150,6 +151,15 @@ export class TeamAdminSession {
     const context = { vaultId: this.vaultId, keyId: spaceId, epoch, recipientMemberId: member.memberId };
     const blob = await wrapKey(spaceKey, member.pubWrap, this.identity.sign, context);
     await this.request((reqId) => ({ type: "envelopePush", reqId, keyId: spaceId, memberId: member.memberId, epoch, blob }), "ok");
+  }
+
+  /**
+   * 設定強制簽章模式(P4 §7.3,owner-only):簽發並上傳綁當前 epoch 的 vault 政策。
+   * 開啟後成員拒收 unsigned 寫入——owner 應在確認全員升級後再開。綁 epoch,輪換須重簽(同 role/成員憑證)。
+   */
+  async setRequireSignedWrites(enabled: boolean, epoch: number): Promise<void> {
+    const blob = signVaultPolicy(this.identity.sign, { vaultId: this.vaultId, requireSignedWrites: enabled, epoch });
+    await this.request((reqId) => ({ type: "policyPush", reqId, requireSigned: enabled, blob }), "ok");
   }
 
   /** 移除成員(刪 member 列 + 其信封 + 踢連線);密碼層前向保密由呼叫端接著 rotateKey 輪換補上 */

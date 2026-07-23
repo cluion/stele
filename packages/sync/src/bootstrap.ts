@@ -3,6 +3,7 @@ import type { SocketLike } from "./client.ts";
 import { identityChallengeBytes, type SyncIdentity } from "./identity.ts";
 import { wrapKey, type WrapContext } from "./crypto.ts";
 import { verifyRoleCredential, signMemberCredential } from "./role-credential.ts";
+import { verifyVaultPolicy } from "./vault-policy.ts";
 
 /**
  * 團隊 vault 的金鑰 bootstrap(2b):在建 SyncManager **之前**跑完的獨立握手。
@@ -48,6 +49,8 @@ export type TeamBootstrapResult =
       role?: MemberRole;
       spaceKeys: Map<string, Uint8Array>;
       restrictedSpaceIds: string[];
+      /** 強制簽章模式(§7.3):owner 簽章 vault 政策啟用且屬當前紀元 → true,成員據此拒 unsigned 寫入 */
+      requireSignedWrites: boolean;
     }
   | { status: "pending" };
 
@@ -87,7 +90,14 @@ export function bootstrapTeamKey(opts: TeamBootstrapOptions): Promise<TeamBootst
           const cred = verifyRoleCredential(msg.roleCred, opts.ownerPubSign, vaultId, identity.memberId);
           if (cred.epoch === env.epoch) role = cred.role;
         }
-        done({ status: "ready", root, epoch: env.epoch, role, spaceKeys, restrictedSpaceIds: msg.restrictedSpaceIds });
+        // Vault 政策(§7.3):驗 owner 簽章;偽造/挪用即拋(擋盲中繼捏造政策)。
+        // 舊紀元政策(真簽但已被輪換作廢)視同未設 → 過渡容忍,擋降級/升級重放
+        let requireSignedWrites = false;
+        if (msg.policy.length > 0) {
+          const pol = verifyVaultPolicy(msg.policy, opts.ownerPubSign, vaultId);
+          if (pol.epoch === env.epoch) requireSignedWrites = pol.requireSignedWrites;
+        }
+        done({ status: "ready", root, epoch: env.epoch, role, spaceKeys, restrictedSpaceIds: msg.restrictedSpaceIds, requireSignedWrites });
         break;
       }
       case "error":

@@ -35,7 +35,8 @@ type TeamAdminMessage = Extract<
       | "rotateKey"
       | "credPush"
       | "memberCertPush"
-      | "memberCertPull";
+      | "memberCertPull"
+      | "policyPush";
   }
 >;
 
@@ -412,6 +413,7 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
             envelopes: opts.store.envelopesFor(vault, self),
             roleCred: opts.store.roleCredentialFor(vault, self) ?? new Uint8Array(),
             restrictedSpaceIds: opts.store.restrictedSpaceIds(vault),
+            policy: opts.store.vaultPolicy(vault) ?? new Uint8Array(),
           });
           break;
         case "envelopePush": {
@@ -450,6 +452,14 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
           // 成員憑證目錄:任何認證成員可拉(pubSign 公開,blob 自帶 owner 簽章擋捏造)
           send({ type: "memberCertList", reqId: msg.reqId, certs: opts.store.listMemberCerts(vault) });
           break;
+        case "policyPush": {
+          // Vault 政策(P4 §7.3):owner 簽章 blob,伺服器只存放與發還成員;授權真相在成員端驗簽。
+          // require_signed 明碼供伺服器自身縱深防禦(拒 unsigned),非安全邊界
+          if (!requireOwner()) return;
+          opts.store.putVaultPolicy(vault, msg.blob, msg.requireSigned);
+          send({ type: "ok", reqId: msg.reqId });
+          break;
+        }
         case "memberList":
           if (!requireOwner()) return;
           send({ type: "memberCatalog", reqId: msg.reqId, members: opts.store.listMembers(vault) });
@@ -533,7 +543,8 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         msg.type === "rotateKey" ||
         msg.type === "credPush" ||
         msg.type === "memberCertPush" ||
-        msg.type === "memberCertPull"
+        msg.type === "memberCertPull" ||
+        msg.type === "policyPush"
       ) {
         if (scope !== undefined) {
           refuse("forbidden", "分享連線不得管理團隊");
@@ -596,11 +607,32 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         refuse("stale-epoch", "金鑰已輪換,請重新取得團隊金鑰");
         return;
       }
+      // 強制簽章縱深防禦(P4 §7.3):owner 開啟後,伺服器一併拒 unsigned 寫入。真正的安全邊界在成員端
+      // 驗簽(惡意伺服器本可繞過此檢查),此處只擋誠實伺服器上遺漏簽章的舊 client、減少 poison-skip 折騰。
+      // 軟拒(不關線):同唯讀成員軟拒,免舊 client 落入拒→踢→重連無限迴圈,讀取連線也一併陪葬
+      if (
+        scope === undefined &&
+        (msg.type === "push" || msg.type === "snapshotPush") &&
+        opts.store.ownerOf(vault) !== undefined &&
+        opts.store.requiresSignedWrites(vault) &&
+        msg.authorMemberId === ""
+      ) {
+        send({ type: "error", code: "signature-required", message: "此團隊要求簽章寫入,請升級用戶端" });
+        return;
+      }
       switch (msg.type) {
         case "push": {
-          const seq = opts.store.appendUpdate(vault, msg.docId, msg.deviceId, msg.counter, msg.payload);
+          // 伺服器全盲不驗簽(驗在收件端);只存作者宣稱的 authorMemberId + sig 並原樣轉發
+          const seq = opts.store.appendUpdate(vault, msg.docId, msg.deviceId, msg.counter, msg.payload, msg.authorMemberId, msg.sig);
           send({ type: "ack", docId: msg.docId, counter: msg.counter, seq });
-          relayToPeers(vault, msg.docId, { type: "update", docId: msg.docId, seq, payload: msg.payload });
+          relayToPeers(vault, msg.docId, {
+            type: "update",
+            docId: msg.docId,
+            seq,
+            authorMemberId: msg.authorMemberId,
+            sig: msg.sig,
+            payload: msg.payload,
+          });
           break;
         }
         case "awareness": {
@@ -610,21 +642,35 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         }
         case "pull": {
           for (const u of opts.store.updatesSince(vault, msg.docId, msg.fromSeq)) {
-            send({ type: "update", docId: msg.docId, seq: u.seq, payload: u.payload });
+            send({ type: "update", docId: msg.docId, seq: u.seq, authorMemberId: u.authorMemberId, sig: u.sig, payload: u.payload });
           }
           break;
         }
         case "snapshotPush": {
-          opts.store.saveSnapshot(vault, msg.docId, msg.uptoSeq, msg.payload);
+          opts.store.saveSnapshot(vault, msg.docId, msg.uptoSeq, msg.payload, msg.authorMemberId, msg.sig);
           send({ type: "snapshotAck", docId: msg.docId, uptoSeq: msg.uptoSeq });
           // 廣播新快照給同 vault 其他連線:快照(壓縮、或輪換 rekey)會截斷增量,否則落後的成員
           // 收不到「快照前進了」的通知,卡在舊 seq——增量已被截斷,他們的 pull 拿到空回覆而不自知
-          relayToPeers(vault, msg.docId, { type: "snapshot", docId: msg.docId, uptoSeq: msg.uptoSeq, payload: msg.payload });
+          relayToPeers(vault, msg.docId, {
+            type: "snapshot",
+            docId: msg.docId,
+            uptoSeq: msg.uptoSeq,
+            authorMemberId: msg.authorMemberId,
+            sig: msg.sig,
+            payload: msg.payload,
+          });
           break;
         }
         case "snapshotPull": {
           const snap = opts.store.snapshot(vault, msg.docId);
-          send({ type: "snapshot", docId: msg.docId, uptoSeq: snap?.uptoSeq ?? 0, payload: snap?.payload ?? new Uint8Array() });
+          send({
+            type: "snapshot",
+            docId: msg.docId,
+            uptoSeq: snap?.uptoSeq ?? 0,
+            authorMemberId: snap?.authorMemberId ?? "",
+            sig: snap?.sig ?? new Uint8Array(),
+            payload: snap?.payload ?? new Uint8Array(),
+          });
           break;
         }
       }

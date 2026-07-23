@@ -10,12 +10,12 @@ import {
 
 const clientCases: ClientMessage[] = [
   { type: "auth", token: "祕密-token-1234567890", vaultId: "vault-uuid-1" },
-  { type: "push", docId: "doc-1", deviceId: "dev-1", counter: 42, epoch: 0, payload: new Uint8Array([0, 1, 255, 128]) },
-  { type: "push", docId: "doc-1", deviceId: "dev-1", counter: 0, epoch: 3, payload: new Uint8Array() },
+  { type: "push", docId: "doc-1", deviceId: "dev-1", counter: 42, epoch: 0, authorMemberId: "", sig: new Uint8Array(), payload: new Uint8Array([0, 1, 255, 128]) },
+  { type: "push", docId: "doc-1", deviceId: "dev-1", counter: 0, epoch: 3, authorMemberId: "", sig: new Uint8Array(), payload: new Uint8Array() },
   { type: "pull", docId: "doc-1", fromSeq: 0 },
   { type: "pull", docId: "中文檔名也是合法 id", fromSeq: 123456789 },
-  { type: "snapshotPush", docId: "doc-2", uptoSeq: 7, epoch: 0, payload: new Uint8Array(1024).fill(9) },
-  { type: "snapshotPush", docId: "doc-2", uptoSeq: 9, epoch: 5, payload: new Uint8Array([1]) },
+  { type: "snapshotPush", docId: "doc-2", uptoSeq: 7, epoch: 0, authorMemberId: "", sig: new Uint8Array(), payload: new Uint8Array(1024).fill(9) },
+  { type: "snapshotPush", docId: "doc-2", uptoSeq: 9, epoch: 5, authorMemberId: "", sig: new Uint8Array(), payload: new Uint8Array([1]) },
   { type: "snapshotPull", docId: "doc-2" },
   { type: "awareness", docId: "doc-1", payload: new Uint8Array([3, 1, 4, 1, 5]) },
   { type: "shareCreate", reqId: 1, docId: "doc-1", permission: "read" },
@@ -57,6 +57,8 @@ const clientCases: ClientMessage[] = [
   { type: "credPush", reqId: 17, memberId: "b".repeat(64), blob: new Uint8Array(67).fill(3) },
   { type: "memberCertPush", reqId: 18, memberId: "c".repeat(64), blob: new Uint8Array(99).fill(5) },
   { type: "memberCertPull", reqId: 19 },
+  { type: "policyPush", reqId: 20, requireSigned: true, blob: new Uint8Array(67).fill(8) },
+  { type: "policyPush", reqId: 21, requireSigned: false, blob: new Uint8Array() },
 ];
 
 const serverCases: ServerMessage[] = [
@@ -69,10 +71,10 @@ const serverCases: ServerMessage[] = [
     ],
     epoch: 2,
   },
-  { type: "update", docId: "doc-1", seq: 6, payload: new Uint8Array([7, 7, 7]) },
+  { type: "update", docId: "doc-1", seq: 6, authorMemberId: "", sig: new Uint8Array(), payload: new Uint8Array([7, 7, 7]) },
   { type: "ack", docId: "doc-1", counter: 42, seq: 6 },
-  { type: "snapshot", docId: "doc-2", uptoSeq: 7, payload: new Uint8Array([1]) },
-  { type: "snapshot", docId: "沒有快照", uptoSeq: 0, payload: new Uint8Array() },
+  { type: "snapshot", docId: "doc-2", uptoSeq: 7, authorMemberId: "", sig: new Uint8Array(), payload: new Uint8Array([1]) },
+  { type: "snapshot", docId: "沒有快照", uptoSeq: 0, authorMemberId: "", sig: new Uint8Array(), payload: new Uint8Array() },
   { type: "snapshotAck", docId: "doc-2", uptoSeq: 7 },
   { type: "error", code: "bad-token", message: "token 錯誤" },
   { type: "awareness", docId: "doc-1", payload: new Uint8Array([9, 8, 7]) },
@@ -89,7 +91,7 @@ const serverCases: ServerMessage[] = [
   { type: "shareAuthOk", docId: "doc-1", permission: "read", headSeq: 5, snapshotSeq: 3 },
   { type: "shareAuthOk", docId: "doc-2", permission: "write", headSeq: 0, snapshotSeq: 0 },
   { type: "authChallenge", nonce: new Uint8Array(32).fill(5) },
-  { type: "envelopeList", reqId: 8, envelopes: [], roleCred: new Uint8Array(), restrictedSpaceIds: [] },
+  { type: "envelopeList", reqId: 8, envelopes: [], roleCred: new Uint8Array(), restrictedSpaceIds: [], policy: new Uint8Array() },
   {
     type: "envelopeList",
     reqId: 8,
@@ -99,6 +101,7 @@ const serverCases: ServerMessage[] = [
     ],
     roleCred: new Uint8Array(67).fill(6),
     restrictedSpaceIds: ["space-1", "space-2"],
+    policy: new Uint8Array(68).fill(7),
   },
   { type: "memberCatalog", reqId: 9, members: [] },
   {
@@ -139,6 +142,8 @@ describe("同步協議編解碼", () => {
       deviceId: "dev-1",
       counter: 1,
       epoch: 0,
+      authorMemberId: "",
+      sig: new Uint8Array(),
       payload: new Uint8Array([1, 2, 3]),
     });
     expect(() => decodeClientMessage(full.slice(0, full.length - 2))).toThrow();

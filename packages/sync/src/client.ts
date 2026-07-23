@@ -11,6 +11,8 @@ import {
 } from "./protocol.ts";
 import { identityCipher, type Cipher } from "./cipher.ts";
 import { identityChallengeBytes, type SyncIdentity } from "./identity.ts";
+import { signWrite, verifyWrite, type WriteKind } from "./update-signature.ts";
+import { verifyMemberCredential, type VerifiedMember } from "./role-credential.ts";
 
 /** awareness 狀態:游標/選取/使用者資訊等,JSON 可序列化 */
 export type AwarenessState = Record<string, unknown>;
@@ -75,6 +77,16 @@ export interface SyncClientOptions {
   identity?: SyncIdentity;
   /** vault 當前金鑰紀元(2c-2;team vault 由 bootstrap 的信封取得,個人 vault 省略 = 0);doc 寫入都帶它 */
   epoch?: number;
+  /**
+   * 團隊信任錨(P4 逐寫入驗證):提供時,本端寫入以 identity 簽章、收到的寫入查成員目錄驗作者。
+   * 個人 vault 省略——不簽也不驗(authorMemberId 空,收發皆容忍)。
+   */
+  ownerPubSign?: Uint8Array;
+  /**
+   * 強制簽章模式(P4 §7.3):owner 開啟後,收到的 unsigned 寫入(authorMemberId 空)一律拒收,
+   * 關閉逐 update 驗證的過渡容忍窗口。由 owner 簽章的 vault 政策驅動;可經 setRequireSignedWrites 熱更新。
+   */
+  requireSignedWrites?: boolean;
   /**
    * 金鑰已輪換(keyRotated 廣播,或重連 authOk 發現 epoch 落後):推送已自動暫停,
    * 呼叫端應重跑 bootstrap 取新 root、rotate 金鑰來源後呼叫 applyRotation 恢復收斂
@@ -148,10 +160,68 @@ export class SyncClient {
   private repullTimer: ReturnType<typeof setTimeout> | undefined;
   /** rekey 等待伺服器 snapshotAck 的回呼(docId → waiters):ack 才算完成,斷線一律以 false 收尾 */
   private readonly snapshotAckWaiters = new Map<string, Array<(ok: boolean) => void>>();
+  /** 成員目錄(P4):memberId → 驗過 owner 簽章的成員(pubSign/role/epoch),驗他人寫入作者用 */
+  private memberDir = new Map<string, VerifiedMember>();
+  /** 目錄拉取中旗標 + 等待目錄到達的 resolver(authOk/輪換阻塞等目錄就緒,避免初次誤殺合法 update) */
+  private dirPulling = false;
+  private dirWaiters: Array<() => void> = [];
+  /** 強制簽章模式(P4 §7.3):true 時 unsigned 寫入一律拒;由 owner 簽章的 vault 政策驅動,可熱更新 */
+  private requireSigned: boolean;
 
   constructor(private readonly opts: SyncClientOptions) {
     this.cipher = opts.cipher ?? identityCipher;
     this.epoch = opts.epoch ?? 0;
+    this.requireSigned = opts.requireSignedWrites ?? false;
+  }
+
+  /**
+   * 熱更新強制簽章模式(owner 切換政策、或成員重連/輪換重驗政策後):
+   * 開啟即刻起拒 unsigned 寫入。不追溯既有已套用內容(已收斂的舊 unsigned 內容仍在,由後續輪換沖洗)。
+   */
+  setRequireSignedWrites(enabled: boolean): void {
+    this.requireSigned = enabled;
+  }
+
+  /** 本端對一筆寫入的作者簽章;個人 vault(無 identity)回空 = unsigned */
+  private authorSign(kind: WriteKind, docId: string, payload: Uint8Array): { authorMemberId: string; sig: Uint8Array } {
+    const id = this.opts.identity;
+    if (!id || !this.opts.ownerPubSign) return { authorMemberId: "", sig: new Uint8Array() };
+    return { authorMemberId: id.memberId, sig: signWrite(id.sign, { kind, docId, epoch: this.epoch, payload }) };
+  }
+
+  /**
+   * 驗一筆收到的寫入作者。過渡期容忍 unsigned(authorMemberId 空 → true);
+   * 有簽章則:查目錄得作者可信 pubSign(未知作者 → 重拉目錄後暫拒)、憑證紀元須符、驗簽、
+   * 授權(owner/editor 才可寫)。任一不過 → false,呼叫端走 poison-skip 丟棄。
+   */
+  private verifyAuthor(kind: WriteKind, docId: string, authorMemberId: string, sig: Uint8Array, payload: Uint8Array): boolean {
+    if (!this.opts.ownerPubSign) return true; // 個人 vault:不驗
+    if (authorMemberId === "") return !this.requireSigned; // 未簽來源:強制模式拒、過渡模式容忍
+    const member = this.memberDir.get(authorMemberId);
+    if (!member) {
+      void this.pullDirectory(); // 未知作者:目錄可能過期(新成員),背景重拉;這筆先拒(重拉後重送過)
+      return false;
+    }
+    if (member.epoch !== this.epoch) return false; // 憑證非當前紀元(被移除者舊憑證/尚未刷新)
+    if (member.role !== "owner" && member.role !== "editor") return false; // 唯讀成員的寫入不採信
+    return verifyWrite(sig, member.pubSign, { kind, docId, epoch: this.epoch, payload });
+  }
+
+  /**
+   * 拉成員憑證目錄,逐筆對 ownerPubSign 驗、只留當前紀元;偽簽自動濾掉。
+   * 回 Promise:authOk/輪換 await 它,確保目錄先就緒再處理 doc 訊息(否則初次 update 全被誤判無效作者)。
+   * 併發呼叫共用同一次拉取;逾時保險免得永久阻塞。
+   */
+  private pullDirectory(): Promise<void> {
+    if (!this.online || !this.opts.ownerPubSign) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      this.dirWaiters.push(resolve);
+      setTimeout(resolve, 5000); // 逾時:目錄沒到也放行,不永久卡住(未命中作者的 update 走 poison-skip)
+      if (!this.dirPulling) {
+        this.dirPulling = true;
+        this.send({ type: "memberCertPull", reqId: 0 });
+      }
+    });
   }
 
   start(): void {
@@ -292,7 +362,8 @@ export class SyncClient {
     if (rt.state.lastSeq < knownHead) return false; // 未拉齊
     const uptoSeq = knownHead + 1;
     const payload = await this.cipher.encrypt(docId, Y.encodeStateAsUpdate(rt.doc));
-    this.send({ type: "snapshotPush", docId, uptoSeq, epoch: this.epoch, payload });
+    const author = this.authorSign("snapshot", docId, payload);
+    this.send({ type: "snapshotPush", docId, uptoSeq, epoch: this.epoch, authorMemberId: author.authorMemberId, sig: author.sig, payload });
     // 等伺服器 snapshotAck 才算數:輪換的 rekey「完成」意味著快照確實落盤,
     // 否則 owner 在飛行窗口崩潰會清掉續跑標記、留下一篇舊金鑰 doc 讓成員永遠解不開
     if (!(await this.waitSnapshotAck(docId))) return false;
@@ -357,7 +428,9 @@ export class SyncClient {
     if (epoch < this.epoch) return;
     this.epoch = epoch;
     this.rotationPending = false;
+    this.memberDir = new Map(); // 舊紀元目錄作廢,重拉當前紀元的成員憑證(P4)
     if (!this.online) return; // 離線:重連 authOk 的 epoch 已相符,走正常 reconcile
+    await this.pullDirectory(); // 新紀元目錄先就緒再 repull,免得重加密內容被誤判無效作者
     const local = await this.opts.host.listDocIds();
     for (const docId of new Set([...local, ...this.serverHeads.keys()])) {
       const rt = await this.ensure(docId);
@@ -416,7 +489,8 @@ export class SyncClient {
       if (!this.online || this.rotationPending || this.stopped) return;
       void (async () => {
         const payload = await this.cipher.encrypt(rt.docId, Y.encodeStateAsUpdate(rt.doc));
-        this.send({ type: "snapshotPush", docId: rt.docId, uptoSeq: poisonSeq, epoch: this.epoch, payload });
+        const author = this.authorSign("snapshot", rt.docId, payload);
+        this.send({ type: "snapshotPush", docId: rt.docId, uptoSeq: poisonSeq, epoch: this.epoch, authorMemberId: author.authorMemberId, sig: author.sig, payload });
         if (!(await this.waitSnapshotAck(rt.docId))) return; // 被拒(唯讀成員)或斷線:等可寫成員收尾
         rt.state = { ...rt.state, lastSeq: Math.max(rt.state.lastSeq, poisonSeq) };
         this.opts.host.saveState(rt.docId, rt.state);
@@ -500,11 +574,33 @@ export class SyncClient {
           this.opts.onKeyRotated?.(msg.epoch);
           break;
         }
+        await this.pullDirectory(); // 成員目錄:認證後先拉齊,再處理 doc 訊息,免得初次 update 被誤判無效作者(P4)
         const local = await this.opts.host.listDocIds();
         for (const docId of new Set([...local, ...this.serverHeads.keys()])) {
           await this.reconcile(docId);
         }
         this.refreshAwareness(); // 重連後立刻重播本地 awareness,讓在場者重新看到我
+        break;
+      }
+      case "memberCertList": {
+        // 成員目錄回覆(P4):逐筆對 ownerPubSign 驗、只留當前紀元;偽簽自動濾掉
+        this.dirPulling = false;
+        const owner = this.opts.ownerPubSign;
+        if (owner) {
+          const dir = new Map<string, VerifiedMember>();
+          for (const blob of msg.certs) {
+            try {
+              const v = verifyMemberCredential(blob, owner, this.opts.vaultId);
+              if (v.epoch === this.epoch) dir.set(v.memberId, v);
+            } catch {
+              // 偽簽/竄改的憑證跳過
+            }
+          }
+          this.memberDir = dir;
+        }
+        const waiters = this.dirWaiters;
+        this.dirWaiters = [];
+        for (const w of waiters) w();
         break;
       }
       case "update": {
@@ -513,6 +609,12 @@ export class SyncClient {
         if (msg.seq > rt.state.lastSeq + 1) {
           // 跳號:交給節流的補洞排程(先增量 pull、仍跳號改快照),丟棄這則亂序 update 本身
           this.scheduleGapFill(rt);
+          return;
+        }
+        // 作者驗證(P4):非合法成員簽的寫入(惡意中繼注入、被移除者、唯讀成員)丟棄並以快照跨越
+        if (!this.verifyAuthor("update", msg.docId, msg.authorMemberId, msg.sig, msg.payload)) {
+          console.error(`update 作者驗證失敗 ${msg.docId} seq=${msg.seq} author=${msg.authorMemberId.slice(0, 8)},排程以快照跨越`);
+          this.schedulePoisonSkip(rt, msg.seq);
           return;
         }
         let plain: Uint8Array;
@@ -537,6 +639,11 @@ export class SyncClient {
         const rt = await this.ensure(msg.docId);
         if (!rt) return;
         if (msg.payload.length > 0 && msg.uptoSeq > rt.state.lastSeq) {
+          // 快照作者驗證(P4):非合法成員簽的快照丟棄(不套用),等合法成員的快照
+          if (!this.verifyAuthor("snapshot", msg.docId, msg.authorMemberId, msg.sig, msg.payload)) {
+            console.error(`snapshot 作者驗證失敗 ${msg.docId} uptoSeq=${msg.uptoSeq} author=${msg.authorMemberId.slice(0, 8)},丟棄`);
+            return;
+          }
           let update: Uint8Array;
           try {
             update = await this.cipher.decrypt(msg.docId, msg.payload);
@@ -744,13 +851,17 @@ export class SyncClient {
     // counter 先落盤再送,重啟後不重用號碼,伺服器去重才不會誤傷不同內容
     rt.state = { ...rt.state, counter: rt.state.counter + 1 };
     this.opts.host.saveState(rt.docId, rt.state);
+    const payload = await this.cipher.encrypt(rt.docId, diff);
+    const author = this.authorSign("update", rt.docId, payload);
     this.send({
       type: "push",
       docId: rt.docId,
       deviceId: this.opts.deviceId,
       counter: rt.state.counter,
       epoch: this.epoch,
-      payload: await this.cipher.encrypt(rt.docId, diff),
+      authorMemberId: author.authorMemberId,
+      sig: author.sig,
+      payload,
     });
   }
 
@@ -763,7 +874,8 @@ export class SyncClient {
     const threshold = this.opts.snapshotThreshold ?? DEFAULT_SNAPSHOT_THRESHOLD;
     if (rt.state.lastSeq < knownHead || rt.state.lastSeq - snapshotSeq < threshold) return;
     const payload = await this.cipher.encrypt(rt.docId, Y.encodeStateAsUpdate(rt.doc));
-    this.send({ type: "snapshotPush", docId: rt.docId, uptoSeq: rt.state.lastSeq, epoch: this.epoch, payload });
+    const author = this.authorSign("snapshot", rt.docId, payload);
+    this.send({ type: "snapshotPush", docId: rt.docId, uptoSeq: rt.state.lastSeq, epoch: this.epoch, authorMemberId: author.authorMemberId, sig: author.sig, payload });
     this.serverHeads.set(rt.docId, {
       docId: rt.docId,
       headSeq: Math.max(knownHead, rt.state.lastSeq),

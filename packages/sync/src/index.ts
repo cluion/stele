@@ -66,6 +66,8 @@ export {
   type MemberCredentialClaims,
   type VerifiedMember,
 } from "./role-credential.ts";
+export { signWrite, verifyWrite, type WriteKind, type WriteAuthFields } from "./update-signature.ts";
+export { signVaultPolicy, verifyVaultPolicy, type VaultPolicyClaims, type VerifiedPolicy } from "./vault-policy.ts";
 export {
   readSpaces,
   spaceOf,

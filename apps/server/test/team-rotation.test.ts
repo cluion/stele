@@ -82,7 +82,7 @@ class EpochClient {
     return this.next("authOk");
   }
   pushDoc(docId: string, dev: string, epoch: number, counter = 1): void {
-    this.send({ type: "push", docId, deviceId: dev, counter, epoch, payload: new Uint8Array([1, 2, 3]) });
+    this.send({ type: "push", docId, deviceId: dev, counter, epoch, authorMemberId: "", sig: new Uint8Array(), payload: new Uint8Array([1, 2, 3]) });
   }
   close(): void {
     this.ws.close();
@@ -168,7 +168,7 @@ describe("金鑰輪換(2c-2):epoch 柵欄與 rotateKey", () => {
     c2.pushDoc("doc-1", "d1b", 1);
     await c2.next("ack");
     // snapshotPush 同受柵欄管
-    c2.send({ type: "snapshotPush", docId: "doc-1", uptoSeq: 5, epoch: 0, payload: new Uint8Array([9]) });
+    c2.send({ type: "snapshotPush", docId: "doc-1", uptoSeq: 5, epoch: 0, authorMemberId: "", sig: new Uint8Array(), payload: new Uint8Array([9]) });
     expect((await c2.next("error")).code).toBe("stale-epoch");
     admin.close();
 

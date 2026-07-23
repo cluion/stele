@@ -71,11 +71,15 @@ export type ClientMessage =
   | { type: "memberCertPush"; reqId: number; memberId: string; blob: Uint8Array }
   // 成員憑證目錄拉取(任何認證成員):取全 vault 的成員憑證,供驗他人寫入作者的可信公鑰
   | { type: "memberCertPull"; reqId: number }
+  // Vault 政策(P4 強制簽章,§7.3,owner-only):owner 簽章的 {vaultId,flags,epoch} blob,伺服器存放並隨
+  // envelopeList 發還成員;requireSigned 另帶明碼供伺服器自身縱深防禦(拒 unsigned),授權真相仍在成員端驗簽
+  | { type: "policyPush"; reqId: number; requireSigned: boolean; blob: Uint8Array }
   // doc 寫入帶 client epoch(2c-2 寫入柵欄):team vault 上伺服器拒 epoch≠當前,
-  // 防止輪換窗口內舊 root 密文污染共享日誌;個人 vault/share 連線恆送 0(不套柵欄)
-  | { type: "push"; docId: string; deviceId: string; counter: number; epoch: number; payload: Uint8Array }
+  // 防止輪換窗口內舊 root 密文污染共享日誌;個人 vault/share 連線恆送 0(不套柵欄)。
+  // authorMemberId + sig(P4 第二階段):作者對此寫入的簽章,收件端查目錄驗;個人/未簽 vault 送空字串 + 空陣列
+  | { type: "push"; docId: string; deviceId: string; counter: number; epoch: number; authorMemberId: string; sig: Uint8Array; payload: Uint8Array }
   | { type: "pull"; docId: string; fromSeq: number }
-  | { type: "snapshotPush"; docId: string; uptoSeq: number; epoch: number; payload: Uint8Array }
+  | { type: "snapshotPush"; docId: string; uptoSeq: number; epoch: number; authorMemberId: string; sig: Uint8Array; payload: Uint8Array }
   | { type: "snapshotPull"; docId: string }
   // awareness:游標/選取/在線,加密後轉發不落盤(ephemeral),伺服器只轉不存
   | { type: "awareness"; docId: string; payload: Uint8Array }
@@ -97,9 +101,10 @@ export type ServerMessage =
   | { type: "authOk"; docs: DocHead[]; epoch: number }
   // 身分認證第一階段:伺服器給每連線新生的 nonce,client 據此簽章
   | { type: "authChallenge"; nonce: Uint8Array }
-  | { type: "update"; docId: string; seq: number; payload: Uint8Array }
+  // update/snapshot 轉發:帶原作者的 authorMemberId + sig(P4),收件端查目錄驗;未簽來源為空字串 + 空陣列
+  | { type: "update"; docId: string; seq: number; authorMemberId: string; sig: Uint8Array; payload: Uint8Array }
   | { type: "ack"; docId: string; counter: number; seq: number }
-  | { type: "snapshot"; docId: string; uptoSeq: number; payload: Uint8Array }
+  | { type: "snapshot"; docId: string; uptoSeq: number; authorMemberId: string; sig: Uint8Array; payload: Uint8Array }
   | { type: "snapshotAck"; docId: string; uptoSeq: number }
   | { type: "error"; code: string; message: string }
   // 轉發自其他參與者的加密 awareness
@@ -111,7 +116,8 @@ export type ServerMessage =
   // 團隊金鑰分發與成員管理的回覆(2b);roleCred(§9.5)= 本人的 owner 簽章角色憑證,空 = 尚未簽發。
   // restrictedSpaceIds = 當前紀元存在 per-space 信封的空間(受限空間)——與金鑰同一回覆原子取得,
   // 成員據此判定「受限但我沒份」,不依賴 vault-meta 名單的最終一致時序(那個窗口會誤用 fallback 金鑰)
-  | { type: "envelopeList"; reqId: number; envelopes: KeyEnvelope[]; roleCred: Uint8Array; restrictedSpaceIds: string[] }
+  // policy(P4 §7.3)= 當前紀元的 owner 簽章 vault 政策 blob,空 = 未設(過渡容忍 unsigned);與金鑰同回覆原子取得
+  | { type: "envelopeList"; reqId: number; envelopes: KeyEnvelope[]; roleCred: Uint8Array; restrictedSpaceIds: string[]; policy: Uint8Array }
   | { type: "memberCatalog"; reqId: number; members: MemberInfo[] }
   | { type: "enrollCreated"; reqId: number; token: string }
   // 通用成功回執(envelopePush / memberRemove / claimOwner / rotateKey / credPush / memberCertPush)
@@ -145,6 +151,7 @@ const CLIENT_TAG = {
   credPush: 20,
   memberCertPush: 21,
   memberCertPull: 22,
+  policyPush: 23,
 } as const;
 const SERVER_TAG = {
   authOk: 0,
@@ -238,11 +245,18 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
     case "memberCertPull":
       encoding.writeVarUint(enc, msg.reqId);
       break;
+    case "policyPush":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarUint(enc, msg.requireSigned ? 1 : 0);
+      encoding.writeVarUint8Array(enc, msg.blob);
+      break;
     case "push":
       encoding.writeVarString(enc, msg.docId);
       encoding.writeVarString(enc, msg.deviceId);
       encoding.writeVarUint(enc, msg.counter);
       encoding.writeVarUint(enc, msg.epoch);
+      encoding.writeVarString(enc, msg.authorMemberId);
+      encoding.writeVarUint8Array(enc, msg.sig);
       encoding.writeVarUint8Array(enc, msg.payload);
       break;
     case "pull":
@@ -253,6 +267,8 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
       encoding.writeVarString(enc, msg.docId);
       encoding.writeVarUint(enc, msg.uptoSeq);
       encoding.writeVarUint(enc, msg.epoch);
+      encoding.writeVarString(enc, msg.authorMemberId);
+      encoding.writeVarUint8Array(enc, msg.sig);
       encoding.writeVarUint8Array(enc, msg.payload);
       break;
     case "snapshotPull":
@@ -338,6 +354,13 @@ export function decodeClientMessage(data: Uint8Array): ClientMessage {
       return { type: "memberCertPush", reqId: decoding.readVarUint(dec), memberId: decoding.readVarString(dec), blob: readPayload(dec) };
     case CLIENT_TAG.memberCertPull:
       return { type: "memberCertPull", reqId: decoding.readVarUint(dec) };
+    case CLIENT_TAG.policyPush:
+      return {
+        type: "policyPush",
+        reqId: decoding.readVarUint(dec),
+        requireSigned: decoding.readVarUint(dec) === 1,
+        blob: readPayload(dec),
+      };
     case CLIENT_TAG.push:
       return {
         type: "push",
@@ -345,6 +368,8 @@ export function decodeClientMessage(data: Uint8Array): ClientMessage {
         deviceId: decoding.readVarString(dec),
         counter: decoding.readVarUint(dec),
         epoch: decoding.readVarUint(dec),
+        authorMemberId: decoding.readVarString(dec),
+        sig: readPayload(dec),
         payload: readPayload(dec),
       };
     case CLIENT_TAG.pull:
@@ -355,6 +380,8 @@ export function decodeClientMessage(data: Uint8Array): ClientMessage {
         docId: decoding.readVarString(dec),
         uptoSeq: decoding.readVarUint(dec),
         epoch: decoding.readVarUint(dec),
+        authorMemberId: decoding.readVarString(dec),
+        sig: readPayload(dec),
         payload: readPayload(dec),
       };
     case CLIENT_TAG.snapshotPull:
@@ -398,6 +425,8 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
     case "update":
       encoding.writeVarString(enc, msg.docId);
       encoding.writeVarUint(enc, msg.seq);
+      encoding.writeVarString(enc, msg.authorMemberId);
+      encoding.writeVarUint8Array(enc, msg.sig);
       encoding.writeVarUint8Array(enc, msg.payload);
       break;
     case "ack":
@@ -408,6 +437,8 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
     case "snapshot":
       encoding.writeVarString(enc, msg.docId);
       encoding.writeVarUint(enc, msg.uptoSeq);
+      encoding.writeVarString(enc, msg.authorMemberId);
+      encoding.writeVarUint8Array(enc, msg.sig);
       encoding.writeVarUint8Array(enc, msg.payload);
       break;
     case "snapshotAck":
@@ -453,6 +484,7 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
       encoding.writeVarUint8Array(enc, msg.roleCred);
       encoding.writeVarUint(enc, msg.restrictedSpaceIds.length);
       for (const id of msg.restrictedSpaceIds) encoding.writeVarString(enc, id);
+      encoding.writeVarUint8Array(enc, msg.policy);
       break;
     case "memberCatalog":
       encoding.writeVarUint(enc, msg.reqId);
@@ -507,6 +539,8 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
         type: "update",
         docId: decoding.readVarString(dec),
         seq: decoding.readVarUint(dec),
+        authorMemberId: decoding.readVarString(dec),
+        sig: readPayload(dec),
         payload: readPayload(dec),
       };
     case SERVER_TAG.ack:
@@ -521,6 +555,8 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
         type: "snapshot",
         docId: decoding.readVarString(dec),
         uptoSeq: decoding.readVarUint(dec),
+        authorMemberId: decoding.readVarString(dec),
+        sig: readPayload(dec),
         payload: readPayload(dec),
       };
     case SERVER_TAG.snapshotAck:
@@ -568,7 +604,8 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
       const spaceCount = decoding.readVarUint(dec);
       const restrictedSpaceIds: string[] = [];
       for (let i = 0; i < spaceCount; i++) restrictedSpaceIds.push(decoding.readVarString(dec));
-      return { type: "envelopeList", reqId, envelopes, roleCred, restrictedSpaceIds };
+      const policy = readPayload(dec);
+      return { type: "envelopeList", reqId, envelopes, roleCred, restrictedSpaceIds, policy };
     }
     case SERVER_TAG.memberCatalog: {
       const reqId = decoding.readVarUint(dec);

@@ -237,6 +237,9 @@ export class ShareClient {
       counter: this.counter,
       // share 連線不套 epoch 柵欄(輪換時伺服器直接踢分享連線並作廢連結),恆送 0
       epoch: 0,
+      // 分享收件端非團隊成員身分,不簽作者(P4);team vault 的成員驗證不套用於分享連線
+      authorMemberId: "",
+      sig: new Uint8Array(),
       payload: await this.opts.cipher.encrypt(this.docId, diff),
     });
   }

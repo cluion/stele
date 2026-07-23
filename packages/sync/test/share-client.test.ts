@@ -43,15 +43,15 @@ class FakeRelay {
         if (!this.valid) return from.deliver({ type: "error", code: "no-share", message: "失效" });
         return from.deliver({ type: "shareAuthOk", docId: this.docId, permission: this.permission, headSeq: this.head(), snapshotSeq: 0 });
       case "pull":
-        for (const u of this.log) if (u.seq > msg.fromSeq) from.deliver({ type: "update", docId: this.docId, seq: u.seq, payload: u.payload });
+        for (const u of this.log) if (u.seq > msg.fromSeq) from.deliver({ type: "update", docId: this.docId, seq: u.seq, authorMemberId: "", sig: new Uint8Array(), payload: u.payload });
         return;
       case "snapshotPull":
-        return from.deliver({ type: "snapshot", docId: this.docId, uptoSeq: 0, payload: new Uint8Array() });
+        return from.deliver({ type: "snapshot", docId: this.docId, uptoSeq: 0, authorMemberId: "", sig: new Uint8Array(), payload: new Uint8Array() });
       case "push": {
         const seq = this.log.length + 1;
         this.log.push({ seq, payload: msg.payload });
         from.deliver({ type: "ack", docId: this.docId, counter: msg.counter, seq });
-        for (const s of this.socks) if (s !== from) s.deliver({ type: "update", docId: this.docId, seq, payload: msg.payload });
+        for (const s of this.socks) if (s !== from) s.deliver({ type: "update", docId: this.docId, seq, authorMemberId: "", sig: new Uint8Array(), payload: msg.payload });
         return;
       }
       case "awareness":
