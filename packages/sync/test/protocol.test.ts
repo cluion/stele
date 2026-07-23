@@ -55,6 +55,8 @@ const clientCases: ClientMessage[] = [
   { type: "rotateKey", reqId: 15, epoch: 1 },
   { type: "rotateKey", reqId: 16, epoch: 42 },
   { type: "credPush", reqId: 17, memberId: "b".repeat(64), blob: new Uint8Array(67).fill(3) },
+  { type: "memberCertPush", reqId: 18, memberId: "c".repeat(64), blob: new Uint8Array(99).fill(5) },
+  { type: "memberCertPull", reqId: 19 },
 ];
 
 const serverCases: ServerMessage[] = [
@@ -111,6 +113,8 @@ const serverCases: ServerMessage[] = [
   { type: "ok", reqId: 6 },
   { type: "keyRotated", epoch: 1 },
   { type: "keyRotated", epoch: 7 },
+  { type: "memberCertList", reqId: 20, certs: [] },
+  { type: "memberCertList", reqId: 21, certs: [new Uint8Array(99).fill(5), new Uint8Array(99).fill(9)] },
 ];
 
 describe("同步協議編解碼", () => {

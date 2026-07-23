@@ -67,6 +67,10 @@ export type ClientMessage =
   // 角色憑證(§9.5,owner-only):owner 簽章的 {vaultId,memberId,role,epoch} blob,伺服器存放並隨
   // envelopeList 發還本人;成員對信任錨 ownerPubSign 驗證,使 role 指派防竄改(伺服器只中繼不解讀)
   | { type: "credPush"; reqId: number; memberId: string; blob: Uint8Array }
+  // 成員憑證(P4 寫入真實性,owner-only):owner 背書 memberId↔pubSign 的 blob,伺服器存放
+  | { type: "memberCertPush"; reqId: number; memberId: string; blob: Uint8Array }
+  // 成員憑證目錄拉取(任何認證成員):取全 vault 的成員憑證,供驗他人寫入作者的可信公鑰
+  | { type: "memberCertPull"; reqId: number }
   // doc 寫入帶 client epoch(2c-2 寫入柵欄):team vault 上伺服器拒 epoch≠當前,
   // 防止輪換窗口內舊 root 密文污染共享日誌;個人 vault/share 連線恆送 0(不套柵欄)
   | { type: "push"; docId: string; deviceId: string; counter: number; epoch: number; payload: Uint8Array }
@@ -110,10 +114,12 @@ export type ServerMessage =
   | { type: "envelopeList"; reqId: number; envelopes: KeyEnvelope[]; roleCred: Uint8Array; restrictedSpaceIds: string[] }
   | { type: "memberCatalog"; reqId: number; members: MemberInfo[] }
   | { type: "enrollCreated"; reqId: number; token: string }
-  // 通用成功回執(envelopePush / memberRemove / claimOwner / rotateKey)
+  // 通用成功回執(envelopePush / memberRemove / claimOwner / rotateKey / credPush / memberCertPush)
   | { type: "ok"; reqId: number }
   // 金鑰輪換廣播(2c-2):vault epoch 已 bump,成員應暫停推送、重跑 bootstrap 取新 root 後 repull
-  | { type: "keyRotated"; epoch: number };
+  | { type: "keyRotated"; epoch: number }
+  // 成員憑證目錄(P4):全 vault 的 owner 簽章成員憑證 blob,成員逐筆對 ownerPubSign 驗
+  | { type: "memberCertList"; reqId: number; certs: Uint8Array[] };
 
 const CLIENT_TAG = {
   auth: 0,
@@ -137,6 +143,8 @@ const CLIENT_TAG = {
   memberSetRole: 18,
   rotateKey: 19,
   credPush: 20,
+  memberCertPush: 21,
+  memberCertPull: 22,
 } as const;
 const SERVER_TAG = {
   authOk: 0,
@@ -155,6 +163,7 @@ const SERVER_TAG = {
   enrollCreated: 13,
   ok: 14,
   keyRotated: 15,
+  memberCertList: 16,
 } as const;
 
 const PERM_TAG: Record<SharePermission, number> = { read: 0, write: 1 };
@@ -220,6 +229,14 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
       encoding.writeVarUint(enc, msg.reqId);
       encoding.writeVarString(enc, msg.memberId);
       encoding.writeVarUint8Array(enc, msg.blob);
+      break;
+    case "memberCertPush":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarString(enc, msg.memberId);
+      encoding.writeVarUint8Array(enc, msg.blob);
+      break;
+    case "memberCertPull":
+      encoding.writeVarUint(enc, msg.reqId);
       break;
     case "push":
       encoding.writeVarString(enc, msg.docId);
@@ -317,6 +334,10 @@ export function decodeClientMessage(data: Uint8Array): ClientMessage {
       return { type: "rotateKey", reqId: decoding.readVarUint(dec), epoch: decoding.readVarUint(dec) };
     case CLIENT_TAG.credPush:
       return { type: "credPush", reqId: decoding.readVarUint(dec), memberId: decoding.readVarString(dec), blob: readPayload(dec) };
+    case CLIENT_TAG.memberCertPush:
+      return { type: "memberCertPush", reqId: decoding.readVarUint(dec), memberId: decoding.readVarString(dec), blob: readPayload(dec) };
+    case CLIENT_TAG.memberCertPull:
+      return { type: "memberCertPull", reqId: decoding.readVarUint(dec) };
     case CLIENT_TAG.push:
       return {
         type: "push",
@@ -454,6 +475,11 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
     case "keyRotated":
       encoding.writeVarUint(enc, msg.epoch);
       break;
+    case "memberCertList":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarUint(enc, msg.certs.length);
+      for (const c of msg.certs) encoding.writeVarUint8Array(enc, c);
+      break;
   }
   return encoding.toUint8Array(enc);
 }
@@ -565,6 +591,13 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
       return { type: "ok", reqId: decoding.readVarUint(dec) };
     case SERVER_TAG.keyRotated:
       return { type: "keyRotated", epoch: decoding.readVarUint(dec) };
+    case SERVER_TAG.memberCertList: {
+      const reqId = decoding.readVarUint(dec);
+      const count = decoding.readVarUint(dec);
+      const certs: Uint8Array[] = [];
+      for (let i = 0; i < count; i++) certs.push(readPayload(dec));
+      return { type: "memberCertList", reqId, certs };
+    }
     default:
       throw new Error(`未知的 server 訊息類型:${tag}`);
   }

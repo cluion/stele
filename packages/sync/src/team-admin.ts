@@ -3,7 +3,7 @@ import type { SocketLike } from "./client.ts";
 import { identityChallengeBytes, type SyncIdentity } from "./identity.ts";
 import { wrapKey } from "./crypto.ts";
 import { rootWrapContext, KEY_ID_ROOT } from "./bootstrap.ts";
-import { signRoleCredential } from "./role-credential.ts";
+import { signRoleCredential, signMemberCredential, verifyMemberCredential, memberIdFromPubSign, type VerifiedMember } from "./role-credential.ts";
 
 /**
  * 團隊擁有者的管理連線(2b):一條認證好的連線,發邀請碼、列成員、核准(把 root 包給成員)、移除成員。
@@ -95,29 +95,51 @@ export class TeamAdminSession {
   }
 
   /**
-   * 改某成員角色(owner-only)並重簽其角色憑證(§9.5);伺服器會踢對方活躍連線,重連後以新角色生效。
-   * epoch 為 vault 當前金鑰紀元(憑證綁 epoch,輪換即作廢整代)。
+   * 改某成員角色(owner-only)並重簽其角色憑證(§9.5)與成員憑證(P4);伺服器會踢對方活躍連線。
+   * 需傳 pubSign(成員憑證綁它);epoch 為 vault 當前金鑰紀元(憑證綁 epoch,輪換即作廢整代)。
    */
-  async setRole(memberId: string, role: MemberRole, epoch = 0): Promise<void> {
+  async setRole(memberId: string, pubSign: Uint8Array, role: MemberRole, epoch = 0): Promise<void> {
     await this.request((reqId) => ({ type: "memberSetRole", reqId, memberId, role }), "ok");
     await this.pushCredential(memberId, role, epoch);
+    await this.pushMemberCert(pubSign, role, epoch);
   }
 
   /**
    * 核准某成員:以其 pubWrap 把 root 包成 owner 簽章信封並 push(核准前 UI 應先讓 owner 核對 pubWrap 指紋),
-   * 並簽發其角色憑證(§9.5,成員據此對信任錨驗證自己的角色)。
+   * 並簽發其角色憑證(§9.5)與成員憑證(P4,背書 memberId↔pubSign 供他人驗其寫入作者)。
    * epoch 須為 vault 當前金鑰紀元(2c-2 輪換時對留任成員逐一以新 epoch 重包重簽)。
    */
   async approve(member: MemberInfo, root: Uint8Array, epoch = 0): Promise<void> {
     const blob = await wrapKey(root, member.pubWrap, this.identity.sign, rootWrapContext(this.vaultId, member.memberId, epoch));
     await this.request((reqId) => ({ type: "envelopePush", reqId, keyId: KEY_ID_ROOT, memberId: member.memberId, epoch, blob }), "ok");
     await this.pushCredential(member.memberId, member.role, epoch);
+    await this.pushMemberCert(member.pubSign, member.role, epoch);
   }
 
   /** 簽發並上傳某成員的角色憑證(owner 簽 {vaultId,memberId,role,epoch}) */
   private async pushCredential(memberId: string, role: MemberRole, epoch: number): Promise<void> {
     const blob = signRoleCredential(this.identity.sign, { vaultId: this.vaultId, memberId, role, epoch });
     await this.request((reqId) => ({ type: "credPush", reqId, memberId, blob }), "ok");
+  }
+
+  /** 簽發並上傳某成員的成員憑證(owner 背書 {vaultId,pubSign,role,epoch};memberId 由 pubSign 導出) */
+  private async pushMemberCert(pubSign: Uint8Array, role: MemberRole, epoch: number): Promise<void> {
+    const blob = signMemberCredential(this.identity.sign, { vaultId: this.vaultId, pubSign, role, epoch });
+    await this.request((reqId) => ({ type: "memberCertPush", reqId, memberId: memberIdFromPubSign(pubSign), blob }), "ok");
+  }
+
+  /** 拉全 vault 的成員憑證,逐筆對 ownerPubSign 驗;偽簽/竄改的略過(不讓惡意中繼摻假成員) */
+  async memberDirectory(ownerPubSign: Uint8Array): Promise<VerifiedMember[]> {
+    const msg = await this.request((reqId) => ({ type: "memberCertPull", reqId }), "memberCertList");
+    const out: VerifiedMember[] = [];
+    for (const blob of msg.certs) {
+      try {
+        out.push(verifyMemberCredential(blob, ownerPubSign, this.vaultId));
+      } catch {
+        // 驗不過的憑證跳過:惡意中繼摻的假成員在此被濾掉
+      }
+    }
+    return out;
   }
 
   /**

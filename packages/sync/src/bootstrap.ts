@@ -2,7 +2,7 @@ import { encodeClientMessage, decodeServerMessage, type ClientMessage, type Serv
 import type { SocketLike } from "./client.ts";
 import { identityChallengeBytes, type SyncIdentity } from "./identity.ts";
 import { wrapKey, type WrapContext } from "./crypto.ts";
-import { verifyRoleCredential } from "./role-credential.ts";
+import { verifyRoleCredential, signMemberCredential } from "./role-credential.ts";
 
 /**
  * 團隊 vault 的金鑰 bootstrap(2b):在建 SyncManager **之前**跑完的獨立握手。
@@ -138,7 +138,11 @@ export function createTeamVault(opts: CreateTeamVaultOptions): Promise<Uint8Arra
           root = genRoot();
           const env = await wrapKey(root, identity.pubWrap, identity.sign, rootWrapContext(vaultId, identity.memberId));
           sock.send(encodeClientMessage({ type: "envelopePush", reqId: 2, keyId: KEY_ID_ROOT, memberId: identity.memberId, epoch: 0, blob: env }));
-        } else if (msg.reqId === 2 && root) {
+        } else if (msg.reqId === 2) {
+          // owner 自簽成員憑證(P4):owner 也寫入,需在目錄裡有可驗的 pubSign;輪換後透過 approve 重簽
+          const cert = signMemberCredential(identity.sign, { vaultId, pubSign: identity.pubSign, role: "owner", epoch: 0 });
+          sock.send(encodeClientMessage({ type: "memberCertPush", reqId: 3, memberId: identity.memberId, blob: cert }));
+        } else if (msg.reqId === 3 && root) {
           done(root);
         }
         break;
