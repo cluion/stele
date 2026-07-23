@@ -58,7 +58,7 @@ function sendAll(channel: string, ...args: unknown[]): void {
  */
 type LoadedSync =
   | { kind: "personal"; settings: SyncSettings; passphrase: string }
-  | { kind: "team"; settings: SyncSettings; ownerPubSign: Uint8Array; role: MemberRole; enrollmentToken?: string };
+  | { kind: "team"; settings: SyncSettings; ownerPubSign: Uint8Array; role: MemberRole; requireSigned: boolean; enrollmentToken?: string };
 
 const syncFile = (root: string): string => path.join(root, ".stele", "sync.json");
 
@@ -88,7 +88,10 @@ function loadSyncSettings(root: string): LoadedSync | undefined {
       const enrollmentToken = typeof raw["enrollmentToken"] === "string" ? raw["enrollmentToken"] : undefined;
       // 本人角色(供 renderer 收斂 viewer UI);owner 管理面走 memberList 取權威角色。舊檔缺 → viewer
       const role: MemberRole = raw["role"] === "owner" ? "owner" : raw["role"] === "editor" ? "editor" : "viewer";
-      return { kind: "team", settings, ownerPubSign: new Uint8Array(Buffer.from(ownerPubSign, "base64")), role, enrollmentToken };
+      // 強制簽章模式(P4 §7.3):持久化上次驗過的政策,重開即先套用(bootstrap 會以當代政策覆蓋);
+      // 惡意伺服器抑制政策下發時,成員仍守住上次已知的強制態(縱深)
+      const requireSigned = raw["requireSigned"] === true;
+      return { kind: "team", settings, ownerPubSign: new Uint8Array(Buffer.from(ownerPubSign, "base64")), role, requireSigned, enrollmentToken };
     }
 
     const passphrase = raw["passphrase"];
@@ -116,7 +119,7 @@ function loadSyncSettings(root: string): LoadedSync | undefined {
 
 /** 目前 team vault 的執行態(供 owner 管理 IPC 與 pending 重試);切 vault 時重設。epoch = 當前金鑰紀元 */
 let teamRuntime:
-  | { settings: SyncSettings; ownerPubSign: Uint8Array; role: MemberRole; root: Uint8Array | undefined; epoch: number }
+  | { settings: SyncSettings; ownerPubSign: Uint8Array; role: MemberRole; requireSigned: boolean; root: Uint8Array | undefined; epoch: number }
   | undefined;
 /** 成員端收 keyRotated 後重試 bootstrap 的計時器;切 vault 時清除 */
 let rotateRetryTimer: NodeJS.Timeout | undefined;
@@ -144,6 +147,19 @@ function persistVerifiedRole(root: string, role: MemberRole): void {
     writeFileSync(file, JSON.stringify(raw, null, 2));
   } catch (err) {
     console.error("寫回驗證角色失敗:", err);
+  }
+}
+
+/** 把驗證過的強制簽章態(owner 簽章政策,§7.3)寫回 sync.json,離線重開先套用 */
+function persistRequireSigned(root: string, requireSigned: boolean): void {
+  const file = syncFile(root);
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    if (raw["requireSigned"] === requireSigned) return;
+    raw["requireSigned"] = requireSigned;
+    writeFileSync(file, JSON.stringify(raw, null, 2));
+  } catch (err) {
+    console.error("寫回強制簽章態失敗:", err);
   }
 }
 
@@ -219,7 +235,7 @@ function requireSession(): VaultSession {
 let pendingRetryTimer: NodeJS.Timeout | undefined;
 
 /** bootstrap ready 結果落進 teamRuntime(root/epoch/驗證過的角色) */
-function adoptTeamBootstrap(next: VaultSession, res: { root: Uint8Array; epoch: number; role?: MemberRole }): void {
+function adoptTeamBootstrap(next: VaultSession, res: { root: Uint8Array; epoch: number; role?: MemberRole; requireSignedWrites: boolean }): void {
   if (!teamRuntime) return;
   teamRuntime.root = res.root;
   teamRuntime.epoch = res.epoch;
@@ -228,6 +244,9 @@ function adoptTeamBootstrap(next: VaultSession, res: { root: Uint8Array; epoch: 
     teamRuntime.role = res.role;
     persistVerifiedRole(next.root, res.role);
   }
+  // 強制簽章政策(§7.3):驗過的當代政策蓋過本地宣稱並持久化(重開先套、抗惡意伺服器抑制)
+  teamRuntime.requireSigned = res.requireSignedWrites;
+  persistRequireSigned(next.root, res.requireSignedWrites);
 }
 
 /** 金鑰就緒後把 SyncManager 接上目前 vault(personal 與 team 共用);含輪換續跑檢查 */
@@ -242,6 +261,8 @@ function attachSyncManager(next: VaultSession, settings: SyncSettings, keySource
   syncManager = new SyncManager(next, settings, meta, onStatus, {
     spaces: keySource,
     identity: memberIdentity,
+    ownerPubSign: teamRuntime?.ownerPubSign, // 團隊信任錨:啟用逐寫入作者簽驗(P4);個人 vault 為 undefined
+    requireSignedWrites: teamRuntime?.requireSigned, // 強制簽章模式(§7.3):拒 unsigned 寫入
     epoch: teamRuntime?.epoch,
     onKeyRotated: teamRuntime ? (epoch) => void handleKeyRotated(epoch) : undefined,
     onRevoked: teamRuntime ? () => handleRevoked(next) : undefined,
@@ -294,10 +315,19 @@ async function refreshTeamRole(next: VaultSession, memberIdentity: SyncIdentity)
       createSocket: createTeamSocket,
     });
     if (session !== next || teamRuntime !== rt) return;
-    if (res.status === "ready" && res.epoch === rt.epoch && res.role && res.role !== rt.role) {
-      rt.role = res.role;
-      persistVerifiedRole(next.root, res.role);
-      sendAll("team:changed");
+    if (res.status === "ready" && res.epoch === rt.epoch) {
+      if (res.role && res.role !== rt.role) {
+        rt.role = res.role;
+        persistVerifiedRole(next.root, res.role);
+        sendAll("team:changed");
+      }
+      // 強制簽章政策(§7.3)同紀元變更:owner 切換後成員重連即近即時套用(不必等輪換)
+      if (res.requireSignedWrites !== rt.requireSigned) {
+        rt.requireSigned = res.requireSignedWrites;
+        persistRequireSigned(next.root, res.requireSignedWrites);
+        syncManager?.setRequireSignedWrites(res.requireSignedWrites);
+        sendAll("team:changed");
+      }
     }
   } catch (err) {
     console.error("重驗團隊角色失敗:", err);
@@ -366,7 +396,7 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
       attachSyncManager(next, loaded.settings, new MasterKeySpaces(await deriveVaultKey(loaded.passphrase, loaded.settings.vaultId)), memberIdentity);
     } else {
       // team:先跑獨立 bootstrap 拿 root(避開 SyncClient authOk 立即解 vault-meta 的死結)
-      teamRuntime = { settings: loaded.settings, ownerPubSign: loaded.ownerPubSign, role: loaded.role, root: undefined, epoch: 0 };
+      teamRuntime = { settings: loaded.settings, ownerPubSign: loaded.ownerPubSign, role: loaded.role, requireSigned: loaded.requireSigned, root: undefined, epoch: 0 };
       try {
         const res = await bootstrapTeamKey({
           url: loaded.settings.url,
@@ -564,6 +594,10 @@ async function handleKeyRotated(epoch: number): Promise<void> {
       rt.root = res.root;
       rt.epoch = res.epoch;
       if (res.role) rt.role = res.role; // 輪換重簽的角色憑證(§9.5)一併帶回
+      // 強制簽章政策(§7.3)綁 epoch,輪換重簽:以新代政策熱更新,並持久化
+      rt.requireSigned = res.requireSignedWrites;
+      if (session) persistRequireSigned(session.root, res.requireSignedWrites);
+      manager.setRequireSignedWrites(res.requireSignedWrites);
       await manager.rotateRoot(res.root, res.epoch, true, res.spaceKeys, res.restrictedSpaceIds); // 受限空間金鑰與受限清單整組換到位
       // 空間存取可能變了(獲授權補物化、失授權移檔並隱藏空間):通知 renderer 重載側欄空間與檔案清單
       sendAll("spaces:changed");
@@ -599,6 +633,7 @@ async function rotateNow(): Promise<{ rotated: boolean; error?: string }> {
       currentEpoch: rt.epoch,
       target: manager,
       restrictedSpaces,
+      requireSignedWrites: rt.requireSigned, // 強制簽章政策綁 epoch,開啟態須隨輪換以新 epoch 重簽(§7.3)
       onCommitted: (root, epoch) => {
         // commit 即不可回頭:先落 crash marker 再前移執行態,rekey 中斷也能重啟續跑
         try {
@@ -627,6 +662,7 @@ ipcMain.handle("team:info", async () => {
     owner: await isTeamOwner(),
     role: teamRuntime.role, // 本人角色(供 renderer 收斂 viewer UI)
     ready: teamRuntime.root !== undefined, // false = pending(等擁有者授權)
+    requireSigned: teamRuntime.requireSigned, // 強制簽章模式(§7.3);owner UI 顯示開關態
   };
 });
 
@@ -764,6 +800,29 @@ ipcMain.handle("team:remove", async (_e, memberId: unknown) => {
 ipcMain.handle("team:rotate", async () => {
   if (!(await isTeamOwner()) || !teamRuntime) throw new Error("非團隊擁有者");
   return rotateNow();
+});
+
+/**
+ * owner 開關強制簽章模式(P4 §7.3):簽發綁當前 epoch 的 vault 政策並上傳。
+ * 開啟後成員拒收 unsigned 寫入——owner 應在確認全員升級後再開,否則舊 client 的寫入會被擋。
+ * 自身執行態一併熱更新並持久化;成員經重連重驗政策(近即時)或下次輪換套用。
+ */
+ipcMain.handle("team:setRequireSigned", async (_e, enabled: unknown) => {
+  if (typeof enabled !== "boolean") throw new Error("非法請求");
+  if (!(await isTeamOwner()) || !teamRuntime) throw new Error("非團隊擁有者");
+  const rt = teamRuntime;
+  const me = await getIdentity();
+  const admin = await TeamAdminSession.open({ ...rt.settings, identity: me, createSocket: createTeamSocket });
+  try {
+    await admin.setRequireSignedWrites(enabled, rt.epoch);
+  } finally {
+    admin.close();
+  }
+  rt.requireSigned = enabled;
+  if (session) persistRequireSigned(session.root, enabled);
+  syncManager?.setRequireSignedWrites(enabled);
+  sendAll("team:changed");
+  return { requireSigned: enabled };
 });
 
 ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {

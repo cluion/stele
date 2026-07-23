@@ -1243,6 +1243,14 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
       setRotateNote({ ok: res.rotated, reason: res.error });
     });
   };
+  /** owner 開關強制簽章模式(§7.3):開啟前提醒須全員升級,否則舊版用戶端寫入會被擋 */
+  const toggleRequireSigned = (enabled: boolean): void => {
+    if (enabled && !window.confirm(t("team.signing.confirm"))) return;
+    run(async () => {
+      await window.stele.teamSetRequireSigned(enabled);
+      reload();
+    });
+  };
   /** 儲存空間存取名單(null = 恢復開放全團隊);伴隨一次金鑰輪換 */
   const saveSpaceAccess = (spaceId: string, memberIds: string[] | null): void => {
     if (!window.confirm(t("team.spaces.confirm"))) return;
@@ -1366,6 +1374,19 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
                   {rotateNote.ok ? t("team.rotate.done") : t("team.rotate.failed", { reason: rotateNote.reason ?? "" })}
                 </p>
               )}
+            </section>
+            <section className="team-section">
+              <h3>{t("team.signing.title")}</h3>
+              <p className="placeholder">{t("team.signing.hint")}</p>
+              <label className="team-signing-toggle">
+                <input
+                  type="checkbox"
+                  checked={info.requireSigned}
+                  disabled={busy}
+                  onChange={(e) => toggleRequireSigned(e.target.checked)}
+                />
+                <span>{info.requireSigned ? t("team.signing.on") : t("team.signing.off")}</span>
+              </label>
             </section>
             <section className="team-section">
               <h3>{t("team.spaces.title")}</h3>

@@ -106,6 +106,11 @@ export interface SteleApi {
   /** owner 手動輪換團隊金鑰(移除後輪換失敗的重試入口,或例行輪換) */
   teamRotate(): Promise<RotateResult>;
   /**
+   * owner 開關強制簽章模式(P4 §7.3):開啟後成員拒收 unsigned 寫入。
+   * 應在確認全員升級後再開;否則舊版用戶端的寫入會被擋。
+   */
+  teamSetRequireSigned(enabled: boolean): Promise<{ requireSigned: boolean }>;
+  /**
    * owner 設定空間成員子集並立即輪換金鑰:memberIds = 受限名單(owner 恆含);null = 恢復開放全團隊。
    * 名單外成員從此(前向)解不開該空間內容,該空間的筆記也不再物化到他們的裝置。
    */
@@ -120,7 +125,9 @@ export interface RotateResult {
 
 export type TeamRole = "owner" | "editor" | "viewer";
 
-export type TeamInfo = { team: false } | { team: true; vaultId: string; owner: boolean; role: TeamRole; ready: boolean };
+export type TeamInfo =
+  | { team: false }
+  | { team: true; vaultId: string; owner: boolean; role: TeamRole; ready: boolean; requireSigned: boolean };
 
 export interface TeamMember {
   memberId: string;
@@ -287,6 +294,7 @@ const api: SteleApi = {
   teamSetRole: (memberId, role) => ipcRenderer.invoke("team:setRole", memberId, role),
   teamRemove: (memberId) => ipcRenderer.invoke("team:remove", memberId),
   teamRotate: () => ipcRenderer.invoke("team:rotate"),
+  teamSetRequireSigned: (enabled) => ipcRenderer.invoke("team:setRequireSigned", enabled),
   spacesSetMembers: (spaceId, memberIds) => ipcRenderer.invoke("spaces:setMembers", spaceId, memberIds),
 };
 

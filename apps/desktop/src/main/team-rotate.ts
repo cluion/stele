@@ -34,6 +34,8 @@ export interface RotateOptions {
   target: RotateTarget;
   /** 受限空間清單(來自 vault-meta 的空間名單);每次輪換都對每個空間生新金鑰、只包給其名單 */
   restrictedSpaces?: RestrictedSpace[];
+  /** 強制簽章模式(P4 §7.3):政策綁 epoch,開啟狀態須每次輪換以新 epoch 重簽,否則輪換後靜默失效 */
+  requireSignedWrites?: boolean;
   /**
    * commit 已成功(epoch 已 bump)後立刻回呼:呼叫端據此更新 teamRuntime 的 root/epoch——
    * 之後就算 rekey 中途失敗,狀態也已前移到新紀元,重試/重啟續跑即可
@@ -66,6 +68,8 @@ export async function rotateTeamRoot(opts: RotateOptions): Promise<{ root: Uint8
         if (allowed.has(m.memberId)) await admin.approveSpace(m, s.spaceId, spaceKeys.get(s.spaceId)!, epoch);
       }
     }
+    // 強制簽章政策綁 epoch:開啟狀態須以新 epoch 重簽(在柵欄前推妥,commit 後成員 bootstrap 即見當代政策)
+    if (opts.requireSignedWrites) await admin.setRequireSignedWrites(true, epoch);
     await admin.rotateKey(epoch); // 柵欄點:成功即 commit,不可回頭
   } finally {
     admin.close();

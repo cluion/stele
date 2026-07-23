@@ -13,7 +13,7 @@
     "start": "pnpm build && electron . --no-sandbox",
     "smoke": "pnpm build && electron . --no-sandbox --smoke",
     "dist": "pnpm build && electron-builder",
-    "test": "vitest run"
+    "test": "vitest run --no-file-parallelism"
   },
   "build": {
     "appId": "com.cluion.stele",

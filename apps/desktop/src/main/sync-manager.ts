@@ -131,6 +131,10 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
       spaces?: SpaceKeySource;
       /** 成員身分:提供時走帶身分認證(challenge-response);未提供則走 legacy token-only auth */
       identity?: SyncIdentity;
+      /** 團隊信任錨(P4 逐寫入驗證):team vault 傳入,啟用本端簽章與收到寫入的作者驗證;個人 vault 省略 */
+      ownerPubSign?: Uint8Array;
+      /** 強制簽章模式(P4 §7.3):team vault 的 owner 政策啟用時傳 true,成員拒收 unsigned 寫入 */
+      requireSignedWrites?: boolean;
       /** vault 金鑰紀元(2c-2,team vault 由 bootstrap 取得;個人 vault 省略 = 0) */
       epoch?: number;
       /** 金鑰已輪換:推送已暫停,呼叫端應重跑 bootstrap 取新 root 後呼叫 rotateRoot 收斂 */
@@ -191,6 +195,8 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
       deviceId: settings.deviceId,
       host: this.makeHost(),
       identity: tuning?.identity,
+      ownerPubSign: tuning?.ownerPubSign,
+      requireSignedWrites: tuning?.requireSignedWrites,
       epoch: tuning?.epoch,
       onKeyRotated: tuning?.onKeyRotated,
       onRevoked: tuning?.onRevoked,
@@ -323,6 +329,11 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
    * 成員端 repull=true 全量重拉;owner 端(自己重加密)傳 false,隨後呼叫 rekeyAll。
    * spaceKeys = 這一紀元我拿到的受限空間金鑰(整組換到位);新獲授權的空間筆記隨後補物化。
    */
+  /** 熱更新強制簽章模式(owner 切換政策、或成員重連/輪換重驗政策後);轉發給 SyncClient */
+  setRequireSignedWrites(enabled: boolean): void {
+    this.client.setRequireSignedWrites(enabled);
+  }
+
   async rotateRoot(
     newRoot: Uint8Array,
     epoch: number,

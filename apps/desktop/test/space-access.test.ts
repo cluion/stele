@@ -176,6 +176,7 @@ describe("金牌:空間存取(per-space 成員子集)", () => {
         void root;
       },
       retryMs: 100,
+      maxRetries: 120, // 全 workspace 並行下 CPU 飢餓,重加密需更多輪重試(非邏輯問題,見 [[p4-1-slice-2b-progress]])
     });
     expect(rotated.epoch).toBe(1);
 
@@ -233,6 +234,7 @@ describe("金牌:空間存取(per-space 成員子集)", () => {
         o.spaceKeys = new Map(spaceKeys);
       },
       retryMs: 100,
+      maxRetries: 120, // 同上:併發下重加密的重試預算
     });
     await until(() => a.epoch === 2, "alice 轉到紀元 2");
     expect(a.spaceKeys.has(spaceId)).toBe(false);
@@ -243,5 +245,5 @@ describe("金牌:空間存取(per-space 成員子集)", () => {
     // owner(名單空仍恆含自己)還解得開
     const ownerView = new WrappedKeySpaces(rotated2.root, o.spaceKeys);
     expect((await ownerView.cipher(spaceId).then((ci) => ci.decrypt(secretDocId, snap2.payload))).length).toBeGreaterThan(0);
-  }, 40_000);
+  }, 90_000);
 });

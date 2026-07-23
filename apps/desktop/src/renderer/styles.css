@@ -737,6 +737,8 @@ body {
 .team-rotate-row { margin-top: var(--sp-2); }
 .team-rotate-row button { font-size: var(--fs-sm); padding: var(--sp-1) var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); }
 .team-rotate-row button:hover { border-color: var(--accent); color: var(--accent); }
+.team-signing-toggle { display: flex; align-items: center; justify-content: flex-start; gap: var(--sp-2); font-size: var(--fs-sm); cursor: pointer; }
+.team-signing-toggle input[type="checkbox"] { width: auto; flex: 0 0 auto; margin: 0; }
 .team-fingerprint { font-family: ui-monospace, monospace; font-size: var(--fs-sm); letter-spacing: 0.05em; color: var(--text); }
 .team-member-actions { display: flex; gap: var(--sp-2); }
 .team-member-actions button { font-size: var(--fs-sm); padding: var(--sp-1) var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); }
