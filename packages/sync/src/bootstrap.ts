@@ -49,8 +49,12 @@ export type TeamBootstrapResult =
       role?: MemberRole;
       spaceKeys: Map<string, Uint8Array>;
       restrictedSpaceIds: string[];
-      /** 強制簽章模式(§7.3):owner 簽章 vault 政策啟用且屬當前紀元 → true,成員據此拒 unsigned 寫入 */
-      requireSignedWrites: boolean;
+      /**
+       * 強制簽章模式(§7.3):當代 owner 簽章 vault 政策的明確值(true=拒 unsigned、false=容忍);
+       * **undefined = 未收到當代政策**(從未設定,或惡意伺服器抑制)——呼叫端據此保留既有強制態(fail-closed pin),
+       * 不把「政策缺席」當成關閉,擋惡意伺服器以抑制政策偷降級已 pin 的成員。
+       */
+      requireSignedWrites: boolean | undefined;
     }
   | { status: "pending" };
 
@@ -91,8 +95,9 @@ export function bootstrapTeamKey(opts: TeamBootstrapOptions): Promise<TeamBootst
           if (cred.epoch === env.epoch) role = cred.role;
         }
         // Vault 政策(§7.3):驗 owner 簽章;偽造/挪用即拋(擋盲中繼捏造政策)。
-        // 舊紀元政策(真簽但已被輪換作廢)視同未設 → 過渡容忍,擋降級/升級重放
-        let requireSignedWrites = false;
+        // 政策缺席或非當代 → undefined(呼叫端保留既有強制態):惡意伺服器抑制政策無法偷降級,
+        // 舊紀元政策(真簽但已被輪換作廢)也不採信,擋降級/升級重放。只有當代明確政策才決定 on/off。
+        let requireSignedWrites: boolean | undefined;
         if (msg.policy.length > 0) {
           const pol = verifyVaultPolicy(msg.policy, opts.ownerPubSign, vaultId);
           if (pol.epoch === env.epoch) requireSignedWrites = pol.requireSignedWrites;
