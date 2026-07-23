@@ -120,6 +120,16 @@ export class TeamAdminSession {
     await this.request((reqId) => ({ type: "credPush", reqId, memberId, blob }), "ok");
   }
 
+  /**
+   * 把某受限空間的獨立金鑰包給一位空間成員(per-space 成員子集):
+   * 信封 keyId=spaceId、context 綁 vault/空間/紀元/收件人,與 root 信封同一套簽章與驗證。
+   */
+  async approveSpace(member: Pick<MemberInfo, "memberId" | "pubWrap">, spaceId: string, spaceKey: Uint8Array, epoch: number): Promise<void> {
+    const context = { vaultId: this.vaultId, keyId: spaceId, epoch, recipientMemberId: member.memberId };
+    const blob = await wrapKey(spaceKey, member.pubWrap, this.identity.sign, context);
+    await this.request((reqId) => ({ type: "envelopePush", reqId, keyId: spaceId, memberId: member.memberId, epoch, blob }), "ok");
+  }
+
   /** 移除成員(刪 member 列 + 其信封 + 踢連線);密碼層前向保密由呼叫端接著 rotateKey 輪換補上 */
   async remove(memberId: string): Promise<void> {
     await this.request((reqId) => ({ type: "memberRemove", reqId, memberId }), "ok");

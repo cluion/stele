@@ -688,6 +688,10 @@ body {
 .team-member-id code { font-size: var(--fs-sm); color: var(--text-muted); }
 .team-badge { font-size: var(--fs-sm); padding: 0 var(--sp-1); border-radius: var(--radius-sm); background: var(--accent); color: var(--bg); }
 .team-badge.pending { background: var(--text-faint); }
+.team-spaces { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.team-space { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--sp-2); display: flex; flex-direction: column; gap: var(--sp-1); }
+.team-space-edit { display: flex; flex-direction: column; gap: var(--sp-1); }
+.team-space-edit label { display: flex; align-items: center; gap: var(--sp-1); font-size: var(--fs-sm); }
 .team-rotate-row { margin-top: var(--sp-2); }
 .team-rotate-row button { font-size: var(--fs-sm); padding: var(--sp-1) var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); }
 .team-rotate-row button:hover { border-color: var(--accent); color: var(--accent); }

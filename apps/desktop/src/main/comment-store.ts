@@ -2,6 +2,7 @@ import * as Y from "yjs";
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { spaceOf, assignDocSpace, DEFAULT_SPACE_ID } from "@stele/sync";
 import type { VaultSession } from "./vault-session.ts";
 import type { VaultMeta } from "./vault-meta.ts";
 
@@ -100,7 +101,12 @@ export class CommentStore implements CommentDocSource {
     // 決定性 id:兩裝置由同一 noteDocId 各自算出同一個 commentDocId,避免併發開啟時分裂
     const commentDocId = commentDocIdFor(noteDocId);
     if (this.registry.get(noteDocId) !== commentDocId) {
-      this.meta.transact(() => this.registry.set(noteDocId, commentDocId));
+      const spaceId = spaceOf(this.meta.doc, noteDocId);
+      this.meta.transact(() => {
+        this.registry.set(noteDocId, commentDocId);
+        // 伴生 doc 跟筆記空間走:受限空間筆記的留言得用同一把空間金鑰,否則全 vault 可解即洩漏
+        if (spaceId !== DEFAULT_SPACE_ID) assignDocSpace(this.meta.doc, commentDocId, spaceId);
+      });
     }
     return this.docFor(commentDocId, noteDocId);
   }

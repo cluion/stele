@@ -8,6 +8,9 @@ import {
   renameSpace,
   moveNote,
   recordCopy,
+  setSpaceMembers,
+  spaceMembersOf,
+  assignDocSpace,
   readAudit,
 } from "../src/index.ts";
 
@@ -85,6 +88,37 @@ describe("空間模型:稽核紀錄", () => {
     const m = meta();
     moveNote(m, "doc-1", DEFAULT_SPACE_ID, 1); // 本就在預設
     expect(readAudit(m)).toHaveLength(0);
+  });
+});
+
+describe("空間成員子集(per-space 存取)", () => {
+  it("設定/讀取/清除名單;readSpaces 帶 members;稽核入帳", () => {
+    const m = meta();
+    createSpace(m, { id: "s-sec", name: "機密", at: 1 });
+    expect(spaceMembersOf(m, "s-sec")).toBeUndefined(); // 預設開放全團隊
+    setSpaceMembers(m, "s-sec", ["m-a", "m-b"], 2);
+    expect(spaceMembersOf(m, "s-sec")).toEqual(["m-a", "m-b"]);
+    expect(readSpaces(m).find((s) => s.id === "s-sec")!.members).toEqual(["m-a", "m-b"]);
+    setSpaceMembers(m, "s-sec", undefined, 3); // 恢復開放
+    expect(spaceMembersOf(m, "s-sec")).toBeUndefined();
+    expect(readAudit(m).filter((e) => e.kind === "space-access-changed")).toHaveLength(2);
+  });
+
+  it("預設空間與不存在的空間不可設名單", () => {
+    const m = meta();
+    expect(() => setSpaceMembers(m, DEFAULT_SPACE_ID, ["m-a"], 1)).toThrow(/預設空間/);
+    expect(() => setSpaceMembers(m, "nope", ["m-a"], 1)).toThrow(/不存在/);
+    expect(spaceMembersOf(m, DEFAULT_SPACE_ID)).toBeUndefined();
+  });
+
+  it("assignDocSpace:伴生 doc 跟筆記空間走,不進稽核;回預設即移除登記", () => {
+    const m = meta();
+    createSpace(m, { id: "s-sec", name: "機密", at: 1 });
+    assignDocSpace(m, "comment-1", "s-sec");
+    expect(spaceOf(m, "comment-1")).toBe("s-sec");
+    assignDocSpace(m, "comment-1", DEFAULT_SPACE_ID);
+    expect(spaceOf(m, "comment-1")).toBe(DEFAULT_SPACE_ID);
+    expect(readAudit(m).filter((e) => e.docId === "comment-1")).toHaveLength(0);
   });
 });
 

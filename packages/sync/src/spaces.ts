@@ -27,9 +27,15 @@ export interface Space {
   createdAt: number;
   color?: string;
   isDefault: boolean;
+  /**
+   * 空間成員子集(2c 補完):undefined = 開放整個團隊(空間金鑰由 root 衍生);
+   * 陣列 = 受限空間,只有名單內成員(owner 恆含)拿得到該空間的隨機金鑰。
+   * 此欄是 UI 與輪換編排的名單;密碼學權威在金鑰信封(名單外成員無信封,拿密文也解不開)。
+   */
+  members?: string[];
 }
 
-export type SpaceAuditKind = "space-created" | "space-renamed" | "note-moved" | "note-copied";
+export type SpaceAuditKind = "space-created" | "space-renamed" | "note-moved" | "note-copied" | "space-access-changed";
 
 export interface SpaceAuditEvent {
   at: number;
@@ -77,12 +83,14 @@ export function readSpaces(meta: Y.Doc): Space[] {
       defaultName = name;
       continue;
     }
+    const members = m.get("members") as string[] | undefined;
     custom.push({
       id,
       name,
       createdAt: (m.get("createdAt") as number | undefined) ?? 0,
       color: m.get("color") as string | undefined,
       isDefault: false,
+      ...(members !== undefined ? { members: [...members] } : {}),
     });
   }
   custom.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
@@ -127,6 +135,35 @@ export function moveNote(meta: Y.Doc, docId: string, toSpaceId: string, at: numb
   if (toSpaceId === DEFAULT_SPACE_ID) dsm.delete(docId); // 回預設 = 移除登記(預設為隱含落點)
   else dsm.set(docId, toSpaceId);
   pushAudit(meta, { at, kind: "note-moved", docId, fromSpaceId: from, spaceId: toSpaceId });
+}
+
+/**
+ * 設定空間成員子集(僅團隊 vault 有意義):memberIds = 受限名單(整組 LWW 覆蓋);undefined = 恢復開放全團隊。
+ * 預設空間不可受限(vault-meta 在其中,人人必須可解)。金鑰面(生新空間金鑰、只包給名單)由輪換編排負責。
+ */
+export function setSpaceMembers(meta: Y.Doc, spaceId: string, memberIds: string[] | undefined, at: number): void {
+  if (spaceId === DEFAULT_SPACE_ID) throw new Error("預設空間不可設定成員子集");
+  const m = spacesMap(meta).get(spaceId);
+  if (!m) throw new Error(`空間不存在:${spaceId}`);
+  if (memberIds === undefined) m.delete("members");
+  else m.set("members", [...memberIds]);
+  pushAudit(meta, { at, kind: "space-access-changed", spaceId, name: memberIds === undefined ? "" : String(memberIds.length) });
+}
+
+/** 空間成員子集;undefined = 開放整個團隊(含預設空間與不存在的空間) */
+export function spaceMembersOf(meta: Y.Doc, spaceId: string): string[] | undefined {
+  const members = spacesMap(meta).get(spaceId)?.get("members") as string[] | undefined;
+  return members === undefined ? undefined : [...members];
+}
+
+/**
+ * 指派某 doc 的空間歸屬(不進稽核):伴生 doc(留言)跟著筆記空間走的衍生事實,
+ * 與使用者「移動筆記」的稽核事件分開。回預設空間 = 移除登記。
+ */
+export function assignDocSpace(meta: Y.Doc, docId: string, spaceId: string): void {
+  const dsm = docSpacesMap(meta);
+  if (spaceId === DEFAULT_SPACE_ID) dsm.delete(docId);
+  else dsm.set(docId, spaceId);
 }
 
 /** 記錄「複製到空間」:新 docId 歸屬目標空間(內容複製與加密由上層處理),原筆記不動 */

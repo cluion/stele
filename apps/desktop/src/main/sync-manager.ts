@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   SyncClient,
   spaceOf,
+  spaceMembersOf,
   DOC_SPACES_MAP,
   type AwarenessState,
   type Cipher,
@@ -160,9 +161,14 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
     this.paths.observe((event, tx) => {
       if (tx.origin === "sync") this.applyRemoteMeta(Array.from(event.keysChanged as Set<string>));
     });
-    // 遠端得知某筆記換了空間 → 該 docId 的伺服器 blob 已改用新空間金鑰,強制 repull 以新金鑰重解
+    // 遠端得知某筆記換了空間 → 該 docId 的伺服器 blob 已改用新空間金鑰,強制 repull 以新金鑰重解;
+    // 移進了我無金鑰的受限空間 → 卸下同步(拿密文也解不開,本地檔案停在最後可讀狀態)
     this.docSpaces.observe((event, tx) => {
-      if (tx.origin === "sync") for (const docId of event.keysChanged as Set<string>) this.client.repull(docId);
+      if (tx.origin !== "sync") return;
+      for (const docId of event.keysChanged as Set<string>) {
+        if (this.canDecrypt(docId)) this.client.repull(docId);
+        else this.client.forget(docId);
+      }
     });
 
     this.client = new SyncClient({
@@ -267,16 +273,31 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
     return doc;
   }
 
-  // ── 金鑰輪換(2c-2) ──
+  // ── 金鑰輪換(2c-2)與空間存取(per-space 成員子集) ──
+
+  /**
+   * 我能否解開某 doc:未受限空間(含個人 vault)恆可;受限空間看是否持有其獨立金鑰。
+   * 判定用 meta 的空間名單 + 金鑰來源的實際持有——名單說我在但金鑰未到(輪換未達)一樣不可,
+   * 絕不拿 root fallback 去解受限空間的密文(解不開,徒留噪音與空檔)。
+   */
+  private canDecrypt(docId: string): boolean {
+    if (!this.spaces?.hasSpaceKey) return true;
+    const spaceId = spaceOf(this.meta, docId);
+    if (spaceMembersOf(this.meta, spaceId) === undefined) return true;
+    return this.spaces.hasSpaceKey(spaceId);
+  }
 
   /**
    * 換 root 收斂:原地 rotate 金鑰來源(routingCipher 閉包自動走新金鑰)、前移 epoch 恢復推送。
    * 成員端 repull=true 全量重拉;owner 端(自己重加密)傳 false,隨後呼叫 rekeyAll。
+   * spaceKeys = 這一紀元我拿到的受限空間金鑰(整組換到位);新獲授權的空間筆記隨後補物化。
    */
-  async rotateRoot(newRoot: Uint8Array, epoch: number, repull = true): Promise<void> {
+  async rotateRoot(newRoot: Uint8Array, epoch: number, repull = true, spaceKeys?: ReadonlyMap<string, Uint8Array>): Promise<void> {
     if (!this.spaces?.rotate) throw new Error("此 vault 的金鑰來源不支援輪換");
-    this.spaces.rotate(newRoot);
+    this.spaces.rotate(newRoot, spaceKeys);
     await this.client.applyRotation(epoch, repull);
+    // 先前因無金鑰而跳過物化的筆記,這一紀元可能獲授權了:重套 meta 補落地
+    this.applyRemoteMeta([...this.paths.keys()]);
   }
 
   /** 是否已拉齊伺服器上所有 doc(owner 輪換前置檢查;未拉齊必須中止輪換) */
@@ -335,6 +356,8 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
     return {
       openDoc: (docId) => {
         if (docId === META_DOC_ID) return Promise.resolve(this.meta);
+        // 受限空間且我無金鑰:整個 doc 不承接——不 pull、不解密、不物化(含伴生留言 doc)
+        if (!this.canDecrypt(docId)) return Promise.resolve(undefined);
         const comment = this.comments?.get(docId);
         if (comment) return Promise.resolve(comment);
         const rel = this.session.relForDocId(docId);
@@ -409,6 +432,8 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
             }
             return;
           }
+          // 受限空間且我無金鑰:不物化、不改名(內容解不開,落地只會是空檔);獲授權後 rotateRoot 補跑
+          if (!this.canDecrypt(docId)) return;
           if (localRel === rel) return;
           if (localRel) {
             const landed = await this.session.renamePlumbing(localRel, rel);

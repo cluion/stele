@@ -20,6 +20,7 @@ export {
   deriveSpaceKey,
   DEFAULT_SPACE_ID,
   MasterKeySpaces,
+  WrappedKeySpaces,
   wrapKey,
   unwrapKey,
 } from "./crypto.ts";
@@ -63,6 +64,9 @@ export {
   renameSpace,
   moveNote,
   recordCopy,
+  setSpaceMembers,
+  spaceMembersOf,
+  assignDocSpace,
   readAudit,
   SPACES_MAP,
   DOC_SPACES_MAP,

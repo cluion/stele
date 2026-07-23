@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { VaultCipher, deriveSpaceKey, DEFAULT_SPACE_ID, MasterKeySpaces } from "../src/index.ts";
+import { VaultCipher, deriveSpaceKey, DEFAULT_SPACE_ID, MasterKeySpaces, WrappedKeySpaces } from "../src/index.ts";
 
 const utf8 = (s: string) => new TextEncoder().encode(s);
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
@@ -94,4 +94,48 @@ describe("金鑰輪換(2c-2):MasterKeySpaces.rotate", () => {
     const sealedNew = await (await spaces.cipher("work")).encrypt("doc-1", utf8("新金鑰空間內容"));
     expect(Buffer.from(await (await fresh.cipher("work")).decrypt("doc-1", sealedNew)).toString("utf8")).toBe("新金鑰空間內容");
   });
+});
+
+describe("WrappedKeySpaces(per-space 成員子集)", () => {
+  const spaceKey = () => new Uint8Array(32).map((_, i) => (i * 31 + 11) & 0xff);
+
+  it("零遷移守門:無 per-space 金鑰時與 MasterKeySpaces 每 doc 金鑰位元組相同", async () => {
+    const wrapped = new WrappedKeySpaces(master());
+    const legacy = new MasterKeySpaces(master());
+    for (const sid of [DEFAULT_SPACE_ID, "work"]) {
+      const a = await (await wrapped.cipher(sid)).exportDocKey("doc-1");
+      const b = await (await legacy.cipher(sid)).exportDocKey("doc-1");
+      expect(hex(a)).toBe(hex(b));
+    }
+    expect(wrapped.hasSpaceKey("work")).toBe(false);
+  });
+
+  it("受限空間走獨立金鑰:名單外成員以 root fallback 解不開;其餘空間不受影響", async () => {
+    const restricted = new WrappedKeySpaces(master(), new Map([["secret", spaceKey()]]));
+    const outsider = new WrappedKeySpaces(master()); // 同 root、無 secret 空間金鑰
+    expect(restricted.hasSpaceKey("secret")).toBe(true);
+    const sealed = await (await restricted.cipher("secret")).encrypt("doc-1", utf8("只給小圈子"));
+    await expect((await outsider.cipher("secret")).decrypt("doc-1", sealed)).rejects.toThrow();
+    // 同持 per-space 金鑰的兩實例互解
+    const peer = new WrappedKeySpaces(master(), new Map([["secret", spaceKey()]]));
+    expect(Buffer.from(await (await peer.cipher("secret")).decrypt("doc-1", sealed)).toString("utf8")).toBe("只給小圈子");
+    // 未受限空間雙方互通(root 衍生)
+    const open = await (await restricted.cipher("open")).encrypt("doc-2", utf8("全團隊可見"));
+    expect(Buffer.from(await (await outsider.cipher("open")).decrypt("doc-2", open)).toString("utf8")).toBe("全團隊可見");
+  });
+
+  it("rotate 整組換到位:失去授權的空間金鑰消失、新授權的出現", async () => {
+    const spaces = new WrappedKeySpaces(master(), new Map([["secret", spaceKey()]]));
+    const sealedOld = await (await spaces.cipher("secret")).encrypt("doc-1", utf8("輪換前"));
+    const nextKey = new Uint8Array(32).fill(42);
+    spaces.rotate(newRoot(), new Map([["another", nextKey]]));
+    expect(spaces.hasSpaceKey("secret")).toBe(false);
+    expect(spaces.hasSpaceKey("another")).toBe(true);
+    // secret 空間 fallback 新 root 衍生 → 舊 per-space 金鑰密文解不開(被撤銷者視角)
+    await expect((await spaces.cipher("secret")).decrypt("doc-1", sealedOld)).rejects.toThrow();
+  });
+
+  function newRoot(): Uint8Array {
+    return new Uint8Array(32).map((_, i) => (i * 13 + 5) & 0xff);
+  }
 });

@@ -36,8 +36,11 @@ export interface TeamBootstrapOptions {
  * ready=拿到 root 可協作(epoch 為信封的金鑰紀元,doc 寫入須帶它);pending=已認證但 owner 尚未包 root 給我。
  * role(§9.5)= 驗過 owner 簽章的角色憑證所載角色;undefined = owner 尚未簽發(升級前核准的舊成員),
  * 呼叫端 fallback 本地既知角色。憑證存在但驗不過(偽造/挪用)→ 整個 bootstrap 拋錯。
+ * spaceKeys = 受限空間的獨立金鑰(keyId=spaceId 的信封,只有名單內成員有);未授權的空間就是不在 map 裡。
  */
-export type TeamBootstrapResult = { status: "ready"; root: Uint8Array; epoch: number; role?: MemberRole } | { status: "pending" };
+export type TeamBootstrapResult =
+  | { status: "ready"; root: Uint8Array; epoch: number; role?: MemberRole; spaceKeys: Map<string, Uint8Array> }
+  | { status: "pending" };
 
 /**
  * 加入者/既有成員的 bootstrap:認證(可帶邀請碼)→ pull 自己的 root 信封 → 驗 owner 簽章後 unwrap。
@@ -61,6 +64,13 @@ export function bootstrapTeamKey(opts: TeamBootstrapOptions): Promise<TeamBootst
         }
         // context 用信封宣稱的 epoch:偽造 epoch 會使 HKDF info 不符 → GCM 驗不過而拒絕,不會靜默拿錯 root
         const root = await identity.unwrap(env.blob, opts.ownerPubSign, rootWrapContext(vaultId, identity.memberId, env.epoch));
+        // 受限空間金鑰(keyId=spaceId 的信封):同一信任錨驗簽解封;舊紀元殘留(輪換後
+        // envelopesFor 理論上只回最新,但防禦深度仍比對)略過。偽造信封 unwrap 必拋,不靜默
+        const spaceKeys = new Map<string, Uint8Array>();
+        for (const e of msg.envelopes) {
+          if (e.keyId === KEY_ID_ROOT || e.epoch !== env.epoch) continue;
+          spaceKeys.set(e.keyId, await identity.unwrap(e.blob, opts.ownerPubSign, { vaultId, keyId: e.keyId, epoch: e.epoch, recipientMemberId: identity.memberId }));
+        }
         // 角色憑證(§9.5):驗 owner 簽章;偽造/挪用即拋(擋盲中繼捏造角色)。
         // 憑證 epoch 必須等於信封 epoch——舊紀元憑證(真簽但已被輪換作廢)視同未簽發,擋降級/升級重放
         let role: MemberRole | undefined;
@@ -68,7 +78,7 @@ export function bootstrapTeamKey(opts: TeamBootstrapOptions): Promise<TeamBootst
           const cred = verifyRoleCredential(msg.roleCred, opts.ownerPubSign, vaultId, identity.memberId);
           if (cred.epoch === env.epoch) role = cred.role;
         }
-        done({ status: "ready", root, epoch: env.epoch, role });
+        done({ status: "ready", root, epoch: env.epoch, role, spaceKeys });
         break;
       }
       case "error":

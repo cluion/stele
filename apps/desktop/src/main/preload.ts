@@ -103,6 +103,11 @@ export interface SteleApi {
   teamRemove(memberId: string): Promise<RotateResult>;
   /** owner 手動輪換團隊金鑰(移除後輪換失敗的重試入口,或例行輪換) */
   teamRotate(): Promise<RotateResult>;
+  /**
+   * owner 設定空間成員子集並立即輪換金鑰:memberIds = 受限名單(owner 恆含);null = 恢復開放全團隊。
+   * 名單外成員從此(前向)解不開該空間內容,該空間的筆記也不再物化到他們的裝置。
+   */
+  spacesSetMembers(spaceId: string, memberIds: string[] | null): Promise<RotateResult>;
 }
 
 /** 金鑰輪換結果(2c-2):失敗時 error 為可呈現的原因 */
@@ -132,6 +137,8 @@ export interface SpaceInfo {
   createdAt: number;
   color?: string;
   isDefault: boolean;
+  /** 空間成員子集(team vault):undefined = 開放全團隊;陣列 = 受限名單(owner 恆含) */
+  members?: string[];
 }
 
 export interface SpacesOverview {
@@ -273,6 +280,7 @@ const api: SteleApi = {
   teamSetRole: (memberId, role) => ipcRenderer.invoke("team:setRole", memberId, role),
   teamRemove: (memberId) => ipcRenderer.invoke("team:remove", memberId),
   teamRotate: () => ipcRenderer.invoke("team:rotate"),
+  spacesSetMembers: (spaceId, memberIds) => ipcRenderer.invoke("spaces:setMembers", spaceId, memberIds),
 };
 
 contextBridge.exposeInMainWorld("stele", api);

@@ -1144,11 +1144,17 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
   const [members, setMembers] = useState<TeamMember[]>([]);
   // 金鑰輪換(2c-2)結果:移除後自動輪換或手動輪換的成敗提示
   const [rotateNote, setRotateNote] = useState<{ ok: boolean; reason?: string } | null>(null);
+  // 空間存取(per-space 成員子集):空間清單與編輯中的名單
+  const [spacesList, setSpacesList] = useState<SpaceInfo[]>([]);
+  const [accessEdit, setAccessEdit] = useState<{ spaceId: string; picked: Set<string> } | null>(null);
 
   const reload = (): void => {
     void window.stele.teamInfo().then((i) => {
       setInfo(i);
-      if (i.team && i.owner) void window.stele.teamMembers().then(setMembers).catch(() => setMembers([]));
+      if (i.team && i.owner) {
+        void window.stele.teamMembers().then(setMembers).catch(() => setMembers([]));
+        void window.stele.spacesOverview().then((o) => setSpacesList(o?.spaces ?? [])).catch(() => setSpacesList([]));
+      }
     });
   };
   useEffect(reload, []);
@@ -1214,6 +1220,16 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
     run(async () => {
       const res = await window.stele.teamRotate();
       setRotateNote({ ok: res.rotated, reason: res.error });
+    });
+  };
+  /** 儲存空間存取名單(null = 恢復開放全團隊);伴隨一次金鑰輪換 */
+  const saveSpaceAccess = (spaceId: string, memberIds: string[] | null): void => {
+    if (!window.confirm(t("team.spaces.confirm"))) return;
+    setAccessEdit(null);
+    run(async () => {
+      const res = await window.stele.spacesSetMembers(spaceId, memberIds);
+      setRotateNote({ ok: res.rotated, reason: res.error });
+      reload();
     });
   };
 
@@ -1329,6 +1345,65 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
                   {rotateNote.ok ? t("team.rotate.done") : t("team.rotate.failed", { reason: rotateNote.reason ?? "" })}
                 </p>
               )}
+            </section>
+            <section className="team-section">
+              <h3>{t("team.spaces.title")}</h3>
+              <p className="placeholder">{t("team.spaces.hint")}</p>
+              {spacesList.filter((s) => !s.isDefault).length === 0 && <p className="placeholder">{t("team.spaces.none")}</p>}
+              <ul className="team-spaces">
+                {spacesList
+                  .filter((s) => !s.isDefault)
+                  .map((s) => (
+                    <li key={s.id} className="team-space">
+                      <div className="team-member-id">
+                        <span>{s.name || s.id.slice(0, 8)}</span>
+                        <span className={s.members ? "team-badge pending" : "team-badge"}>
+                          {s.members ? t("team.spaces.limited", { count: s.members.length }) : t("team.spaces.open")}
+                        </span>
+                      </div>
+                      {accessEdit?.spaceId === s.id ? (
+                        <div className="team-space-edit">
+                          {members
+                            .filter((m) => !m.isOwner && m.approved)
+                            .map((m) => (
+                              <label key={m.memberId}>
+                                <input
+                                  type="checkbox"
+                                  checked={accessEdit.picked.has(m.memberId)}
+                                  onChange={(e) => {
+                                    const picked = new Set(accessEdit.picked);
+                                    if (e.target.checked) picked.add(m.memberId);
+                                    else picked.delete(m.memberId);
+                                    setAccessEdit({ spaceId: s.id, picked });
+                                  }}
+                                />
+                                <code>{m.memberId.slice(0, 12)}…</code>
+                              </label>
+                            ))}
+                          <div className="team-member-actions">
+                            <button disabled={busy} onClick={() => saveSpaceAccess(s.id, [...accessEdit.picked])}>
+                              {t("team.spaces.save")}
+                            </button>
+                            {s.members && (
+                              <button disabled={busy} onClick={() => saveSpaceAccess(s.id, null)}>
+                                {t("team.spaces.openAll")}
+                              </button>
+                            )}
+                            <button disabled={busy} onClick={() => setAccessEdit(null)}>
+                              {t("team.spaces.cancel")}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="team-member-actions">
+                          <button disabled={busy} onClick={() => setAccessEdit({ spaceId: s.id, picked: new Set(s.members ?? []) })}>
+                            {t("team.spaces.edit")}
+                          </button>
+                        </div>
+                      )}
+                    </li>
+                  ))}
+              </ul>
             </section>
           </>
         )}

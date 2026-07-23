@@ -267,8 +267,10 @@ export interface SpaceKeySource {
   spaceKey(spaceId: string): Promise<Uint8Array>;
   /** 該空間的密碼器,內部再依 docId 衍生每篇筆記金鑰(可 exportDocKey 供分享連結用) */
   cipher(spaceId: string): Promise<VaultCipher>;
-  /** 金鑰輪換(2c-2,團隊 vault):原地換 root,後續 cipher 全走新金鑰;不支援輪換的實作可缺席 */
-  rotate?(newMasterKey: Uint8Array): void;
+  /** 金鑰輪換(2c-2,團隊 vault):原地換 root(與整組 per-space 金鑰);不支援輪換的實作可缺席 */
+  rotate?(newMasterKey: Uint8Array, spaceKeys?: ReadonlyMap<string, Uint8Array>): void;
+  /** 是否持有某空間的獨立金鑰(受限空間用);缺席 = 所有空間都由 root 衍生(個人 vault) */
+  hasSpaceKey?(spaceId: string): boolean;
 }
 
 /** Slice 1 實作:個人 vault,所有空間金鑰皆由主金鑰衍生(預設空間 = 主金鑰,零遷移) */
@@ -302,4 +304,51 @@ export class MasterKeySpaces implements SpaceKeySource {
     }
     return c;
   }
+}
+
+/**
+ * 團隊 vault 實作(2c 補完):root 之外可另持一組 per-space 隨機金鑰(受限空間)。
+ * spaceKey 先查 per-space 金鑰、否則 fallback root 衍生——與 MasterKeySpaces 在無受限空間時位元組相同(零遷移)。
+ * 受限空間的金鑰不由 root 衍生:名單外成員(持 root)拿到密文也解不開,這才是「某空間只給部分人」的密碼學邊界。
+ */
+export class WrappedKeySpaces implements SpaceKeySource {
+  private readonly ciphers = new Map<string, Promise<VaultCipher>>();
+  private masterKey: Uint8Array;
+  private spaceKeys: Map<string, Uint8Array>;
+
+  constructor(masterKey: Uint8Array, spaceKeys?: ReadonlyMap<string, Uint8Array>) {
+    this.masterKey = masterKey.slice();
+    this.spaceKeys = copyKeys(spaceKeys);
+  }
+
+  /** 輪換(2c-2):root 與整組 per-space 金鑰一次換到位,清 cipher 快取;失去授權的空間金鑰隨之消失 */
+  rotate(newMasterKey: Uint8Array, spaceKeys?: ReadonlyMap<string, Uint8Array>): void {
+    this.masterKey = newMasterKey.slice();
+    this.spaceKeys = copyKeys(spaceKeys);
+    this.ciphers.clear();
+  }
+
+  hasSpaceKey(spaceId: string): boolean {
+    return this.spaceKeys.has(spaceId);
+  }
+
+  spaceKey(spaceId: string): Promise<Uint8Array> {
+    const k = this.spaceKeys.get(spaceId);
+    return k ? Promise.resolve(k.slice()) : deriveSpaceKey(this.masterKey, spaceId);
+  }
+
+  cipher(spaceId: string): Promise<VaultCipher> {
+    let c = this.ciphers.get(spaceId);
+    if (!c) {
+      c = this.spaceKey(spaceId).then((key) => new VaultCipher(key));
+      this.ciphers.set(spaceId, c);
+    }
+    return c;
+  }
+}
+
+function copyKeys(keys: ReadonlyMap<string, Uint8Array> | undefined): Map<string, Uint8Array> {
+  const out = new Map<string, Uint8Array>();
+  for (const [id, k] of keys ?? []) out.set(id, k.slice());
+  return out;
 }

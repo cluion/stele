@@ -5,8 +5,8 @@ import { randomUUID, createHash } from "node:crypto";
 import path from "node:path";
 import WebSocket from "ws";
 import { VaultSession, type SessionCallbacks } from "./vault-session.ts";
-import { deriveVaultKey, MasterKeySpaces, bootstrapTeamKey, createTeamVault, TeamAdminSession } from "@stele/sync";
-import type { SocketLike, MemberRole } from "@stele/sync";
+import { deriveVaultKey, MasterKeySpaces, WrappedKeySpaces, bootstrapTeamKey, createTeamVault, TeamAdminSession, readSpaces } from "@stele/sync";
+import type { SocketLike, MemberRole, SpaceKeySource } from "@stele/sync";
 import { SyncManager, type SyncSettings } from "./sync-manager.ts";
 import { encodeInvite, decodeInvite } from "./team-invite.ts";
 import { rotateTeamRoot, rekeyUntilDone } from "./team-rotate.ts";
@@ -225,7 +225,7 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
   const loaded = SMOKE ? undefined : loadSyncSettings(next.root);
   if (loaded) {
     const memberIdentity = await getIdentity();
-    let keySource: MasterKeySpaces | undefined;
+    let keySource: SpaceKeySource | undefined;
     if (loaded.kind === "personal") {
       keySource = new MasterKeySpaces(await deriveVaultKey(loaded.passphrase, loaded.settings.vaultId));
     } else {
@@ -251,7 +251,8 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
             teamRuntime.role = res.role;
             persistVerifiedRole(next.root, res.role);
           }
-          keySource = new MasterKeySpaces(res.root);
+          // 團隊 vault 用 WrappedKeySpaces:root 之外帶受限空間的獨立金鑰(per-space 成員子集)
+          keySource = new WrappedKeySpaces(res.root, res.spaceKeys);
         } else {
           // pending:owner 尚未包 root 給我。不 start sync、不碰 vault-meta;重連或重開 vault 時重試
           broadcastSyncStatus("pending");
@@ -406,6 +407,21 @@ ipcMain.handle("spaces:copy", (_e, rel: unknown, spaceId: unknown) => {
 
 ipcMain.handle("spaces:audit", () => spaces?.readAudit() ?? []);
 
+/**
+ * 設定空間成員子集(team vault、owner 限定):寫入 meta 名單後立刻輪換金鑰——
+ * 新空間金鑰只包給名單內成員,名單外成員從此(前向)解不開該空間內容。null = 恢復開放全團隊。
+ */
+ipcMain.handle("spaces:setMembers", async (_e, spaceId: unknown, memberIds: unknown) => {
+  if (typeof spaceId !== "string") throw new Error("非法請求");
+  if (memberIds !== null && !(Array.isArray(memberIds) && memberIds.every((m) => typeof m === "string"))) {
+    throw new Error("非法請求");
+  }
+  if (!(await isTeamOwner()) || !spaces) throw new Error("非團隊擁有者");
+  spaces.setSpaceMembers(spaceId, memberIds === null ? undefined : memberIds);
+  // 名單只是意圖,輪換才是密碼層生效點;輪換失敗回報 UI,名單保留、可按「輪換金鑰」重試
+  return rotateNow();
+});
+
 // ── 團隊(2b):建立/加入/邀請/核准/移除。owner 管理走短命 TeamAdminSession,不動 doc 同步連線 ──
 
 /**
@@ -432,7 +448,7 @@ async function handleKeyRotated(epoch: number): Promise<void> {
       rt.root = res.root;
       rt.epoch = res.epoch;
       if (res.role) rt.role = res.role; // 輪換重簽的角色憑證(§9.5)一併帶回
-      await manager.rotateRoot(res.root, res.epoch);
+      await manager.rotateRoot(res.root, res.epoch, true, res.spaceKeys); // 受限空間金鑰整組換到位
       return;
     }
   } catch (err) {
@@ -453,10 +469,17 @@ async function rotateNow(): Promise<{ rotated: boolean; error?: string }> {
   const markerPath = rekeyMarkerFile(requireSession().root);
   try {
     const me = await getIdentity();
+    // 受限空間名單來自 vault-meta:每次輪換都對每個受限空間生新金鑰、只包給名單內成員
+    const restrictedSpaces = meta
+      ? readSpaces(meta.doc)
+          .filter((s) => s.members !== undefined)
+          .map((s) => ({ spaceId: s.id, memberIds: s.members! }))
+      : [];
     await rotateTeamRoot({
       admin: { ...rt.settings, identity: me, createSocket: createTeamSocket },
       currentEpoch: rt.epoch,
       target: manager,
+      restrictedSpaces,
       onCommitted: (root, epoch) => {
         // commit 即不可回頭:先落 crash marker 再前移執行態,rekey 中斷也能重啟續跑
         try {

@@ -9,6 +9,8 @@ import {
   renameSpace as renameSpaceModel,
   moveNote as moveNoteModel,
   recordCopy as recordCopyModel,
+  setSpaceMembers as setSpaceMembersModel,
+  assignDocSpace,
   SPACES_MAP,
   DOC_SPACES_MAP,
   type Space,
@@ -100,8 +102,23 @@ export class SpacesService {
   async moveNoteToSpace(rel: string, spaceId: string): Promise<void> {
     const docId = this.docIdFor(rel);
     if (spaceOf(this.meta.doc, docId) === spaceId) return;
-    this.meta.transact(() => moveNoteModel(this.meta.doc, docId, spaceId, Date.now()));
+    // 伴生留言 doc 跟著移:受限空間筆記的留言必須同一把空間金鑰,否則留言以 root 加密即洩漏
+    const commentDocId = this.meta.doc.getMap<string>("comments").get(docId);
+    this.meta.transact(() => {
+      moveNoteModel(this.meta.doc, docId, spaceId, Date.now());
+      if (commentDocId) assignDocSpace(this.meta.doc, commentDocId, spaceId);
+    });
     await this.sync?.rekeyAfterMove(docId);
+    if (commentDocId) await this.sync?.rekeyAfterMove(commentDocId);
+  }
+
+  /**
+   * 設定空間成員子集(team vault、owner 限定,授權由 main 把關):
+   * memberIds = 受限名單;undefined = 恢復開放全團隊。只改 meta 名單——金鑰面(生新空間金鑰、
+   * 只包給名單、全庫重加密)由呼叫端接著跑金鑰輪換,名單變更才真正生效於密碼層。
+   */
+  setSpaceMembers(spaceId: string, memberIds: string[] | undefined): void {
+    this.meta.transact(() => setSpaceMembersModel(this.meta.doc, spaceId, memberIds, Date.now()));
   }
 
   /**
