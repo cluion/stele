@@ -182,6 +182,14 @@ export class SyncClient {
     this.requireSigned = enabled;
   }
 
+  /**
+   * 目前已驗證的成員目錄(P4 attribution):每筆為對 ownerPubSign 驗過、當紀元的成員 {memberId, role, epoch}。
+   * 供 UI 標記留言/協作作者是否為 owner 背書的合法成員及其角色;個人 vault(無 ownerPubSign)恆空。
+   */
+  directory(): VerifiedMember[] {
+    return [...this.memberDir.values()];
+  }
+
   /** 本端對一筆寫入的作者簽章;個人 vault(無 identity)回空 = unsigned */
   private authorSign(kind: WriteKind, docId: string, payload: Uint8Array): { authorMemberId: string; sig: Uint8Array } {
     const id = this.opts.identity;
