@@ -170,14 +170,18 @@ export class SyncStore {
     return rows.map((r) => ({ seq: r.seq, payload: new Uint8Array(r.payload) }));
   }
 
-  /** 存快照並截斷已涵蓋的增量;舊於現有快照點的直接忽略 */
+  /**
+   * 存快照並截斷已涵蓋的增量;嚴格舊於現有快照點的忽略。
+   * **同一快照點覆蓋**:同 upto 的快照內容等價(同一序列前綴),但金鑰可能不同——
+   * 輪換重加密撞上既有快照點時必須以新密文為準,否則 rekey 被靜默忽略,舊金鑰快照留存即安全洞。
+   */
   saveSnapshot(vaultId: string, docId: string, uptoSeq: number, payload: Uint8Array): void {
     const save = this.db.transaction(() => {
       this.db.prepare("INSERT OR IGNORE INTO docs (vault_id, doc_id) VALUES (?, ?)").run(vaultId, docId);
       const current = this.db
         .prepare("SELECT upto_seq FROM snapshots WHERE vault_id = ? AND doc_id = ?")
         .get(vaultId, docId) as { upto_seq: number } | undefined;
-      if (current && current.upto_seq >= uptoSeq) return;
+      if (current && current.upto_seq > uptoSeq) return;
       this.db
         .prepare(
           "INSERT INTO snapshots (vault_id, doc_id, upto_seq, payload) VALUES (?, ?, ?, ?) " +
@@ -400,6 +404,23 @@ export class SyncStore {
           "ON CONFLICT (vault_id, key_id, member_id, epoch) DO UPDATE SET wrapped_blob = excluded.wrapped_blob, created_at = unixepoch()",
       )
       .run(vaultId, keyId, memberId, epoch, Buffer.from(blob));
+  }
+
+  /**
+   * 當前紀元存在 per-space 信封的空間 id(= 受限空間集合;伺服器只見 id 不解內容)。
+   * 隨 envelopeList 原子發給成員:受限與否的判定不依賴 vault-meta 名單的同步時序。
+   * 恢復開放的空間在下一輪輪換後不再有新紀元信封,自動退出清單。
+   */
+  restrictedSpaceIds(vaultId: string): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT key_id FROM key_envelopes
+         WHERE vault_id = $vault AND key_id != 'root'
+           AND epoch = COALESCE((SELECT epoch FROM vault_owners WHERE vault_id = $vault), 0)
+         ORDER BY key_id`,
+      )
+      .all({ vault: vaultId }) as Array<{ key_id: string }>;
+    return rows.map((r) => r.key_id);
   }
 
   /** 取某成員在此 vault 的金鑰信封:每個 key_id 只回最新 epoch(2b epoch 恆 0;輪換語義留 2c) */

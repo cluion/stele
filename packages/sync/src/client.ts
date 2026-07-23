@@ -80,6 +80,8 @@ export interface SyncClientOptions {
    * 呼叫端應重跑 bootstrap 取新 root、rotate 金鑰來源後呼叫 applyRotation 恢復收斂
    */
   onKeyRotated?(epoch: number): void;
+  /** 被移出團隊(伺服器 error code removed/enroll-required):已停止重連,上層據此通知使用者 */
+  onRevoked?(code: string): void;
   onStatus?(status: SyncStatus): void;
   /** 某 doc 的 awareness 狀態集變化(含遠端加入/離開);states 的 key 是 Yjs clientID */
   onAwareness?(docId: string, states: Map<number, AwarenessState>): void;
@@ -105,6 +107,10 @@ interface DocRuntime {
   pushedSv: Uint8Array | undefined;
   /** 上次收到跳號 update 時已發過增量 pull:再跳號表示增量已被快照截斷(如輪換 rekey),改拉快照 */
   gapPulled: boolean;
+  /** 上次補洞請求的時刻:pull 回覆本身可能又是跳號 update(1:1 再生),節流免得變緊迴圈 */
+  gapSince: number | undefined;
+  /** 排程中的補洞請求:節流窗內的跳號不丟需求,窗後補發一次 */
+  gapTimer: ReturnType<typeof setTimeout> | undefined;
   onUpdate: (update: Uint8Array, origin: unknown) => void;
 }
 
@@ -113,6 +119,8 @@ const RECONNECT_MAX_MS = 30_000;
 const DEFAULT_PUSH_DEBOUNCE_MS = 300;
 const DEFAULT_SNAPSHOT_THRESHOLD = 200;
 const DEFAULT_REPULL_RETRY_MS = 3000;
+/** 跳號補洞請求的節流窗:pull 的回覆若仍跳號會再觸發補洞,無節流會變成每秒數千次的自我再生迴圈 */
+const GAP_RETRY_MS = 1000;
 
 export class SyncClient {
   private readonly cipher: Cipher;
@@ -161,6 +169,7 @@ export class SyncClient {
     await this.announceLeave();
     for (const rt of this.runtimes.values()) {
       clearTimeout(rt.pushTimer);
+      clearTimeout(rt.gapTimer);
       rt.doc.off("update", rt.onUpdate);
     }
     this.runtimes.clear();
@@ -362,6 +371,67 @@ export class SyncClient {
     }
   }
 
+  /**
+   * 跳號補洞(節流,不丟需求):先增量 pull;上一輪已 pull 過仍跳號 = 增量被快照截斷
+   * (輪換 rekey 或壓縮),改拉快照對齊。pull 的回覆可能正是同一則跳號 update(1:1 再生),
+   * 無節流會滾成每秒數千次的緊迴圈把 event loop 吃滿;每 doc 同時間至多一個排程中的補洞。
+   */
+  private scheduleGapFill(rt: DocRuntime): void {
+    if (rt.gapTimer !== undefined) return;
+    const elapsed = rt.gapSince === undefined ? GAP_RETRY_MS : Date.now() - rt.gapSince;
+    rt.gapTimer = setTimeout(
+      () => {
+        rt.gapTimer = undefined;
+        if (!this.online || this.stopped) return;
+        rt.gapSince = Date.now();
+        if (rt.gapPulled) {
+          rt.gapPulled = false;
+          this.send({ type: "snapshotPull", docId: rt.docId });
+        } else {
+          rt.gapPulled = true;
+          this.send({ type: "pull", docId: rt.docId, fromSeq: rt.state.lastSeq });
+        }
+      },
+      Math.max(0, GAP_RETRY_MS - elapsed),
+    );
+  }
+
+  /** 序列已對齊:清跳號補洞狀態 */
+  private clearGap(rt: DocRuntime): void {
+    rt.gapPulled = false;
+    rt.gapSince = undefined;
+    clearTimeout(rt.gapTimer);
+    rt.gapTimer = undefined;
+  }
+
+  /**
+   * 跨越解不開的 update:以本地內容重推快照,uptoSeq 蓋到毒 update 為止,伺服器隨即截斷它。
+   * 本地內容含毒之前已收斂的一切;毒對本紀元金鑰持有者是永遠的死資料,截斷即正確。
+   * 與補洞共用 gapTimer 槽位(同一 doc 同時間只跑一種恢復),節流同 GAP_RETRY_MS。
+   */
+  private schedulePoisonSkip(rt: DocRuntime, poisonSeq: number): void {
+    if (rt.gapTimer !== undefined) return;
+    rt.gapTimer = setTimeout(() => {
+      rt.gapTimer = undefined;
+      if (!this.online || this.rotationPending || this.stopped) return;
+      void (async () => {
+        const payload = await this.cipher.encrypt(rt.docId, Y.encodeStateAsUpdate(rt.doc));
+        this.send({ type: "snapshotPush", docId: rt.docId, uptoSeq: poisonSeq, epoch: this.epoch, payload });
+        if (!(await this.waitSnapshotAck(rt.docId))) return; // 被拒(唯讀成員)或斷線:等可寫成員收尾
+        rt.state = { ...rt.state, lastSeq: Math.max(rt.state.lastSeq, poisonSeq) };
+        this.opts.host.saveState(rt.docId, rt.state);
+        // serverHeads 一併前移:之後的 rekey/compact 以此算 uptoSeq,停在舊值會把重加密推到已存在的快照點之下
+        const head = this.serverHeads.get(rt.docId);
+        this.serverHeads.set(rt.docId, {
+          docId: rt.docId,
+          headSeq: Math.max(head?.headSeq ?? 0, poisonSeq),
+          snapshotSeq: Math.max(head?.snapshotSeq ?? 0, poisonSeq),
+        });
+        this.send({ type: "pull", docId: rt.docId, fromSeq: rt.state.lastSeq });
+      })().catch((err: unknown) => console.error(`跨越解不開的 update 失敗 ${rt.docId}:`, err));
+    }, GAP_RETRY_MS);
+  }
+
   /** 撞到尚未重加密的舊快照:隔一陣子把 pendingRepull 名單重拉一輪,直到 owner 補完 */
   private scheduleRepullRetry(): void {
     if (this.repullTimer !== undefined || this.stopped) return;
@@ -394,6 +464,7 @@ export class SyncClient {
     const rt = this.runtimes.get(docId);
     if (!rt) return;
     clearTimeout(rt.pushTimer);
+    clearTimeout(rt.gapTimer);
     rt.doc.off("update", rt.onUpdate);
     this.runtimes.delete(docId);
   }
@@ -440,19 +511,24 @@ export class SyncClient {
         const rt = await this.ensure(msg.docId);
         if (!rt || msg.seq <= rt.state.lastSeq) return;
         if (msg.seq > rt.state.lastSeq + 1) {
-          // 跳號:先試增量補齊;補完仍跳號 = 中間的增量已被快照截斷(輪換 rekey 或壓縮),只有快照能對齊
-          if (rt.gapPulled) {
-            rt.gapPulled = false;
-            this.send({ type: "snapshotPull", docId: msg.docId });
-          } else {
-            rt.gapPulled = true;
-            this.send({ type: "pull", docId: msg.docId, fromSeq: rt.state.lastSeq });
-          }
+          // 跳號:交給節流的補洞排程(先增量 pull、仍跳號改快照),丟棄這則亂序 update 本身
+          this.scheduleGapFill(rt);
           return;
         }
-        rt.gapPulled = false;
-        Y.applyUpdate(rt.doc, await this.cipher.decrypt(msg.docId, msg.payload), "sync");
+        let plain: Uint8Array;
+        try {
+          plain = await this.cipher.decrypt(msg.docId, msg.payload);
+        } catch (err) {
+          // 解不開的連續 update(對方以不同金鑰視圖寫入,如空間受限的同步窗口):它會永遠
+          // 擋在序列上,任何 pull 都跨不過去。丟棄它、節流後以本地內容重推快照把它蓋掉——
+          // 對「解不開的一方」它本就是死資料;唯讀成員的快照會被伺服器軟拒,由可寫成員收尾
+          console.error(`update 解密失敗 ${msg.docId} seq=${msg.seq},排程以快照跨越:`, err);
+          this.schedulePoisonSkip(rt, msg.seq);
+          return;
+        }
+        Y.applyUpdate(rt.doc, plain, "sync");
         rt.state = { ...rt.state, lastSeq: msg.seq };
+        this.clearGap(rt);
         this.opts.host.saveState(msg.docId, rt.state);
         await this.maybeCompact(rt);
         break;
@@ -470,12 +546,13 @@ export class SyncClient {
               this.scheduleRepullRetry();
               return;
             }
-            throw err;
+            console.error(`snapshot 解密失敗 ${msg.docId} uptoSeq=${msg.uptoSeq}(金鑰不符?):`, err);
+            return;
           }
           Y.applyUpdate(rt.doc, update, "sync");
           rt.state = { ...rt.state, lastSeq: msg.uptoSeq };
           this.opts.host.saveState(msg.docId, rt.state);
-          rt.gapPulled = false;
+          this.clearGap(rt);
         }
         const head = this.serverHeads.get(msg.docId);
         const caughtUp = !head || rt.state.lastSeq >= head.headSeq;
@@ -533,6 +610,12 @@ export class SyncClient {
       }
       case "error":
         console.error(`同步伺服器回報錯誤:${msg.code} ${msg.message}`);
+        // 被移出團隊 / 重連被拒為非成員:停止重連並通知上層(本地檔案收不回,但 UI 要誠實反映)
+        if (msg.code === "removed" || msg.code === "enroll-required") {
+          this.stopped = true;
+          clearTimeout(this.reconnectTimer);
+          this.opts.onRevoked?.(msg.code);
+        }
         break;
     }
   }
@@ -623,6 +706,8 @@ export class SyncClient {
       pushTimer: undefined,
       pushedSv: undefined,
       gapPulled: false,
+      gapSince: undefined,
+      gapTimer: undefined,
       onUpdate: (_update, origin) => {
         if (origin === "sync") return;
         rt.dirty = true;

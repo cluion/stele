@@ -37,9 +37,18 @@ export interface TeamBootstrapOptions {
  * role(§9.5)= 驗過 owner 簽章的角色憑證所載角色;undefined = owner 尚未簽發(升級前核准的舊成員),
  * 呼叫端 fallback 本地既知角色。憑證存在但驗不過(偽造/挪用)→ 整個 bootstrap 拋錯。
  * spaceKeys = 受限空間的獨立金鑰(keyId=spaceId 的信封,只有名單內成員有);未授權的空間就是不在 map 裡。
+ * restrictedSpaceIds = 當前紀元的受限空間集合(信封層權威,與金鑰原子取得):在其中而不在 spaceKeys
+ * = 受限但我沒份,絕不能拿 root fallback 加解密。
  */
 export type TeamBootstrapResult =
-  | { status: "ready"; root: Uint8Array; epoch: number; role?: MemberRole; spaceKeys: Map<string, Uint8Array> }
+  | {
+      status: "ready";
+      root: Uint8Array;
+      epoch: number;
+      role?: MemberRole;
+      spaceKeys: Map<string, Uint8Array>;
+      restrictedSpaceIds: string[];
+    }
   | { status: "pending" };
 
 /**
@@ -78,7 +87,7 @@ export function bootstrapTeamKey(opts: TeamBootstrapOptions): Promise<TeamBootst
           const cred = verifyRoleCredential(msg.roleCred, opts.ownerPubSign, vaultId, identity.memberId);
           if (cred.epoch === env.epoch) role = cred.role;
         }
-        done({ status: "ready", root, epoch: env.epoch, role, spaceKeys });
+        done({ status: "ready", root, epoch: env.epoch, role, spaceKeys, restrictedSpaceIds: msg.restrictedSpaceIds });
         break;
       }
       case "error":

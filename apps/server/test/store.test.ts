@@ -50,12 +50,16 @@ describe("SyncStore", () => {
     expect(store.appendUpdate("v1", "d1", "dev1", 3, bytes(3))).toBe(3);
   });
 
-  it("舊快照不覆蓋新快照", () => {
+  it("舊快照不覆蓋新快照;同一快照點以新推的為準(輪換重加密要能覆蓋同點舊金鑰快照)", () => {
     const store = makeStore();
     for (let i = 1; i <= 3; i++) store.appendUpdate("v1", "d1", "dev1", i, bytes(i));
     store.saveSnapshot("v1", "d1", 3, bytes(3));
     store.saveSnapshot("v1", "d1", 2, bytes(2));
     expect(store.snapshot("v1", "d1")?.uptoSeq).toBe(3);
+    expect([...store.snapshot("v1", "d1")!.payload]).toEqual([3]);
+    // 同 upto 覆蓋:內容等價(同序列前綴)但金鑰可能已輪換,必須以新密文為準
+    store.saveSnapshot("v1", "d1", 3, bytes(9));
+    expect([...store.snapshot("v1", "d1")!.payload]).toEqual([9]);
   });
 
   it("headSeqs 列出 vault 內所有 doc 的最新 seq 與快照點", () => {

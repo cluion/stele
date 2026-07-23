@@ -104,8 +104,10 @@ export type ServerMessage =
   | { type: "shareCatalog"; reqId: number; shares: ShareInfo[] }
   // 分享認證成功:告知收件人此分享對應的 doc、權限與同步進度
   | { type: "shareAuthOk"; docId: string; permission: SharePermission; headSeq: number; snapshotSeq: number }
-  // 團隊金鑰分發與成員管理的回覆(2b);roleCred(§9.5)= 本人的 owner 簽章角色憑證,空 = 尚未簽發
-  | { type: "envelopeList"; reqId: number; envelopes: KeyEnvelope[]; roleCred: Uint8Array }
+  // 團隊金鑰分發與成員管理的回覆(2b);roleCred(§9.5)= 本人的 owner 簽章角色憑證,空 = 尚未簽發。
+  // restrictedSpaceIds = 當前紀元存在 per-space 信封的空間(受限空間)——與金鑰同一回覆原子取得,
+  // 成員據此判定「受限但我沒份」,不依賴 vault-meta 名單的最終一致時序(那個窗口會誤用 fallback 金鑰)
+  | { type: "envelopeList"; reqId: number; envelopes: KeyEnvelope[]; roleCred: Uint8Array; restrictedSpaceIds: string[] }
   | { type: "memberCatalog"; reqId: number; members: MemberInfo[] }
   | { type: "enrollCreated"; reqId: number; token: string }
   // 通用成功回執(envelopePush / memberRemove / claimOwner / rotateKey)
@@ -428,6 +430,8 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
         encoding.writeVarUint8Array(enc, e.blob);
       }
       encoding.writeVarUint8Array(enc, msg.roleCred);
+      encoding.writeVarUint(enc, msg.restrictedSpaceIds.length);
+      for (const id of msg.restrictedSpaceIds) encoding.writeVarString(enc, id);
       break;
     case "memberCatalog":
       encoding.writeVarUint(enc, msg.reqId);
@@ -534,7 +538,11 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
           blob: readPayload(dec),
         });
       }
-      return { type: "envelopeList", reqId, envelopes, roleCred: readPayload(dec) };
+      const roleCred = readPayload(dec);
+      const spaceCount = decoding.readVarUint(dec);
+      const restrictedSpaceIds: string[] = [];
+      for (let i = 0; i < spaceCount; i++) restrictedSpaceIds.push(decoding.readVarString(dec));
+      return { type: "envelopeList", reqId, envelopes, roleCred, restrictedSpaceIds };
     }
     case SERVER_TAG.memberCatalog: {
       const reqId = decoding.readVarUint(dec);

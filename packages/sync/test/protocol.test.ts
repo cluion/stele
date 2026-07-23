@@ -87,7 +87,7 @@ const serverCases: ServerMessage[] = [
   { type: "shareAuthOk", docId: "doc-1", permission: "read", headSeq: 5, snapshotSeq: 3 },
   { type: "shareAuthOk", docId: "doc-2", permission: "write", headSeq: 0, snapshotSeq: 0 },
   { type: "authChallenge", nonce: new Uint8Array(32).fill(5) },
-  { type: "envelopeList", reqId: 8, envelopes: [], roleCred: new Uint8Array() },
+  { type: "envelopeList", reqId: 8, envelopes: [], roleCred: new Uint8Array(), restrictedSpaceIds: [] },
   {
     type: "envelopeList",
     reqId: 8,
@@ -96,6 +96,7 @@ const serverCases: ServerMessage[] = [
       { keyId: "root", epoch: 1, blob: new Uint8Array(200).fill(4) },
     ],
     roleCred: new Uint8Array(67).fill(6),
+    restrictedSpaceIds: ["space-1", "space-2"],
   },
   { type: "memberCatalog", reqId: 9, members: [] },
   {

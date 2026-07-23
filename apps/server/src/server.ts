@@ -403,12 +403,13 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
           break;
         }
         case "envelopePull":
-          // 只回自己的信封與角色憑證:A 絕不能拉到 B 的 blob
+          // 只回自己的信封與角色憑證:A 絕不能拉到 B 的 blob;受限空間清單只有 id,無機密
           send({
             type: "envelopeList",
             reqId: msg.reqId,
             envelopes: opts.store.envelopesFor(vault, self),
             roleCred: opts.store.roleCredentialFor(vault, self) ?? new Uint8Array(),
+            restrictedSpaceIds: opts.store.restrictedSpaceIds(vault),
           });
           break;
         case "envelopePush": {
@@ -559,7 +560,9 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         memberRole !== "owner" &&
         memberRole !== "editor"
       ) {
-        refuse("forbidden", "唯讀成員不得寫入");
+        // 軟拒(不關線):誠實 client 的 UI 已收斂唯讀;離線期間累積本地編輯的 viewer 重連補推時,
+        // 若關線會落入「拒→踢→重連→再推」的無限迴圈,讀取連線也一併陪葬。拒寫但保留讀取
+        send({ type: "error", code: "forbidden", message: "唯讀成員不得寫入" });
         return;
       }
       // epoch 寫入柵欄(2c-2):team vault 的 doc 寫入須帶當前 epoch,防輪換窗口內舊 root 密文
@@ -595,6 +598,9 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         case "snapshotPush": {
           opts.store.saveSnapshot(vault, msg.docId, msg.uptoSeq, msg.payload);
           send({ type: "snapshotAck", docId: msg.docId, uptoSeq: msg.uptoSeq });
+          // 廣播新快照給同 vault 其他連線:快照(壓縮、或輪換 rekey)會截斷增量,否則落後的成員
+          // 收不到「快照前進了」的通知,卡在舊 seq——增量已被截斷,他們的 pull 拿到空回覆而不自知
+          relayToPeers(vault, msg.docId, { type: "snapshot", docId: msg.docId, uptoSeq: msg.uptoSeq, payload: msg.payload });
           break;
         }
         case "snapshotPull": {

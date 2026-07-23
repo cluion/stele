@@ -268,9 +268,11 @@ export interface SpaceKeySource {
   /** 該空間的密碼器,內部再依 docId 衍生每篇筆記金鑰(可 exportDocKey 供分享連結用) */
   cipher(spaceId: string): Promise<VaultCipher>;
   /** 金鑰輪換(2c-2,團隊 vault):原地換 root(與整組 per-space 金鑰);不支援輪換的實作可缺席 */
-  rotate?(newMasterKey: Uint8Array, spaceKeys?: ReadonlyMap<string, Uint8Array>): void;
+  rotate?(newMasterKey: Uint8Array, spaceKeys?: ReadonlyMap<string, Uint8Array>, restrictedSpaceIds?: readonly string[]): void;
   /** 是否持有某空間的獨立金鑰(受限空間用);缺席 = 所有空間都由 root 衍生(個人 vault) */
   hasSpaceKey?(spaceId: string): boolean;
+  /** 某空間是否受限(信封層權威,來自 bootstrap);受限而無金鑰 = 不得以 root fallback 加解密 */
+  isRestricted?(spaceId: string): boolean;
 }
 
 /** Slice 1 實作:個人 vault,所有空間金鑰皆由主金鑰衍生(預設空間 = 主金鑰,零遷移) */
@@ -315,21 +317,29 @@ export class WrappedKeySpaces implements SpaceKeySource {
   private readonly ciphers = new Map<string, Promise<VaultCipher>>();
   private masterKey: Uint8Array;
   private spaceKeys: Map<string, Uint8Array>;
+  private restricted: Set<string>;
 
-  constructor(masterKey: Uint8Array, spaceKeys?: ReadonlyMap<string, Uint8Array>) {
+  constructor(masterKey: Uint8Array, spaceKeys?: ReadonlyMap<string, Uint8Array>, restrictedSpaceIds?: readonly string[]) {
     this.masterKey = masterKey.slice();
     this.spaceKeys = copyKeys(spaceKeys);
+    this.restricted = new Set(restrictedSpaceIds ?? spaceKeys?.keys() ?? []);
   }
 
   /** 輪換(2c-2):root 與整組 per-space 金鑰一次換到位,清 cipher 快取;失去授權的空間金鑰隨之消失 */
-  rotate(newMasterKey: Uint8Array, spaceKeys?: ReadonlyMap<string, Uint8Array>): void {
+  rotate(newMasterKey: Uint8Array, spaceKeys?: ReadonlyMap<string, Uint8Array>, restrictedSpaceIds?: readonly string[]): void {
     this.masterKey = newMasterKey.slice();
     this.spaceKeys = copyKeys(spaceKeys);
+    this.restricted = new Set(restrictedSpaceIds ?? spaceKeys?.keys() ?? []);
     this.ciphers.clear();
   }
 
   hasSpaceKey(spaceId: string): boolean {
     return this.spaceKeys.has(spaceId);
+  }
+
+  /** 信封層權威的受限空間判定(不依賴 vault-meta 名單的同步時序) */
+  isRestricted(spaceId: string): boolean {
+    return this.restricted.has(spaceId);
   }
 
   spaceKey(spaceId: string): Promise<Uint8Array> {
