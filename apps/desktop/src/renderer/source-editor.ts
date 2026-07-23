@@ -126,6 +126,8 @@ export function createSourceView(
   parent: HTMLElement,
   ytext: Y.Text,
   onCursor?: (anchor: number, head: number) => void,
+  /** 唯讀(viewer 角色):禁編輯但保留閱讀、選取與游標回報 */
+  readOnly = false,
 ): SourceView {
   const undoManager = new Y.UndoManager(ytext);
   const view = new EditorView({
@@ -133,6 +135,7 @@ export function createSourceView(
     state: EditorState.create({
       doc: ytext.toString(),
       extensions: [
+        ...(readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []),
         keymap.of([...yUndoManagerKeymap, ...defaultKeymap]),
         markdown(),
         EditorView.lineWrapping,

@@ -55,6 +55,16 @@ body {
 .sidebar .sync-dot.connecting { background: var(--text-faint); animation: sync-pulse 1.2s ease-in-out infinite; }
 .sidebar .sync-dot.offline { background: transparent; border: 1.5px solid var(--text-faint); }
 .sidebar .sync-dot.pending { background: #d9a441; animation: sync-pulse 1.6s ease-in-out infinite; }
+.sidebar .sync-dot.revoked { background: var(--err); }
+.revoked-banner {
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--err);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
 
 /* 協作在場:編輯區右上的頭像列 */
 .presence-bar {
@@ -198,10 +208,24 @@ body {
 .space-group > button[data-rel] { padding-left: var(--sp-5); }
 
 /* 空間選擇 / 移動確認 / 稽核 modal */
+.switcher.space-picker,
+.switcher.confirm,
+.switcher.audit { padding: var(--sp-4); }
 .switcher.space-picker h2,
 .switcher.confirm h2,
 .switcher.audit h2 { font-size: var(--fs-sm); color: var(--text-muted); margin: 0 0 var(--sp-2); }
-.space-pick-item { display: flex; align-items: center; gap: var(--sp-2); }
+.switcher.space-picker .space-pick-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  text-align: left;
+}
+.switcher.space-picker .space-pick-item:hover { background: var(--surface-2); border-color: var(--border); }
 .confirm-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: var(--sp-3); }
 .confirm-actions button { width: auto; padding: var(--sp-2) var(--sp-4); border-radius: var(--radius-sm); cursor: pointer; }
 .confirm-actions button.primary { background: var(--accent); color: var(--accent-text); }
@@ -672,12 +696,27 @@ body {
 .comment-actions button.danger:hover { color: var(--err); }
 .comment-reply input { width: 100%; padding: var(--sp-1) var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font: inherit; }
 
-/* 團隊面板 */
-.switcher.team { max-width: 32rem; text-align: left; }
+/* 團隊面板:區塊多(邀請/成員/輪換/空間存取),高度上限 + 自身捲動,免得撐爆視窗被裁 */
+.switcher.team { max-width: 32rem; text-align: left; padding: var(--sp-4); max-height: 80vh; overflow-y: auto; }
+.switcher.team h2 { font-size: var(--fs-lg); margin: 0 0 var(--sp-2); }
+.switcher.team .placeholder { padding: 0; margin: 0; color: var(--text-muted); font-size: var(--fs-sm); }
 .team-section { margin-top: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-2); }
 .team-section h3 { margin: 0; font-size: var(--fs-sm); font-weight: 600; color: var(--text); }
-.switcher.team input, .switcher.team textarea { width: 100%; padding: var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font: inherit; box-sizing: border-box; }
+.switcher.team input:not([type="checkbox"]), .switcher.team textarea { width: 100%; padding: var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font: inherit; box-sizing: border-box; }
 .switcher.team textarea { resize: vertical; overflow-wrap: anywhere; }
+/* 團隊面板統一按鈕:所有非 primary 按鈕都是描邊小按鈕,免得混到全域原始樣式 */
+.switcher.team button:not(.primary):not(.link-btn) {
+  font-size: var(--fs-sm);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+.switcher.team button:not(.primary):not(.link-btn):hover { border-color: var(--accent); color: var(--accent); }
+.switcher.team button.danger:hover { border-color: var(--err); color: var(--err); }
+.switcher.team button:disabled { opacity: 0.5; cursor: default; }
 .team-invite-row { display: flex; gap: var(--sp-2); align-items: center; }
 .team-invite-row select { padding: var(--sp-1) var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font: inherit; }
 .link-btn { font-size: var(--fs-sm); color: var(--text-muted); font-weight: 400; }
@@ -690,8 +729,11 @@ body {
 .team-badge.pending { background: var(--text-faint); }
 .team-spaces { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
 .team-space { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--sp-2); display: flex; flex-direction: column; gap: var(--sp-1); }
-.team-space-edit { display: flex; flex-direction: column; gap: var(--sp-1); }
-.team-space-edit label { display: flex; align-items: center; gap: var(--sp-1); font-size: var(--fs-sm); }
+.team-space-edit { display: flex; flex-direction: column; gap: var(--sp-1); margin-top: var(--sp-1); }
+.team-space-edit label { display: flex; align-items: center; justify-content: flex-start; gap: var(--sp-2); font-size: var(--fs-sm); cursor: pointer; }
+.team-space-edit label input[type="checkbox"] { width: auto; flex: 0 0 auto; margin: 0; }
+.team-space-edit label code { color: var(--text-muted); }
+.team-space-edit .team-member-actions { margin-top: var(--sp-1); }
 .team-rotate-row { margin-top: var(--sp-2); }
 .team-rotate-row button { font-size: var(--fs-sm); padding: var(--sp-1) var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); }
 .team-rotate-row button:hover { border-color: var(--accent); color: var(--accent); }

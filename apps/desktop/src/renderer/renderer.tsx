@@ -97,6 +97,7 @@ function CommentsPanel({
   views,
   available,
   canAdd,
+  readOnly,
   onAdd,
   onReply,
   onResolve,
@@ -107,6 +108,8 @@ function CommentsPanel({
   views: ThreadView[];
   available: boolean;
   canAdd: boolean;
+  /** viewer 角色:讀得到討論串,但不給任何寫入入口 */
+  readOnly: boolean;
   onAdd: (body: string) => void;
   onReply: (threadId: string, body: string) => void;
   onResolve: (threadId: string, resolved: boolean) => void;
@@ -139,24 +142,27 @@ function CommentsPanel({
         </button>
       </div>
       {!available && <p className="placeholder comments-notice">{t("comments.unavailable")}</p>}
-      <div className="comments-compose">
-        <textarea
-          placeholder={canAdd ? t("comments.placeholder") : t("comments.addHint")}
-          disabled={!canAdd}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.nativeEvent.isComposing) return;
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault();
-              submitAdd();
-            }
-          }}
-        />
-        <button className="primary" disabled={!canAdd || !draft.trim()} onClick={submitAdd}>
-          {t("comments.add")}
-        </button>
-      </div>
+      {readOnly && <p className="placeholder comments-notice">{t("comments.readOnly")}</p>}
+      {!readOnly && (
+        <div className="comments-compose">
+          <textarea
+            placeholder={canAdd ? t("comments.placeholder") : t("comments.addHint")}
+            disabled={!canAdd}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return;
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                submitAdd();
+              }
+            }}
+          />
+          <button className="primary" disabled={!canAdd || !draft.trim()} onClick={submitAdd}>
+            {t("comments.add")}
+          </button>
+        </div>
+      )}
       {views.length === 0 ? (
         <p className="placeholder">{t("comments.empty")}</p>
       ) : (
@@ -180,28 +186,32 @@ function CommentsPanel({
                   <p>{r.body}</p>
                 </div>
               ))}
-              <div className="comment-actions">
-                <button onClick={() => onResolve(thread.id, !thread.resolved)}>
-                  {thread.resolved ? t("comments.unresolve") : t("comments.resolve")}
-                </button>
-                <button className="danger" onClick={() => onDelete(thread.id)}>
-                  {t("comments.delete")}
-                </button>
-              </div>
-              <div className="comment-reply">
-                <input
-                  placeholder={t("comments.replyPlaceholder")}
-                  value={replyText[thread.id] ?? ""}
-                  onChange={(e) => setReplyText((rt) => ({ ...rt, [thread.id]: e.target.value }))}
-                  onKeyDown={(e) => {
-                    if (e.nativeEvent.isComposing) return;
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      submitReply(thread.id);
-                    }
-                  }}
-                />
-              </div>
+              {!readOnly && (
+                <>
+                  <div className="comment-actions">
+                    <button onClick={() => onResolve(thread.id, !thread.resolved)}>
+                      {thread.resolved ? t("comments.unresolve") : t("comments.resolve")}
+                    </button>
+                    <button className="danger" onClick={() => onDelete(thread.id)}>
+                      {t("comments.delete")}
+                    </button>
+                  </div>
+                  <div className="comment-reply">
+                    <input
+                      placeholder={t("comments.replyPlaceholder")}
+                      value={replyText[thread.id] ?? ""}
+                      onChange={(e) => setReplyText((rt) => ({ ...rt, [thread.id]: e.target.value }))}
+                      onKeyDown={(e) => {
+                        if (e.nativeEvent.isComposing) return;
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          submitReply(thread.id);
+                        }
+                      }}
+                    />
+                  </div>
+                </>
+              )}
             </li>
           ))}
         </ul>
@@ -215,6 +225,7 @@ function Editor({
   mode,
   files,
   participants,
+  readOnly,
   onNavigate,
   onToggleMode,
 }: {
@@ -222,6 +233,8 @@ function Editor({
   mode: EditorMode;
   files: string[];
   participants: Participant[];
+  /** viewer 角色:唯讀呈現(伺服器本就拒寫,這裡讓 UI 誠實,免得編了推不上去) */
+  readOnly: boolean;
   onNavigate: (target: string) => void;
   onToggleMode: () => void;
 }) {
@@ -251,6 +264,7 @@ function Editor({
   const [commentsAvailable, setCommentsAvailable] = useState(true);
 
   const mutateComments = (fn: (doc: Y.Doc) => void): void => {
+    if (readOnly) return; // viewer:留言也是 doc 寫入,伺服器會拒;UI 層一併擋
     const doc = commentDocRef.current;
     if (doc) doc.transact(() => fn(doc), "local");
   };
@@ -399,6 +413,7 @@ function Editor({
       };
       const view = new EditorView(host, {
         state: binding.state,
+        editable: () => !readOnly,
         dispatchTransaction: (tr) => {
           binding.dispatch(tr);
           if (tr.selectionSet || tr.docChanged) reportPmCursor(binding.state);
@@ -458,11 +473,16 @@ function Editor({
     const cursorSend = throttle((anchor: number, head: number) => {
       window.stele.setCursor(rel, encodeCursor(ytext, anchor, head));
     }, 90);
-    const source = createSourceView(host, ytext, (anchor, head) => {
-      cursorSend.call(anchor, head);
-      // 留言錨定:source 為字元級,選取非空即可錨
-      setSelRange(anchor === head ? null : { from: Math.min(anchor, head), to: Math.max(anchor, head) });
-    });
+    const source = createSourceView(
+      host,
+      ytext,
+      (anchor, head) => {
+        cursorSend.call(anchor, head);
+        // 留言錨定:source 為字元級,選取非空即可錨
+        setSelRange(anchor === head ? null : { from: Math.min(anchor, head), to: Math.max(anchor, head) });
+      },
+      readOnly,
+    );
     sourceRef.current = source;
     scrollToBlockCM(source.view, ytext.toString(), scrollBlock.current);
     return () => {
@@ -471,7 +491,7 @@ function Editor({
       cursorSend.cancel();
       source.destroy();
     };
-  }, [ytext, mode, rel]);
+  }, [ytext, mode, rel, readOnly]);
 
   // 遠端游標:participants 變動時解析 relative position 並推進當前投影
   useEffect(() => {
@@ -588,7 +608,8 @@ function Editor({
         <CommentsPanel
           views={threadViews}
           available={commentsAvailable}
-          canAdd={commentsAvailable && selRange !== null}
+          canAdd={commentsAvailable && !readOnly && selRange !== null}
+          readOnly={readOnly}
           onAdd={addCommentFromSelection}
           onReply={(id, body) =>
             mutateComments((c) =>
@@ -660,7 +681,7 @@ function QuickSwitcher({
   files: string[];
   recent: string[];
   onPick: (rel: string) => void;
-  onCreate: (name: string) => Promise<void>;
+  onCreate: (name: string) => Promise<unknown>;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
@@ -1457,6 +1478,8 @@ function App() {
   const [auditOpen, setAuditOpen] = useState(false);
   // 團隊面板
   const [teamOpen, setTeamOpen] = useState(false);
+  // 本人是否為 viewer(唯讀成員):編輯器與留言收斂為唯讀
+  const [teamReadOnly, setTeamReadOnly] = useState(false);
   // 折疊的空間 section
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
 
@@ -1464,6 +1487,17 @@ function App() {
     void window.stele.syncStatus().then(setSyncState);
     return window.stele.onSyncStatus(setSyncState);
   }, [vaultInfo?.root]);
+
+  // 本人團隊角色:viewer 時編輯器與留言收斂為唯讀(伺服器本就拒寫,UI 要誠實)
+  useEffect(() => {
+    const load = (): void =>
+      void window.stele
+        .teamInfo()
+        .then((i) => setTeamReadOnly(i.team && !i.owner && i.role === "viewer"))
+        .catch(() => setTeamReadOnly(false));
+    load();
+    return window.stele.onTeamChanged(load);
+  }, [vaultInfo?.root, syncState]);
 
   // 空間總覽:載入 + 訂閱本地/遠端變更
   useEffect(() => {
@@ -1591,11 +1625,12 @@ function App() {
     openDailyRef.current = openDaily;
   });
 
-  const createAndOpen = async (name: string) => {
+  const createAndOpen = async (name: string): Promise<string> => {
     const rel = await window.stele.createNote(name);
     const info = await window.stele.listVault();
     if (info) setVaultInfo(info);
     activate(rel);
+    return rel;
   };
 
   const chooseVault = () => {
@@ -1665,6 +1700,16 @@ function App() {
     for (let n = 2; files.includes(`${name}.md`); n++) name = `${folder}${base} ${n}`;
     void createAndOpen(name).catch((err: unknown) => console.error("新增筆記失敗:", err));
     setMenu(null);
+  };
+
+  /** 直接在某空間新建筆記:建立後即移入該空間(預設空間免移),省去「先建再移」兩步 */
+  const newInSpace = (spaceId: string): void => {
+    const base = t("contextmenu.untitled");
+    let name = base;
+    for (let n = 2; files.includes(`${name}.md`); n++) name = `${base} ${n}`;
+    void createAndOpen(name)
+      .then((rel) => (spaceId !== defaultSpaceId ? window.stele.moveNoteToSpace(rel, spaceId) : undefined))
+      .catch((err: unknown) => console.error("在空間新增筆記失敗:", err));
   };
 
   const navigate = (target: string) => {
@@ -1746,6 +1791,7 @@ function App() {
             </>
           )}
         </div>
+        {syncState === "revoked" && <p className="revoked-banner">{t("team.revoked.banner")}</p>}
         {files.length === 0 && <p className="placeholder">{t("sidebar.empty")}</p>}
         {showGroups
           ? groupedFiles().map(({ space, files: sf }) => (
@@ -1756,6 +1802,14 @@ function App() {
                     {space.color && <span className="space-dot" style={{ background: space.color }} />}
                     {spaceLabel(space)}
                     <span className="space-count">{sf.length}</span>
+                  </button>
+                  <button
+                    className="space-rename"
+                    title={t("space.newNote")}
+                    aria-label={t("space.newNote")}
+                    onClick={() => newInSpace(space.id)}
+                  >
+                    ＋
                   </button>
                   <button
                     className="space-rename"
@@ -1796,6 +1850,7 @@ function App() {
             mode={modes.get(active) ?? "wysiwyg"}
             files={files}
             participants={participants}
+            readOnly={teamReadOnly}
             onNavigate={navigate}
             onToggleMode={() =>
               setModes((m) => {
