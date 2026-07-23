@@ -180,9 +180,26 @@ exploit by clearing the author field on an injected write. The owner closes this
 gap with a per-vault, owner-signed **policy** (`stele-vault-policy-v1`, epoch-bound,
 delivered atomically with the key envelopes): once `requireSignedWrites` is set,
 recipients reject all unsigned writes, and the honest server rejects them too as
-defense-in-depth. The verified policy is persisted locally, so a malicious server
-that later suppresses it cannot silently downgrade a client that has already seen
-it. Owners should enable it after confirming every member has upgraded.
+defense-in-depth. Owners should enable it after confirming every member has upgraded.
+
+**Fail-closed anti-rollback.** A recipient distinguishes three states from a
+bootstrap: a verified current-epoch policy that is *on*, one that is *off*, and
+*no current-epoch policy at all*. Only an explicit verified policy changes the
+setting; the absence of a policy **keeps the last known value** rather than
+defaulting to off. The value is persisted locally, so a malicious server that
+suppresses the policy on a later bootstrap cannot silently downgrade a member
+that has already received it — the member keeps rejecting unsigned writes. To
+carry an *off* decision across a key rotation, rotation always re-signs the
+current state (on or off) at the new epoch. Residual (inherent to trust-on-first-
+use): a member that has **never** received the policy — e.g. a malicious server
+suppressing it from first contact — defaults to transitional tolerance, exactly
+like any other owner-signed state a first-contact server can withhold.
+
+**Propagation.** Enforcement is driven by the current-epoch policy a member
+receives at bootstrap or reconnect. A member that stays continuously connected
+applies an owner's toggle on its next reconnect or key rotation, not instantly;
+an honest server's own unsigned-write refusal provides immediate protection in
+the interim.
 
 ---
 
