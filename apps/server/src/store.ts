@@ -83,6 +83,13 @@ CREATE TABLE IF NOT EXISTS role_credentials (
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
   PRIMARY KEY (vault_id, member_id)
 );
+CREATE TABLE IF NOT EXISTS member_certs (
+  vault_id TEXT NOT NULL,
+  member_id TEXT NOT NULL,
+  blob BLOB NOT NULL,
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (vault_id, member_id)
+);
 CREATE TABLE IF NOT EXISTS enrollment_tokens (
   token TEXT PRIMARY KEY,
   vault_id TEXT NOT NULL,
@@ -327,12 +334,13 @@ export class SyncStore {
     }));
   }
 
-  /** 移除成員:刪 member 列 + 其所有金鑰信封與角色憑證(密碼層前向保密由呼叫端接著輪換補上) */
+  /** 移除成員:刪 member 列 + 其所有金鑰信封、角色憑證與成員憑證(密碼層前向保密由呼叫端接著輪換補上) */
   removeMember(vaultId: string, memberId: string): void {
     const remove = this.db.transaction(() => {
       this.db.prepare("DELETE FROM members WHERE vault_id = ? AND member_id = ?").run(vaultId, memberId);
       this.db.prepare("DELETE FROM key_envelopes WHERE vault_id = ? AND member_id = ?").run(vaultId, memberId);
       this.db.prepare("DELETE FROM role_credentials WHERE vault_id = ? AND member_id = ?").run(vaultId, memberId);
+      this.db.prepare("DELETE FROM member_certs WHERE vault_id = ? AND member_id = ?").run(vaultId, memberId);
     });
     remove();
   }
@@ -353,6 +361,24 @@ export class SyncStore {
       .prepare("SELECT blob FROM role_credentials WHERE vault_id = ? AND member_id = ?")
       .get(vaultId, memberId) as { blob: Buffer } | undefined;
     return row && new Uint8Array(row.blob);
+  }
+
+  /** 存某成員的成員憑證(owner 背書 memberId↔pubSign 的 blob;P4 寫入真實性;upsert 冪等) */
+  putMemberCert(vaultId: string, memberId: string, blob: Uint8Array): void {
+    this.db
+      .prepare(
+        "INSERT INTO member_certs (vault_id, member_id, blob) VALUES (?, ?, ?) " +
+          "ON CONFLICT (vault_id, member_id) DO UPDATE SET blob = excluded.blob, updated_at = unixepoch()",
+      )
+      .run(vaultId, memberId, Buffer.from(blob));
+  }
+
+  /** 全 vault 的成員憑證目錄(任何成員可拉,驗他人寫入作者用);blob 自帶 owner 簽章 */
+  listMemberCerts(vaultId: string): Uint8Array[] {
+    const rows = this.db
+      .prepare("SELECT blob FROM member_certs WHERE vault_id = ? ORDER BY member_id")
+      .all(vaultId) as Array<{ blob: Buffer }>;
+    return rows.map((r) => new Uint8Array(r.blob));
   }
 
   /**

@@ -720,7 +720,10 @@ ipcMain.handle("team:setRole", async (_e, memberId: unknown, role: unknown) => {
   const me = await getIdentity();
   const admin = await TeamAdminSession.open({ ...teamRuntime.settings, identity: me, createSocket: createTeamSocket });
   try {
-    await admin.setRole(memberId, role, teamRuntime.epoch); // 一併重簽該成員的角色憑證(§9.5)
+    // 成員憑證(P4)綁 pubSign,先查該成員的 pubSign 再改角色 + 重簽 role/member 憑證
+    const member = (await admin.members()).find((m) => m.memberId === memberId);
+    if (!member) throw new Error("查無此成員");
+    await admin.setRole(memberId, member.pubSign, role, teamRuntime.epoch);
   } finally {
     admin.close();
   }

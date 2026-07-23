@@ -33,7 +33,9 @@ type TeamAdminMessage = Extract<
       | "enrollCreate"
       | "memberSetRole"
       | "rotateKey"
-      | "credPush";
+      | "credPush"
+      | "memberCertPush"
+      | "memberCertPull";
   }
 >;
 
@@ -433,6 +435,21 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
           send({ type: "ok", reqId: msg.reqId });
           break;
         }
+        case "memberCertPush": {
+          // 成員憑證(P4):owner 背書 memberId↔pubSign 的 blob,伺服器只存放;驗證在成員端
+          if (!requireOwner()) return;
+          if (!validId(msg.memberId)) {
+            refuse("bad-message", "非法 id");
+            return;
+          }
+          opts.store.putMemberCert(vault, msg.memberId, msg.blob);
+          send({ type: "ok", reqId: msg.reqId });
+          break;
+        }
+        case "memberCertPull":
+          // 成員憑證目錄:任何認證成員可拉(pubSign 公開,blob 自帶 owner 簽章擋捏造)
+          send({ type: "memberCertList", reqId: msg.reqId, certs: opts.store.listMemberCerts(vault) });
+          break;
         case "memberList":
           if (!requireOwner()) return;
           send({ type: "memberCatalog", reqId: msg.reqId, members: opts.store.listMembers(vault) });
@@ -514,7 +531,9 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         msg.type === "enrollCreate" ||
         msg.type === "memberSetRole" ||
         msg.type === "rotateKey" ||
-        msg.type === "credPush"
+        msg.type === "credPush" ||
+        msg.type === "memberCertPush" ||
+        msg.type === "memberCertPull"
       ) {
         if (scope !== undefined) {
           refuse("forbidden", "分享連線不得管理團隊");

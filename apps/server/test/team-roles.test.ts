@@ -189,7 +189,7 @@ describe("團隊角色與授權強制(2c)", () => {
     live.pushDoc("doc-1", "d1");
     await live.next("ack"); // 降級前是 editor,可寫
 
-    await admin.setRole(ed.memberId, "viewer");
+    await admin.setRole(ed.memberId, ed.pubSign, "viewer", 0);
     expect((await live.next("error")).code).toBe("role-changed");
     await live.closed;
 
@@ -208,7 +208,7 @@ describe("團隊角色與授權強制(2c)", () => {
     const ed = await joinAs(vaultId, admin, "editor");
     const other = await joinAs(vaultId, admin, "viewer");
     const edAdmin = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId, identity: ed, createSocket: wsSocket });
-    await expect(edAdmin.setRole(other.memberId, "editor")).rejects.toThrow();
+    await expect(edAdmin.setRole(other.memberId, other.pubSign, "editor", 0)).rejects.toThrow();
     await expect(edAdmin.remove(other.memberId)).rejects.toThrow();
     admin.close();
   });

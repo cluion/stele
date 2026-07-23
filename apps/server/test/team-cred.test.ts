@@ -7,6 +7,8 @@ import {
   bootstrapTeamKey,
   TeamAdminSession,
   signRoleCredential,
+  signMemberCredential,
+  memberIdFromPubSign,
   type SocketLike,
   type SyncIdentity,
 } from "@stele/sync";
@@ -75,7 +77,7 @@ describe("角色憑證(§9.5):簽發、驗證、重放防護", () => {
     const res = await memberBootstrap(vaultId, member, owner.pubSign);
     expect(res.status === "ready" && res.role).toBe("editor");
 
-    await admin.setRole(member.memberId, "viewer", 0);
+    await admin.setRole(member.memberId, member.pubSign, "viewer", 0);
     const after = await memberBootstrap(vaultId, member, owner.pubSign);
     expect(after.status === "ready" && after.role).toBe("viewer");
     admin.close();
@@ -121,11 +123,53 @@ describe("角色憑證(§9.5):簽發、驗證、重放防護", () => {
 
     // 非 owner 想給自己簽 owner 憑證:伺服器拒(縱使放行,驗簽也擋——此處驗伺服器的濫用防線)
     const memberAdmin = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId, identity: member, createSocket: wsSocket });
-    await expect(memberAdmin.setRole(member.memberId, "editor", 0)).rejects.toThrow(/forbidden/);
+    await expect(memberAdmin.setRole(member.memberId, member.pubSign, "editor", 0)).rejects.toThrow(/forbidden/);
     expect(store.roleCredentialFor(vaultId, member.memberId)).toBeDefined();
 
     await admin.remove(member.memberId);
     expect(store.roleCredentialFor(vaultId, member.memberId)).toBeUndefined();
+    admin.close();
+  });
+
+  it("成員憑證目錄:任何成員拉得到全員可信公鑰;惡意摻假被濾;移除後消失", async () => {
+    const vaultId = "member-dir";
+    const owner = await deriveIdentity(generateSeed());
+    const alice = await deriveIdentity(generateSeed());
+    const bob = await deriveIdentity(generateSeed());
+    const root = await createTeamVault({ url: url(), token: TOKEN, vaultId, identity: owner, createSocket: wsSocket });
+    const admin = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId, identity: owner, createSocket: wsSocket });
+    for (const joiner of [alice, bob]) {
+      const tok = await admin.inviteToken(3600, "editor");
+      await bootstrapTeamKey({ url: url(), token: TOKEN, vaultId, identity: joiner, ownerPubSign: owner.pubSign, enrollmentToken: tok, createSocket: wsSocket });
+      const rec = (await admin.members()).find((m) => m.memberId === joiner.memberId)!;
+      await admin.approve(rec, root, 0);
+    }
+
+    // alice(一般成員,非 owner)開 session 拉目錄:memberCertPull 不限 owner
+    const aliceAdmin = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId, identity: alice, createSocket: wsSocket });
+    const dir = await aliceAdmin.memberDirectory(owner.pubSign);
+    const byId = new Map(dir.map((m) => [m.memberId, m]));
+    // owner(自簽)+ alice + bob 三份可驗憑證,pubSign 與各自身分一致、memberId 由 pubSign 導出
+    expect(byId.get(owner.memberId)?.role).toBe("owner");
+    expect(byId.get(alice.memberId)?.role).toBe("editor");
+    expect(byId.get(bob.memberId)?.role).toBe("editor");
+    expect(Buffer.from(byId.get(bob.memberId)!.pubSign).equals(Buffer.from(bob.pubSign))).toBe(true);
+    expect(memberIdFromPubSign(bob.pubSign)).toBe(bob.memberId);
+
+    // 惡意伺服器摻一份 mallory 冒充 bob 的假憑證(想把 bob 的公鑰換成攻擊者的)
+    const mallory = await deriveIdentity(generateSeed());
+    const forged = signMemberCredential(mallory.sign, { vaultId, pubSign: mallory.pubSign, role: "editor", epoch: 0 });
+    store.putMemberCert(vaultId, "forged-slot", forged);
+    const dir2 = await aliceAdmin.memberDirectory(owner.pubSign);
+    // 假憑證(非 owner 簽)被濾掉,目錄仍只含三位真成員
+    expect(dir2.some((m) => Buffer.from(m.pubSign).equals(Buffer.from(mallory.pubSign)))).toBe(false);
+    expect(dir2).toHaveLength(3);
+
+    // 移除 bob → 目錄不再含 bob
+    await admin.remove(bob.memberId);
+    const dir3 = await aliceAdmin.memberDirectory(owner.pubSign);
+    expect(dir3.some((m) => m.memberId === bob.memberId)).toBe(false);
+    aliceAdmin.close();
     admin.close();
   });
 });

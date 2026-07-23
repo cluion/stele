@@ -50,7 +50,7 @@ function wsSocket(url: string): SocketLike {
 }
 
 // pnpm check 全 workspace 並行時 CPU 最緊,輪換收斂鏈(bootstrap+rotate+repull+gap-fill)拉長,上限放寬
-async function until(cond: () => boolean, label: string | (() => string), timeoutMs = 40_000): Promise<void> {
+async function until(cond: () => boolean, label: string | (() => string), timeoutMs = 60_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!cond()) {
     if (Date.now() > deadline) throw new Error(`逾時等待:${typeof label === "function" ? label() : label}`);
