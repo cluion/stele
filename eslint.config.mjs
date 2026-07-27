@@ -21,8 +21,8 @@ export default tseslint.config(
     },
   },
   {
-    // 伺服器入口:啟動訊息走 stdout 是常規
-    files: ["apps/server/src/main.ts"],
+    // 伺服器入口與組織管理 CLI:輸出走 stdout 就是它們的產出
+    files: ["apps/server/src/main.ts", "apps/server/src/org-tool.ts"],
     rules: {
       "no-console": "off",
     },

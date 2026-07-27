@@ -110,6 +110,10 @@ export interface SteleApi {
    * 應在確認全員升級後再開;否則舊版用戶端的寫入會被擋。
    */
   teamSetRequireSigned(enabled: boolean): Promise<{ requireSigned: boolean }>;
+  /** owner 把此團隊綁到組織(3a):貼上組織給的綁定碼,信任錨自此上提到組織根 */
+  teamBindOrg(bundle: string): Promise<{ orgId: string }>;
+  /** 新 owner 接管重簽(3a):以自己的簽章重發全員金鑰信封與憑證,前任簽章即刻失效 */
+  teamTakeover(): Promise<{ ok: boolean }>;
   /** 已驗證的成員目錄(P4 attribution):供標記留言作者是否為 owner 背書的合法成員及角色;非團隊 vault 為空 */
   teamDirectory(): Promise<VerifiedMemberInfo[]>;
   /**
@@ -129,7 +133,22 @@ export type TeamRole = "owner" | "editor" | "viewer";
 
 export type TeamInfo =
   | { team: false }
-  | { team: true; vaultId: string; owner: boolean; role: TeamRole; ready: boolean; requireSigned: boolean };
+  | {
+      team: true;
+      vaultId: string;
+      owner: boolean;
+      role: TeamRole;
+      ready: boolean;
+      requireSigned: boolean;
+      /** 所屬組織 id(3a);undefined = 未綁組織 */
+      orgId?: string;
+      /** 已採信的團隊憑證序號(反回滾水位) */
+      orgSerial: number;
+      /** 組織已把 owner 換成我,但信封還是前任簽的 → 應盡快接管重簽 */
+      takeoverNeeded: boolean;
+      /** 本人簽章公鑰 base64:綁組織/被指派為擁有者時要交給組織 */
+      myPubSign: string;
+    };
 
 export interface TeamMember {
   memberId: string;
@@ -305,6 +324,8 @@ const api: SteleApi = {
   teamRemove: (memberId) => ipcRenderer.invoke("team:remove", memberId),
   teamRotate: () => ipcRenderer.invoke("team:rotate"),
   teamSetRequireSigned: (enabled) => ipcRenderer.invoke("team:setRequireSigned", enabled),
+  teamBindOrg: (bundle) => ipcRenderer.invoke("team:bindOrg", bundle),
+  teamTakeover: () => ipcRenderer.invoke("team:takeover"),
   teamDirectory: () => ipcRenderer.invoke("team:directory"),
   spacesSetMembers: (spaceId, memberIds) => ipcRenderer.invoke("spaces:setMembers", spaceId, memberIds),
 };

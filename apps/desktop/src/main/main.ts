@@ -6,10 +6,20 @@ import { userInfo } from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
 import { VaultSession, type SessionCallbacks } from "./vault-session.ts";
-import { deriveVaultKey, MasterKeySpaces, WrappedKeySpaces, bootstrapTeamKey, createTeamVault, TeamAdminSession, readSpaces } from "@stele/sync";
+import {
+  deriveVaultKey,
+  MasterKeySpaces,
+  WrappedKeySpaces,
+  bootstrapTeamKey,
+  createTeamVault,
+  TeamAdminSession,
+  orgIdFromRootPubSign,
+  readSpaces,
+} from "@stele/sync";
 import type { SocketLike, MemberRole, SpaceKeySource } from "@stele/sync";
 import { SyncManager, type SyncSettings } from "./sync-manager.ts";
-import { encodeInvite, decodeInvite } from "./team-invite.ts";
+import { encodeInvite, decodeInvite, type TeamInvite } from "./team-invite.ts";
+import { decodeOrgBundle } from "./org-bundle.ts";
 import { rotateTeamRoot, rekeyUntilDone } from "./team-rotate.ts";
 import { VaultMeta } from "./vault-meta.ts";
 import { SpacesService } from "./spaces-service.ts";
@@ -58,7 +68,18 @@ function sendAll(channel: string, ...args: unknown[]): void {
  */
 type LoadedSync =
   | { kind: "personal"; settings: SyncSettings; passphrase: string }
-  | { kind: "team"; settings: SyncSettings; ownerPubSign: Uint8Array; role: MemberRole; requireSigned: boolean; enrollmentToken?: string };
+  | {
+      kind: "team";
+      settings: SyncSettings;
+      ownerPubSign: Uint8Array;
+      role: MemberRole;
+      requireSigned: boolean;
+      enrollmentToken?: string;
+      /** 組織信任錨(3a):有值即把錨上提到組織,當代 owner 改由團隊憑證認定 */
+      orgRootPubSign?: Uint8Array;
+      /** 已見過的最大團隊憑證序號(反回滾 pin) */
+      orgSerial: number;
+    };
 
 const syncFile = (root: string): string => path.join(root, ".stele", "sync.json");
 
@@ -91,7 +112,21 @@ function loadSyncSettings(root: string): LoadedSync | undefined {
       // 強制簽章模式(P4 §7.3):持久化上次驗過的政策,重開即先套用(bootstrap 會以當代政策覆蓋);
       // 惡意伺服器抑制政策下發時,成員仍守住上次已知的強制態(縱深)
       const requireSigned = raw["requireSigned"] === true;
-      return { kind: "team", settings, ownerPubSign: new Uint8Array(Buffer.from(ownerPubSign, "base64")), role, requireSigned, enrollmentToken };
+      // 組織綁定(3a):orgRootPubSign 是 out-of-band pin 的信任錨;orgSerial 是反回滾水位。
+      // 兩者都持久化——惡意伺服器既不能抑制憑證(bootstrap fail-closed),也不能重放舊憑證換回離職 owner
+      const orgRootRaw = raw["orgRootPubSign"];
+      const orgRootPubSign = typeof orgRootRaw === "string" ? new Uint8Array(Buffer.from(orgRootRaw, "base64")) : undefined;
+      const orgSerial = typeof raw["orgSerial"] === "number" ? raw["orgSerial"] : 0;
+      return {
+        kind: "team",
+        settings,
+        ownerPubSign: new Uint8Array(Buffer.from(ownerPubSign, "base64")),
+        role,
+        requireSigned,
+        enrollmentToken,
+        orgRootPubSign,
+        orgSerial,
+      };
     }
 
     const passphrase = raw["passphrase"];
@@ -119,7 +154,19 @@ function loadSyncSettings(root: string): LoadedSync | undefined {
 
 /** 目前 team vault 的執行態(供 owner 管理 IPC 與 pending 重試);切 vault 時重設。epoch = 當前金鑰紀元 */
 let teamRuntime:
-  | { settings: SyncSettings; ownerPubSign: Uint8Array; role: MemberRole; requireSigned: boolean; root: Uint8Array | undefined; epoch: number }
+  | {
+      settings: SyncSettings;
+      /** 當代 owner 的信任錨:綁組織時由團隊憑證認定並在此就地更新(撤換即生效) */
+      ownerPubSign: Uint8Array;
+      role: MemberRole;
+      requireSigned: boolean;
+      root: Uint8Array | undefined;
+      epoch: number;
+      orgRootPubSign?: Uint8Array;
+      orgSerial: number;
+      /** 我是憑證認定的 owner,但手上的信封還是前任簽的 → 待接管重簽(3a 交接過渡) */
+      takeoverNeeded: boolean;
+    }
   | undefined;
 /** 成員端收 keyRotated 後重試 bootstrap 的計時器;切 vault 時清除 */
 let rotateRetryTimer: NodeJS.Timeout | undefined;
@@ -160,6 +207,25 @@ function persistRequireSigned(root: string, requireSigned: boolean): void {
     writeFileSync(file, JSON.stringify(raw, null, 2));
   } catch (err) {
     console.error("寫回強制簽章態失敗:", err);
+  }
+}
+
+/**
+ * 把驗證過的組織團隊憑證結果(3a)寫回 sync.json:當代 owner 公鑰 + 憑證序號水位。
+ * 序號只進不退——下次開機即以它為 pin,惡意伺服器重放舊憑證會被 bootstrap 拒收。
+ */
+function persistOrgOwner(root: string, ownerPubSign: Uint8Array, serial: number): void {
+  const file = syncFile(root);
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    const b64 = Buffer.from(ownerPubSign).toString("base64");
+    const prevSerial = typeof raw["orgSerial"] === "number" ? raw["orgSerial"] : 0;
+    if (raw["ownerPubSign"] === b64 && prevSerial >= serial) return;
+    raw["ownerPubSign"] = b64;
+    raw["orgSerial"] = Math.max(prevSerial, serial);
+    writeFileSync(file, JSON.stringify(raw, null, 2));
+  } catch (err) {
+    console.error("寫回組織團隊憑證失敗:", err);
   }
 }
 
@@ -235,10 +301,26 @@ function requireSession(): VaultSession {
 let pendingRetryTimer: NodeJS.Timeout | undefined;
 
 /** bootstrap ready 結果落進 teamRuntime(root/epoch/驗證過的角色) */
-function adoptTeamBootstrap(next: VaultSession, res: { root: Uint8Array; epoch: number; role?: MemberRole; requireSignedWrites: boolean | undefined }): void {
+function adoptTeamBootstrap(
+  next: VaultSession,
+  res: {
+    root: Uint8Array;
+    epoch: number;
+    role?: MemberRole;
+    requireSignedWrites: boolean | undefined;
+    orgOwner?: { ownerPubSign: Uint8Array; ownerMemberId: string; serial: number; envelopeFromPrevOwner: boolean };
+  },
+): void {
   if (!teamRuntime) return;
   teamRuntime.root = res.root;
   teamRuntime.epoch = res.epoch;
+  // 組織委任鏈(3a):憑證認定的當代 owner 蓋過本機快取的錨——這是 owner 撤換在成員端生效的地方
+  if (res.orgOwner) {
+    teamRuntime.ownerPubSign = res.orgOwner.ownerPubSign;
+    teamRuntime.orgSerial = Math.max(teamRuntime.orgSerial, res.orgOwner.serial);
+    teamRuntime.takeoverNeeded = res.orgOwner.envelopeFromPrevOwner;
+    persistOrgOwner(next.root, res.orgOwner.ownerPubSign, res.orgOwner.serial);
+  }
   // 驗過 owner 簽章的角色憑證(§9.5)蓋過 sync.json 的本地宣稱;舊成員未簽發則沿用既有
   if (res.role) {
     teamRuntime.role = res.role;
@@ -314,10 +396,22 @@ async function refreshTeamRole(next: VaultSession, memberIdentity: SyncIdentity)
       vaultId: rt.settings.vaultId,
       identity: memberIdentity,
       ownerPubSign: rt.ownerPubSign,
+      orgRootPubSign: rt.orgRootPubSign,
+      pinnedOrgSerial: rt.orgSerial,
       createSocket: createTeamSocket,
     });
     if (session !== next || teamRuntime !== rt) return;
     if (res.status === "ready" && res.epoch === rt.epoch) {
+      // 組織撤換 owner(3a)在同紀元內發生:重連即以新憑證更新信任錨,不必等輪換或重開
+      if (res.orgOwner && !Buffer.from(res.orgOwner.ownerPubSign).equals(Buffer.from(rt.ownerPubSign))) {
+        rt.ownerPubSign = res.orgOwner.ownerPubSign;
+        rt.orgSerial = Math.max(rt.orgSerial, res.orgOwner.serial);
+        rt.takeoverNeeded = res.orgOwner.envelopeFromPrevOwner;
+        persistOrgOwner(next.root, res.orgOwner.ownerPubSign, res.orgOwner.serial);
+        // 執行中的連線也得換錨,否則新 owner 重簽的成員目錄會被整份判為偽造、寫入全被丟棄
+        syncManager?.setOwnerPubSign(res.orgOwner.ownerPubSign);
+        sendAll("team:changed");
+      }
       if (res.role && res.role !== rt.role) {
         rt.role = res.role;
         persistVerifiedRole(next.root, res.role);
@@ -357,6 +451,8 @@ async function retryPendingBootstrap(next: VaultSession, memberIdentity: SyncIde
       vaultId: rt.settings.vaultId,
       identity: memberIdentity,
       ownerPubSign: rt.ownerPubSign,
+      orgRootPubSign: rt.orgRootPubSign,
+      pinnedOrgSerial: rt.orgSerial,
       createSocket: createTeamSocket,
     });
     if (session !== next || teamRuntime !== rt || syncManager) return;
@@ -400,7 +496,17 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
       attachSyncManager(next, loaded.settings, new MasterKeySpaces(await deriveVaultKey(loaded.passphrase, loaded.settings.vaultId)), memberIdentity);
     } else {
       // team:先跑獨立 bootstrap 拿 root(避開 SyncClient authOk 立即解 vault-meta 的死結)
-      teamRuntime = { settings: loaded.settings, ownerPubSign: loaded.ownerPubSign, role: loaded.role, requireSigned: loaded.requireSigned, root: undefined, epoch: 0 };
+      teamRuntime = {
+        settings: loaded.settings,
+        ownerPubSign: loaded.ownerPubSign,
+        role: loaded.role,
+        requireSigned: loaded.requireSigned,
+        root: undefined,
+        epoch: 0,
+        orgRootPubSign: loaded.orgRootPubSign,
+        orgSerial: loaded.orgSerial,
+        takeoverNeeded: false,
+      };
       try {
         const res = await bootstrapTeamKey({
           url: loaded.settings.url,
@@ -408,6 +514,8 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
           vaultId: loaded.settings.vaultId,
           identity: memberIdentity,
           ownerPubSign: loaded.ownerPubSign,
+          orgRootPubSign: loaded.orgRootPubSign,
+          pinnedOrgSerial: loaded.orgSerial,
           enrollmentToken: loaded.enrollmentToken,
           createSocket: createTeamSocket,
         });
@@ -591,12 +699,22 @@ async function handleKeyRotated(epoch: number): Promise<void> {
       vaultId: rt.settings.vaultId,
       identity: me,
       ownerPubSign: rt.ownerPubSign,
+      orgRootPubSign: rt.orgRootPubSign,
+      pinnedOrgSerial: rt.orgSerial,
       createSocket: createTeamSocket,
     });
     if (teamRuntime !== rt || syncManager !== manager) return; // 期間切了 vault,作廢
     if (res.status === "ready" && res.epoch >= epoch) {
       rt.root = res.root;
       rt.epoch = res.epoch;
+      // 組織委任鏈(3a):輪換同時可能換過 owner,以憑證認定的當代 owner 更新錨並推進反回滾水位
+      if (res.orgOwner) {
+        rt.ownerPubSign = res.orgOwner.ownerPubSign;
+        rt.orgSerial = Math.max(rt.orgSerial, res.orgOwner.serial);
+        rt.takeoverNeeded = res.orgOwner.envelopeFromPrevOwner;
+        if (session) persistOrgOwner(session.root, res.orgOwner.ownerPubSign, res.orgOwner.serial);
+        manager.setOwnerPubSign(res.orgOwner.ownerPubSign);
+      }
       if (res.role) rt.role = res.role; // 輪換重簽的角色憑證(§9.5)一併帶回
       // 強制簽章政策(§7.3)綁 epoch,輪換重簽:以新代政策熱更新並持久化;缺席保留既有 pin(fail-closed)
       const nextReq = res.requireSignedWrites ?? rt.requireSigned;
@@ -668,6 +786,13 @@ ipcMain.handle("team:info", async () => {
     role: teamRuntime.role, // 本人角色(供 renderer 收斂 viewer UI)
     ready: teamRuntime.root !== undefined, // false = pending(等擁有者授權)
     requireSigned: teamRuntime.requireSigned, // 強制簽章模式(§7.3);owner UI 顯示開關態
+    // 組織綁定(3a):orgId 由組織根公鑰導出;未綁組織為 undefined
+    orgId: teamRuntime.orgRootPubSign ? orgIdFromRootPubSign(teamRuntime.orgRootPubSign) : undefined,
+    orgSerial: teamRuntime.orgSerial,
+    // 需要接管重簽:憑證認定我是 owner,但我手上的 root 信封還是前任簽的(撤換後的過渡態)
+    takeoverNeeded: teamRuntime.takeoverNeeded && (await isTeamOwner()),
+    // 我的簽章公鑰:綁組織/指派擁有者時要交給組織(組織據此簽發團隊憑證)
+    myPubSign: Buffer.from((await getIdentity()).pubSign).toString("base64"),
   };
 });
 
@@ -699,7 +824,7 @@ ipcMain.handle("team:join", async (_e, inviteText: unknown) => {
   if (typeof inviteText !== "string") throw new Error("非法請求");
   const invite = decodeInvite(inviteText);
   const root = requireSession().root;
-  writeSyncConfig(root, {
+  const config: Record<string, unknown> = {
     url: invite.url,
     token: invite.token,
     vaultId: invite.vaultId,
@@ -709,7 +834,10 @@ ipcMain.handle("team:join", async (_e, inviteText: unknown) => {
     deviceId: randomUUID(),
     enrollmentToken: invite.enrollToken,
     displayName: defaultDisplayName(),
-  });
+  };
+  // 團隊已綁組織(3a):加入者的信任錨直接釘在組織根,owner 日後撤換不影響他
+  if (invite.orgRootPubSign) config["orgRootPubSign"] = invite.orgRootPubSign;
+  writeSyncConfig(root, config);
   await switchVault(root);
   return { vaultId: invite.vaultId, ready: teamRuntime?.root !== undefined };
 });
@@ -723,14 +851,16 @@ ipcMain.handle("team:invite", async (_e, role: unknown, ttlSec: unknown) => {
   const admin = await TeamAdminSession.open({ ...teamRuntime.settings, identity: me, createSocket: createTeamSocket });
   try {
     const enrollToken = await admin.inviteToken(ttl, inviteRole);
-    return encodeInvite({
+    const invite: TeamInvite = {
       url: teamRuntime.settings.url,
       token: teamRuntime.settings.token,
       vaultId: teamRuntime.settings.vaultId,
       ownerPubSign: Buffer.from(me.pubSign).toString("base64"),
       enrollToken,
       role: inviteRole,
-    });
+    };
+    if (teamRuntime.orgRootPubSign) invite.orgRootPubSign = Buffer.from(teamRuntime.orgRootPubSign).toString("base64");
+    return encodeInvite(invite);
   } finally {
     admin.close();
   }
@@ -828,6 +958,50 @@ ipcMain.handle("team:setRequireSigned", async (_e, enabled: unknown) => {
   syncManager?.setRequireSignedWrites(enabled);
   sendAll("team:changed");
   return { requireSigned: enabled };
+});
+
+/**
+ * 把此團隊綁到組織(3a,owner-only):貼上組織給的憑證 bundle(base64url(JSON){orgRootPubSign, cert})。
+ * 先上傳給伺服器(它會驗鏈、記綁定),再把組織根寫進 sync.json 當本機 pin,最後重載 vault 讓錨上提生效。
+ */
+ipcMain.handle("team:bindOrg", async (_e, bundleText: unknown) => {
+  if (typeof bundleText !== "string" || bundleText.trim().length === 0) throw new Error("非法請求");
+  if (!(await isTeamOwner()) || !teamRuntime) throw new Error("非團隊擁有者");
+  const { orgRootPubSign, cert } = decodeOrgBundle(bundleText);
+  const rt = teamRuntime;
+  const me = await getIdentity();
+  const admin = await TeamAdminSession.open({ ...rt.settings, identity: me, createSocket: createTeamSocket });
+  try {
+    await admin.bindOrg(orgRootPubSign, cert);
+  } finally {
+    admin.close();
+  }
+  const root = requireSession().root;
+  const file = syncFile(root);
+  const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  raw["orgRootPubSign"] = Buffer.from(orgRootPubSign).toString("base64");
+  writeFileSync(file, JSON.stringify(raw, null, 2));
+  await switchVault(root); // 重載:bootstrap 這次會以組織為錨驗團隊憑證
+  return { orgId: orgIdFromRootPubSign(orgRootPubSign) };
+});
+
+/**
+ * 接管重簽(3a):組織把 owner 換成我之後,以我的簽章重發全員信封與憑證。
+ * 完成前成員仍靠組織背書的前任信封運作;完成後前任的一切簽章即刻失去效力。
+ */
+ipcMain.handle("team:takeover", async () => {
+  if (!(await isTeamOwner()) || !teamRuntime?.root) throw new Error("非團隊擁有者或金鑰未就緒");
+  const rt = teamRuntime;
+  const me = await getIdentity();
+  const admin = await TeamAdminSession.open({ ...rt.settings, identity: me, createSocket: createTeamSocket });
+  try {
+    await admin.reissueAll(rt.root!, rt.epoch);
+  } finally {
+    admin.close();
+  }
+  rt.takeoverNeeded = false;
+  sendAll("team:changed");
+  return { ok: true };
 });
 
 /** 已驗證的成員目錄(P4 attribution):供 renderer 標記留言作者;非團隊 vault 或未同步為空 */

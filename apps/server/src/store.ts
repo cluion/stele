@@ -100,6 +100,16 @@ CREATE TABLE IF NOT EXISTS vault_policy (
   require_signed INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
+CREATE TABLE IF NOT EXISTS org_bindings (
+  vault_id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  root_pub_sign BLOB NOT NULL,
+  cert BLOB NOT NULL,
+  serial INTEGER NOT NULL DEFAULT 0,
+  owner_member_id TEXT NOT NULL,
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS org_bindings_by_org ON org_bindings (org_id);
 CREATE TABLE IF NOT EXISTS enrollment_tokens (
   token TEXT PRIMARY KEY,
   vault_id TEXT NOT NULL,
@@ -159,6 +169,17 @@ export interface MemberRecord {
   role: MemberRole;
   /** 是否已持有任一金鑰信封(2c-2):false = 待 owner 核准;輪換只重包已核准者 */
   approved: boolean;
+}
+
+/** 某 vault 與組織的綁定(3a);全是公開可驗資料,伺服器不因此持有任何內容金鑰 */
+export interface OrgBinding {
+  orgId: string;
+  /** 組織根簽章公鑰:此 vault 的憑證鏈信任錨,綁定後不可換(換組織需先解綁,3b) */
+  rootPubSign: Uint8Array;
+  cert: Uint8Array;
+  /** 已接受的最大憑證序號:反回滾(伺服器側縱深防禦,成員端另有自己的 pin) */
+  serial: number;
+  ownerMemberId: string;
 }
 
 export class SyncStore {
@@ -449,6 +470,82 @@ export class SyncStore {
       return memberId;
     });
     return claim();
+  }
+
+  /**
+   * 組織撤換 owner(3a):把 vault 的 owner 換成另一位**既有成員**,舊 owner 降為 editor。
+   * 指向非成員回 false——沒有公鑰的幽靈 owner 會讓整個信封/憑證鏈無人可簽,寧可拒絕。
+   * 舊 owner 不移出團隊:他仍持有 root、仍是成員;要真正切斷得走 memberRemove + 輪換(既有能力)。
+   */
+  transferOwner(vaultId: string, newOwnerMemberId: string): boolean {
+    const transfer = this.db.transaction((): boolean => {
+      const target = this.db
+        .prepare("SELECT member_id FROM members WHERE vault_id = ? AND member_id = ?")
+        .get(vaultId, newOwnerMemberId) as { member_id: string } | undefined;
+      if (!target) return false;
+      const prev = this.db
+        .prepare("SELECT owner_member_id FROM vault_owners WHERE vault_id = ?")
+        .get(vaultId) as { owner_member_id: string } | undefined;
+      if (!prev) return false; // 非 team vault:owner 由 claimOwner 釘選,不在此處無中生有
+      if (prev.owner_member_id === newOwnerMemberId) return true; // 冪等:重放同一張憑證不應失敗
+      this.db.prepare("UPDATE vault_owners SET owner_member_id = ? WHERE vault_id = ?").run(newOwnerMemberId, vaultId);
+      this.db.prepare("UPDATE members SET role = 'editor' WHERE vault_id = ? AND member_id = ?").run(vaultId, prev.owner_member_id);
+      this.db.prepare("UPDATE members SET role = 'owner' WHERE vault_id = ? AND member_id = ?").run(vaultId, newOwnerMemberId);
+      return true;
+    });
+    return transfer();
+  }
+
+  /**
+   * 綁定/更新 vault 的組織團隊憑證(3a)。serial 由呼叫端驗過單調後才寫入;
+   * 伺服器存的是公開可驗資料(root 公鑰 + 憑證 blob),不含任何金鑰。
+   */
+  putOrgBinding(
+    vaultId: string,
+    orgId: string,
+    rootPubSign: Uint8Array,
+    cert: Uint8Array,
+    serial: number,
+    ownerMemberId: string,
+  ): void {
+    this.db
+      .prepare(
+        "INSERT INTO org_bindings (vault_id, org_id, root_pub_sign, cert, serial, owner_member_id) VALUES (?, ?, ?, ?, ?, ?) " +
+          "ON CONFLICT (vault_id) DO UPDATE SET org_id = excluded.org_id, root_pub_sign = excluded.root_pub_sign, " +
+          "cert = excluded.cert, serial = excluded.serial, owner_member_id = excluded.owner_member_id, updated_at = unixepoch()",
+      )
+      .run(vaultId, orgId, Buffer.from(rootPubSign), Buffer.from(cert), serial, ownerMemberId);
+  }
+
+  /** 某 vault 的組織綁定;undefined = 未綁組織(單團隊模式,行為與 0.18.0 一致) */
+  orgBinding(vaultId: string): OrgBinding | undefined {
+    const row = this.db.prepare("SELECT org_id, root_pub_sign, cert, serial, owner_member_id FROM org_bindings WHERE vault_id = ?").get(vaultId) as
+      | { org_id: string; root_pub_sign: Buffer; cert: Buffer; serial: number; owner_member_id: string }
+      | undefined;
+    return (
+      row && {
+        orgId: row.org_id,
+        rootPubSign: new Uint8Array(row.root_pub_sign),
+        cert: new Uint8Array(row.cert),
+        serial: row.serial,
+        ownerMemberId: row.owner_member_id,
+      }
+    );
+  }
+
+  /**
+   * 某組織的根簽章公鑰(供伺服器驗管理員委任與團隊憑證鏈);查無 = 伺服器不認識此組織。
+   * 來源是各 vault 綁定時存下的公鑰,組織本身不需另外註冊——orgId 由公鑰導出,天然自我認證。
+   */
+  orgRootOf(orgId: string): Uint8Array | undefined {
+    const row = this.db.prepare("SELECT root_pub_sign FROM org_bindings WHERE org_id = ? LIMIT 1").get(orgId) as { root_pub_sign: Buffer } | undefined;
+    return row && new Uint8Array(row.root_pub_sign);
+  }
+
+  /** 團隊憑證 blob(隨 envelopeList 發還成員驗鏈);未綁組織回 undefined */
+  orgTeamCert(vaultId: string): Uint8Array | undefined {
+    const row = this.db.prepare("SELECT cert FROM org_bindings WHERE vault_id = ?").get(vaultId) as { cert: Buffer } | undefined;
+    return row && new Uint8Array(row.cert);
   }
 
   /** 某 vault 的 owner memberId;undefined = 非 team vault(個人/legacy) */

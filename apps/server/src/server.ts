@@ -3,7 +3,18 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash, timingSafeEqual, randomBytes } from "node:crypto";
-import { decodeClientMessage, encodeServerMessage, verifyChallenge, type ClientMessage, type ServerMessage, type MemberRole } from "@stele/sync";
+import {
+  decodeClientMessage,
+  encodeServerMessage,
+  verifyChallenge,
+  verifyOrgChallenge,
+  verifyOrgAdminCert,
+  verifyOrgTeamCert,
+  orgIdFromRootPubSign,
+  type ClientMessage,
+  type ServerMessage,
+  type MemberRole,
+} from "@stele/sync";
 import { SyncStore, type ShareScope } from "./store.ts";
 
 /**
@@ -170,6 +181,9 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
     let pendingIdentity:
       | { vaultId: string; memberId: string; pubSign: Uint8Array; pubWrap: Uint8Array; enrollmentToken: string }
       | undefined;
+    // 組織管理連線(3a):認證後只能推團隊憑證,doc 內容一律拒——治理平面與金鑰平面分離
+    let orgScope: { orgId: string } | undefined;
+    let pendingOrg: { orgId: string; adminMemberId: string; adminPubSign: Uint8Array } | undefined;
     const authTimer = setTimeout(() => ws.close(4401, "未認證"), AUTH_TIMEOUT_MS);
     alive.add(ws);
     ws.on("pong", () => alive.add(ws));
@@ -309,6 +323,132 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
       send({ type: "authOk", docs: opts.store.headSeqs(vaultId), epoch: opts.store.epochOf(vaultId) });
     };
 
+    /**
+     * 組織管理連線第一階段(3a):token 准入 + 宣稱 org admin 身分 → 回 nonce。
+     * 伺服器需已知此 org 的根公鑰(至少一個 vault 綁過);未知 org 一律拒,不讓人憑空宣稱組織。
+     */
+    const handleAuthOrg = (msg: ClientMessage & { type: "authOrg" }): void => {
+      if (vaultId !== undefined || orgScope !== undefined) {
+        refuse("bad-message", "重複認證");
+        return;
+      }
+      if (!tokenMatches(msg.token, opts.token)) {
+        refuse("bad-token", "token 錯誤");
+        return;
+      }
+      if (!validId(msg.orgId) || msg.adminPubSign.length !== 32) {
+        refuse("bad-message", "非法組織 id 或公鑰");
+        return;
+      }
+      const rootPubSign = opts.store.orgRootOf(msg.orgId);
+      if (!rootPubSign) {
+        refuse("no-org", "查無此組織");
+        return;
+      }
+      // 操作者為 root 本人 → 公鑰須等於 org root;否則須持 root 簽的委任且委任內公鑰相符(未過期)
+      const adminMemberId = createHash("sha256").update(msg.adminPubSign).digest("hex");
+      if (msg.adminCert.length === 0) {
+        if (!Buffer.from(msg.adminPubSign).equals(Buffer.from(rootPubSign))) {
+          refuse("forbidden", "非組織根,需管理員委任");
+          return;
+        }
+      } else {
+        try {
+          const v = verifyOrgAdminCert(msg.adminCert, rootPubSign, Math.floor(Date.now() / 1000));
+          if (!Buffer.from(v.adminPubSign).equals(Buffer.from(msg.adminPubSign))) {
+            refuse("forbidden", "委任與宣稱公鑰不符");
+            return;
+          }
+        } catch (err) {
+          refuse("forbidden", `管理員委任無效:${err instanceof Error ? err.message : "未知錯誤"}`);
+          return;
+        }
+      }
+      pendingOrg = { orgId: msg.orgId, adminMemberId, adminPubSign: msg.adminPubSign };
+      pendingNonce = randomBytes(32);
+      send({ type: "authChallenge", nonce: pendingNonce });
+    };
+
+    /** 組織管理連線第二階段:驗 challenge 簽章(獨立於 vault 認證的簽章域)→ 鎖 org 作用域 */
+    const handleOrgProof = (msg: ClientMessage & { type: "authProof" }): void => {
+      const nonce = pendingNonce;
+      const p = pendingOrg;
+      pendingNonce = undefined;
+      pendingOrg = undefined;
+      if (!nonce || !p) {
+        refuse("bad-message", "未先發起組織認證");
+        return;
+      }
+      if (!verifyOrgChallenge(msg.signature, nonce, p.orgId, p.adminMemberId, p.adminPubSign)) {
+        refuse("bad-proof", "組織身分簽章驗證失敗");
+        return;
+      }
+      orgScope = { orgId: p.orgId };
+      clearTimeout(authTimer);
+      send({ type: "orgAuthOk", orgId: p.orgId });
+    };
+
+    /**
+     * 組織團隊憑證上傳(3a)。兩條授權路徑:
+     *  - vault owner 連線:首次綁定(此 vault 尚未屬於任何組織),或組織內的自我更新;
+     *  - 組織管理連線:vault 已綁在該組織 → **授權即簽章**,無須任何團隊成員配合(owner 離職可撤換)。
+     * 兩路皆須鏈驗證通過、serial 嚴格遞增(反回滾),且憑證指向的 owner 必須是既有成員且公鑰相符。
+     */
+    const handleOrgCertPush = (msg: ClientMessage & { type: "orgCertPush" }, from: { vault: string; isOwner: boolean } | { org: string }): void => {
+      if (!validId(msg.vaultId) || msg.orgRootPubSign.length !== 32) {
+        refuse("bad-message", "非法 vault id 或組織公鑰");
+        return;
+      }
+      const binding = opts.store.orgBinding(msg.vaultId);
+      if ("vault" in from) {
+        if (msg.vaultId !== from.vault) {
+          refuse("forbidden", "不可為其他 vault 綁定組織");
+          return;
+        }
+        if (!from.isOwner) {
+          refuse("forbidden", "僅團隊擁有者可綁定組織");
+          return;
+        }
+      } else if (!binding || binding.orgId !== from.org) {
+        // 組織連線只管得到自己組織已綁的 vault:首次綁定一律需該團隊 owner 同意
+        refuse("forbidden", "此 vault 不屬於本組織");
+        return;
+      }
+      if (binding && !Buffer.from(binding.rootPubSign).equals(Buffer.from(msg.orgRootPubSign))) {
+        refuse("forbidden", "此 vault 已綁定其他組織"); // 換組織需先解綁(3b),不容默默轉手
+        return;
+      }
+      let verified;
+      try {
+        verified = verifyOrgTeamCert(msg.cert, msg.orgRootPubSign, msg.vaultId, Math.floor(Date.now() / 1000));
+      } catch (err) {
+        refuse("bad-cert", `團隊憑證無效:${err instanceof Error ? err.message : "未知錯誤"}`);
+        return;
+      }
+      if (binding && verified.serial <= binding.serial) {
+        refuse("stale-cert", "團隊憑證序號須遞增"); // 反回滾:擋重放舊憑證把 owner 指回離職者
+        return;
+      }
+      // 憑證指向的 owner 必須是既有成員、且註冊公鑰與憑證一致:否則會產生沒人簽得動信封的幽靈 owner
+      const target = opts.store.getMember(msg.vaultId, verified.ownerMemberId);
+      if (!target || !Buffer.from(target.pubSign).equals(Buffer.from(verified.ownerPubSign))) {
+        refuse("no-member", "憑證指向的 owner 不是此團隊成員");
+        return;
+      }
+      const prevOwner = opts.store.ownerOf(msg.vaultId);
+      if (prevOwner !== undefined && prevOwner !== verified.ownerMemberId && !opts.store.transferOwner(msg.vaultId, verified.ownerMemberId)) {
+        refuse("no-member", "無法轉移擁有者");
+        return;
+      }
+      opts.store.putOrgBinding(msg.vaultId, orgIdFromRootPubSign(msg.orgRootPubSign), msg.orgRootPubSign, msg.cert, verified.serial, verified.ownerMemberId);
+      // 角色已變的兩位:踢掉活躍連線,重連後以新角色生效(同 memberSetRole 的作法)
+      if (prevOwner !== undefined && prevOwner !== verified.ownerMemberId) {
+        kickMember(msg.vaultId, prevOwner, "role-changed", "團隊擁有者已由組織變更,請重新連線");
+        kickMember(msg.vaultId, verified.ownerMemberId, "role-changed", "團隊擁有者已由組織變更,請重新連線");
+      }
+      send({ type: "ok", reqId: msg.reqId });
+    };
+
     // 收件人以 shareId 認證:解析出作用域後併入該 doc 所屬 vault 的 peer 集,只是廣播被 restrictedDoc 過濾
     const handleShareAuth = (msg: ClientMessage & { type: "shareAuth" }): void => {
       if (vaultId !== undefined) {
@@ -414,6 +554,7 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
             roleCred: opts.store.roleCredentialFor(vault, self) ?? new Uint8Array(),
             restrictedSpaceIds: opts.store.restrictedSpaceIds(vault),
             policy: opts.store.vaultPolicy(vault) ?? new Uint8Array(),
+            orgTeamCert: opts.store.orgTeamCert(vault) ?? new Uint8Array(),
           });
           break;
         case "envelopePush": {
@@ -531,7 +672,21 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
       }
     };
 
-    const handle = (vault: string, msg: Exclude<ClientMessage, { type: "auth" | "authId" | "authProof" | "shareAuth" }>): void => {
+    const handle = (vault: string, msg: Exclude<ClientMessage, { type: "auth" | "authId" | "authProof" | "shareAuth" | "authOrg" }>): void => {
+      // 組織綁定/憑證換發(3a):走成員連線的這條是「團隊 owner 主動綁組織」;
+      // 組織端撤換 owner 走 orgScope 連線(見分派),兩路共用同一套鏈驗證與反回滾
+      if (msg.type === "orgCertPush") {
+        if (scope !== undefined) {
+          refuse("forbidden", "分享連線不得管理組織");
+          return;
+        }
+        if (memberId === undefined) {
+          refuse("forbidden", "組織綁定需身分認證");
+          return;
+        }
+        handleOrgCertPush(msg, { vault, isOwner: opts.store.ownerOf(vault) === memberId });
+        return;
+      }
       if (
         msg.type === "claimOwner" ||
         msg.type === "envelopePush" ||
@@ -687,9 +842,15 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
       try {
         if (msg.type === "auth") handleAuth(msg);
         else if (msg.type === "authId") handleAuthId(msg);
-        else if (msg.type === "authProof") handleAuthProof(msg);
+        else if (msg.type === "authOrg") handleAuthOrg(msg);
+        else if (msg.type === "authProof") (pendingOrg !== undefined ? handleOrgProof : handleAuthProof)(msg);
         else if (msg.type === "shareAuth") handleShareAuth(msg);
-        else if (vaultId === undefined) refuse("unauthorized", "尚未認證");
+        else if (orgScope !== undefined) {
+          // 組織管理連線的能力上限:只有團隊憑證換發。doc 讀寫、成員管理、金鑰信封一律拒——
+          // 治理模式下組織不持有 root,拿到內容也解不開,但仍在協議層明確擋住,不留曖昧
+          if (msg.type === "orgCertPush") handleOrgCertPush(msg, { org: orgScope.orgId });
+          else refuse("forbidden", "組織管理連線僅可換發團隊憑證");
+        } else if (vaultId === undefined) refuse("unauthorized", "尚未認證");
         else handle(vaultId, msg);
       } catch (err) {
         console.error("處理訊息失敗:", err);

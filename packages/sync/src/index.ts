@@ -56,6 +56,7 @@ export {
   type CreateTeamVaultOptions,
 } from "./bootstrap.ts";
 export { TeamAdminSession, type TeamAdminOptions } from "./team-admin.ts";
+export { OrgAdminSession, type OrgAdminOptions } from "./org-admin.ts";
 export {
   signRoleCredential,
   verifyRoleCredential,
@@ -66,6 +67,19 @@ export {
   type MemberCredentialClaims,
   type VerifiedMember,
 } from "./role-credential.ts";
+export {
+  orgIdFromRootPubSign,
+  orgChallengeBytes,
+  verifyOrgChallenge,
+  signOrgAdminCert,
+  verifyOrgAdminCert,
+  signOrgTeamCert,
+  verifyOrgTeamCert,
+  type OrgAdminClaims,
+  type VerifiedOrgAdmin,
+  type OrgTeamClaims,
+  type VerifiedOrgTeam,
+} from "./org-credential.ts";
 export { signWrite, verifyWrite, type WriteKind, type WriteAuthFields } from "./update-signature.ts";
 export { signVaultPolicy, verifyVaultPolicy, type VaultPolicyClaims, type VerifiedPolicy } from "./vault-policy.ts";
 export {

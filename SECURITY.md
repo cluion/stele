@@ -203,6 +203,54 @@ the interim.
 
 ---
 
+### 2.9 Organization delegation chain (since 0.19)
+
+A team vault can be bound to an **organization**, which lifts the client's trust
+anchor from one particular owner up to an organization root key:
+
+```
+orgRootPubSign
+  └─ signs → orgAdminCert{adminPubSign, notAfter}
+           └─ signs → orgTeamCert{vaultId, ownerPubSign, prevOwnerPubSign?, serial}
+                    └─ existing chain unchanged: member certs, role creds, policy, key envelopes
+```
+
+Members pin `orgRootPubSign` out of band (invite bundle / local config). On
+bootstrap the server must present the current `orgTeamCert`; the client verifies
+the chain and uses **the owner public key named by that certificate** to verify
+everything else. This is what makes an owner **replaceable**: when an owner
+leaves, the organization signs a new certificate naming a remaining member, and
+every member verifies the change cryptographically — no vault rebuild, no
+re-invites, no cooperation from the departing owner.
+
+Anti-rollback: certificates carry a monotonic `serial`, deliberately decoupled
+from the key epoch (binding them to the epoch would deadlock "transfer owner →
+new owner rotates → certificate invalid"). Clients pin the highest serial seen
+and reject anything lower; the server enforces the same monotonicity as
+defense-in-depth. A vault already bound to an organization that receives **no**
+certificate fails closed — a malicious server cannot suppress the binding to keep
+members on a stale anchor.
+
+Handover window: at the moment of transfer, every member (including the new
+owner) still holds key envelopes signed by the predecessor. The certificate may
+therefore name `prevOwnerPubSign`, by which the organization explicitly endorses
+the predecessor's signatures **for key envelopes only** — the predecessor already
+knew the root key, so this grants nothing new. Role credentials, member
+certificates and vault policy are only ever accepted from the current owner;
+during the window a predecessor-signed credential is treated as *absent*
+(falling back to the locally known value), never as authoritative. The new owner
+closes the window by reissuing all envelopes and credentials under their own key.
+
+**The organization holds no content keys.** Governance and key distribution are
+separate planes: an organization-scoped connection may only replace team
+certificates — document reads and writes, member management and key envelopes are
+refused. An organization therefore cannot read team content, add members, or
+rotate keys; those require the root key, which stays with the team. (Optional
+escrow, where a vault deliberately wraps its root key to the organization, is
+designed but not implemented — see the roadmap in `plan/`.)
+
+---
+
 ## 3. Trust boundaries
 
 The single most important thing to understand about Stele's security is **which
@@ -238,6 +286,12 @@ bypass them.** They are defense-in-depth, not end-to-end guarantees:
   rate-relevant limits.
 - **Membership list.** The server knows who is in a vault (this is metadata it
   necessarily sees).
+- **Organization binding and owner transfer (since 0.19).** The server checks the
+  organization certificate chain before storing it, and enforces serial
+  monotonicity. This is abuse prevention only: the binding authority is the
+  organization's signature, which members verify themselves (§2.9). First binding
+  additionally requires the team owner's own connection, so a server cannot pull a
+  vault into an organization nobody chose.
 
 The design deliberately draws the line here. E2EE's hardest problem —
 decentralized group key distribution and post-removal rotation — is made
@@ -289,7 +343,32 @@ Both are genuine owner signatures, so the member cannot distinguish them. Rotati
 the key flushes the entire credential generation and is the owner's remedy.
 Cross-epoch replay is already prevented (credentials are epoch-bound).
 
-### 4.4 Device and at-rest security
+### 4.4 Organization root key and handover residuals (since 0.19)
+
+The organization root key is the anchor for every bound vault: whoever holds it
+can appoint owners across all of them. It is generated and stored on an admin
+machine (never on the server), and day-to-day work should use a delegated,
+expiring admin certificate so the root can stay offline. There is no revocation
+list for admin delegations yet — an unexpired delegation is valid until it
+expires, so keep the validity period short. Threshold (M-of-N) control is not
+implemented.
+
+An organization can appoint an owner but cannot read content, so a hostile
+organization's power is bounded to disruption: naming an owner who then controls
+the team's administration. It cannot decrypt anything it was not given a key to.
+
+During a handover the organization may endorse the predecessor's key envelopes
+(§2.9). Until the new owner reissues, a colluding predecessor plus a malicious
+server could serve a *wrong* key envelope — a denial of service, not a
+confidentiality break, since the predecessor already held that root key. Members
+who joined before the transfer keep working throughout; the window closes as soon
+as the takeover runs.
+
+Unbinding a vault from an organization is not implemented in-app: rebinding to a
+different organization is refused by design (a server cannot silently move a team
+between organizations).
+
+### 4.5 Device and at-rest security
 
 A trusted device is assumed. On an unlocked, compromised device, decrypted
 content, the vault key in memory, and the plaintext `.md` mirror are all
@@ -297,7 +376,7 @@ exposed. The identity seed is protected at rest by the OS keychain; the personal
 vault key is passphrase-derived and never stored. Stele does not defend against a
 fully compromised endpoint.
 
-### 4.5 Metadata visible to the server
+### 4.6 Metadata visible to the server
 
 Even as a blind relay, the server observes: vault membership, opaque document
 ids, update sizes, and sync timing. It does not see plaintext, file names, or

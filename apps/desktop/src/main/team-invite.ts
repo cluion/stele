@@ -15,6 +15,11 @@ export interface TeamInvite {
   enrollToken: string;
   /** 被邀者加入後的角色(editor/viewer);2c owner 產碼時決定 */
   role: "editor" | "viewer";
+  /**
+   * 組織根公鑰 base64(3a,團隊已綁組織時才有):被邀者一開始就把信任錨釘在組織,
+   * 而非某一任 owner——之後組織撤換 owner,他不必重新加入。
+   */
+  orgRootPubSign?: string;
 }
 
 export function encodeInvite(invite: TeamInvite): string {
@@ -36,7 +41,7 @@ export function decodeInvite(text: string): TeamInvite {
   }
   // role 舊 bundle 可能缺(向前相容)→ 預設 viewer;非法值也收斂為 viewer
   const role: "editor" | "viewer" = p["role"] === "editor" ? "editor" : "viewer";
-  return {
+  const invite: TeamInvite = {
     url: p["url"] as string,
     token: p["token"] as string,
     vaultId: p["vaultId"] as string,
@@ -44,4 +49,7 @@ export function decodeInvite(text: string): TeamInvite {
     enrollToken: p["enrollToken"] as string,
     role,
   };
+  // 組織綁定為選配(單團隊 bundle 無此欄);有值即成為加入者的信任錨
+  if (typeof p["orgRootPubSign"] === "string" && p["orgRootPubSign"].length > 0) invite.orgRootPubSign = p["orgRootPubSign"];
+  return invite;
 }

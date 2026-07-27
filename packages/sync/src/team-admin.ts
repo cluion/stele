@@ -162,6 +162,31 @@ export class TeamAdminSession {
     await this.request((reqId) => ({ type: "policyPush", reqId, requireSigned: enabled, blob }), "ok");
   }
 
+  /**
+   * 接管重簽(3a):新 owner 上任後,以**自己的簽章**重發全體已核准成員的金鑰信封與憑證。
+   *
+   * 為何必要:成員的信任錨已被團隊憑證上提為新 owner,舊 owner 簽的信封/憑證在新錨下自然驗不過
+   * ——這正是撤換要的效果(離職者的簽章即刻失效),代價是新 owner 未重簽前,成員重跑 bootstrap 會
+   * fail-closed(已連線者手上的 root 不受影響)。因此撤換後應盡快接管,這是受控停頓而非資料損失。
+   *
+   * 不 bump epoch:金鑰沒換,只是換人背書。要真正把舊 owner 的 root 作廢,另走 remove + rotateKey。
+   */
+  async reissueAll(root: Uint8Array, epoch: number): Promise<void> {
+    for (const m of await this.members()) {
+      if (!m.approved) continue; // pending 成員仍待核對指紋後 approve,接管不繞過那道閘
+      await this.approve(m, root, epoch);
+    }
+  }
+
+  /**
+   * 把此團隊綁定到一個組織(3a,owner-only,一次性):上傳組織簽發的團隊憑證,
+   * 之後成員的信任錨即上提為 orgRootPubSign——組織可換發憑證撤換 owner,不必舊 owner 配合。
+   * cert 由組織 out-of-band 交付(組織以此 vaultId + 當代 owner 公鑰簽發)。
+   */
+  async bindOrg(orgRootPubSign: Uint8Array, cert: Uint8Array): Promise<void> {
+    await this.request((reqId) => ({ type: "orgCertPush", reqId, vaultId: this.vaultId, orgRootPubSign, cert }), "ok");
+  }
+
   /** 移除成員(刪 member 列 + 其信封 + 踢連線);密碼層前向保密由呼叫端接著 rotateKey 輪換補上 */
   async remove(memberId: string): Promise<void> {
     await this.request((reqId) => ({ type: "memberRemove", reqId, memberId }), "ok");

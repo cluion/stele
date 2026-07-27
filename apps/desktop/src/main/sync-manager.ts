@@ -335,6 +335,11 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
     this.client.setRequireSignedWrites(enabled);
   }
 
+  /** 熱換信任錨(3a 組織撤換 owner 後);轉發給 SyncClient,它會清空並重拉成員目錄 */
+  setOwnerPubSign(ownerPubSign: Uint8Array): void {
+    this.client.setOwnerPubSign(ownerPubSign);
+  }
+
   async rotateRoot(
     newRoot: Uint8Array,
     epoch: number,

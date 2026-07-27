@@ -4,6 +4,7 @@ import { identityChallengeBytes, type SyncIdentity } from "./identity.ts";
 import { wrapKey, type WrapContext } from "./crypto.ts";
 import { verifyRoleCredential, signMemberCredential } from "./role-credential.ts";
 import { verifyVaultPolicy } from "./vault-policy.ts";
+import { verifyOrgTeamCert } from "./org-credential.ts";
 
 /**
  * 團隊 vault 的金鑰 bootstrap(2b):在建 SyncManager **之前**跑完的獨立握手。
@@ -26,8 +27,18 @@ export interface TeamBootstrapOptions {
   token: string;
   vaultId: string;
   identity: SyncIdentity;
-  /** out-of-band 已知的 owner pubSign(信任錨,驗信封簽章);建立者自建時即自己的 pubSign */
+  /**
+   * out-of-band 已知的 owner pubSign(信任錨,驗信封簽章);建立者自建時即自己的 pubSign。
+   * 綁組織時(orgRootPubSign 有值)降為 fallback:當代 owner 改由團隊憑證認定,不再信這把。
+   */
   ownerPubSign: Uint8Array;
+  /**
+   * 組織根簽章公鑰(3a,out-of-band pin):有值即把信任錨上提到組織——伺服器必須給出當代團隊憑證,
+   * 由它認定 owner 公鑰。缺席一律 fail-closed(拋),不默默降級回 ownerPubSign。
+   */
+  orgRootPubSign?: Uint8Array;
+  /** 本機已見過的最大團隊憑證序號(反回滾 pin);較小的憑證即拒,擋重放舊憑證把 owner 指回離職者 */
+  pinnedOrgSerial?: number;
   /** 新成員首次加入帶一次性邀請碼;已 enroll 成員/建立者留空或省略 */
   enrollmentToken?: string;
   createSocket: (url: string) => SocketLike;
@@ -47,6 +58,17 @@ export type TeamBootstrapResult =
       root: Uint8Array;
       epoch: number;
       role?: MemberRole;
+      /**
+       * 綁組織時(3a)由團隊憑證認定的當代 owner 公鑰與憑證序號:呼叫端應持久化 serial 當作下次的
+       * 反回滾 pin,並以 ownerPubSign 取代本機快取的信任錨(owner 撤換即在此生效)。未綁組織為 undefined。
+       */
+      orgOwner?: {
+        ownerPubSign: Uint8Array;
+        ownerMemberId: string;
+        serial: number;
+        /** 我的 root 信封仍是前任 owner 簽的(交接過渡):新 owner 據此提示接管重簽 */
+        envelopeFromPrevOwner: boolean;
+      };
       spaceKeys: Map<string, Uint8Array>;
       restrictedSpaceIds: string[];
       /**
@@ -78,31 +100,70 @@ export function bootstrapTeamKey(opts: TeamBootstrapOptions): Promise<TeamBootst
           done({ status: "pending" });
           return;
         }
+        // 信任錨解析(3a):綁組織時,當代 owner 由組織委任鏈認定;其後所有驗證(信封、角色憑證、
+        // 政策)一律用這把,而非本機快取的 ownerPubSign——這就是「組織可撤換 owner 而成員端可驗」
+        let orgOwner: { ownerPubSign: Uint8Array; ownerMemberId: string; serial: number; envelopeFromPrevOwner: boolean } | undefined;
+        let ownerPubSign = opts.ownerPubSign;
+        /** 組織背書的前任 owner:僅供金鑰信封的過渡驗證,不用於角色/成員憑證與政策 */
+        let prevOwnerPubSign: Uint8Array | undefined;
+        if (opts.orgRootPubSign) {
+          if (msg.orgTeamCert.length === 0) {
+            // fail-closed:已 pin 組織的 vault 缺當代憑證,可能是惡意伺服器抑制以把成員留在舊錨
+            fail(new Error("此團隊已綁定組織,但伺服器未提供團隊憑證"));
+            return;
+          }
+          const team = verifyOrgTeamCert(msg.orgTeamCert, opts.orgRootPubSign, vaultId, Math.floor(Date.now() / 1000));
+          if (opts.pinnedOrgSerial !== undefined && team.serial < opts.pinnedOrgSerial) {
+            fail(new Error("團隊憑證序號回退,拒絕採信"));
+            return;
+          }
+          ownerPubSign = team.ownerPubSign;
+          prevOwnerPubSign = team.prevOwnerPubSign;
+          orgOwner = { ownerPubSign: team.ownerPubSign, ownerMemberId: team.ownerMemberId, serial: team.serial, envelopeFromPrevOwner: false };
+        }
+        /**
+         * 解信封:先認當代 owner;失敗且組織明示背書了前任,才退而以前任驗(交接過渡)。
+         * 安全上界:前任本就知道 root,採信他包的同一把金鑰不擴大任何權限;拿錯金鑰只會 GCM 驗不過。
+         * 範圍嚴格限於信封——角色/成員憑證與政策一律只認當代 owner。
+         */
+        const unwrapEnvelope = async (blob: Uint8Array, context: WrapContext): Promise<{ key: Uint8Array; fromPrev: boolean }> => {
+          try {
+            return { key: await identity.unwrap(blob, ownerPubSign, context), fromPrev: false };
+          } catch (err) {
+            if (!prevOwnerPubSign) throw err;
+            return { key: await identity.unwrap(blob, prevOwnerPubSign, context), fromPrev: true };
+          }
+        };
         // context 用信封宣稱的 epoch:偽造 epoch 會使 HKDF info 不符 → GCM 驗不過而拒絕,不會靜默拿錯 root
-        const root = await identity.unwrap(env.blob, opts.ownerPubSign, rootWrapContext(vaultId, identity.memberId, env.epoch));
+        const rootEnv = await unwrapEnvelope(env.blob, rootWrapContext(vaultId, identity.memberId, env.epoch));
+        const root = rootEnv.key;
+        if (orgOwner) orgOwner.envelopeFromPrevOwner = rootEnv.fromPrev;
         // 受限空間金鑰(keyId=spaceId 的信封):同一信任錨驗簽解封;舊紀元殘留(輪換後
         // envelopesFor 理論上只回最新,但防禦深度仍比對)略過。偽造信封 unwrap 必拋,不靜默
         const spaceKeys = new Map<string, Uint8Array>();
         for (const e of msg.envelopes) {
           if (e.keyId === KEY_ID_ROOT || e.epoch !== env.epoch) continue;
-          spaceKeys.set(e.keyId, await identity.unwrap(e.blob, opts.ownerPubSign, { vaultId, keyId: e.keyId, epoch: e.epoch, recipientMemberId: identity.memberId }));
+          const spaceEnv = await unwrapEnvelope(e.blob, { vaultId, keyId: e.keyId, epoch: e.epoch, recipientMemberId: identity.memberId });
+          spaceKeys.set(e.keyId, spaceEnv.key);
         }
         // 角色憑證(§9.5):驗 owner 簽章;偽造/挪用即拋(擋盲中繼捏造角色)。
         // 憑證 epoch 必須等於信封 epoch——舊紀元憑證(真簽但已被輪換作廢)視同未簽發,擋降級/升級重放
+        // 交接過渡:前任真簽的憑證視同「未簽發」(fallback 本地既知角色),非前任所簽才是偽造 → 拋。
+        // 只降級為缺席、不採信其內容,前任因此無法在卸任後改動任何人的角色
         let role: MemberRole | undefined;
-        if (msg.roleCred.length > 0) {
-          const cred = verifyRoleCredential(msg.roleCred, opts.ownerPubSign, vaultId, identity.memberId);
+        if (msg.roleCred.length > 0 && !staleFromPrevOwner(() => verifyRoleCredential(msg.roleCred, ownerPubSign, vaultId, identity.memberId), () => verifyRoleCredential(msg.roleCred, prevOwnerPubSign!, vaultId, identity.memberId), prevOwnerPubSign)) {
+          const cred = verifyRoleCredential(msg.roleCred, ownerPubSign, vaultId, identity.memberId);
           if (cred.epoch === env.epoch) role = cred.role;
         }
         // Vault 政策(§7.3):驗 owner 簽章;偽造/挪用即拋(擋盲中繼捏造政策)。
         // 政策缺席或非當代 → undefined(呼叫端保留既有強制態):惡意伺服器抑制政策無法偷降級,
         // 舊紀元政策(真簽但已被輪換作廢)也不採信,擋降級/升級重放。只有當代明確政策才決定 on/off。
         let requireSignedWrites: boolean | undefined;
-        if (msg.policy.length > 0) {
-          const pol = verifyVaultPolicy(msg.policy, opts.ownerPubSign, vaultId);
+        if (msg.policy.length > 0 && !staleFromPrevOwner(() => verifyVaultPolicy(msg.policy, ownerPubSign, vaultId), () => verifyVaultPolicy(msg.policy, prevOwnerPubSign!, vaultId), prevOwnerPubSign)) {
+          const pol = verifyVaultPolicy(msg.policy, ownerPubSign, vaultId);
           if (pol.epoch === env.epoch) requireSignedWrites = pol.requireSignedWrites;
         }
-        done({ status: "ready", root, epoch: env.epoch, role, spaceKeys, restrictedSpaceIds: msg.restrictedSpaceIds, requireSignedWrites });
+        done({ status: "ready", root, epoch: env.epoch, role, orgOwner, spaceKeys, restrictedSpaceIds: msg.restrictedSpaceIds, requireSignedWrites });
         break;
       }
       case "error":
@@ -236,4 +297,24 @@ function driveHandshake<T>(
     sock.onclose = () => fail(new Error("bootstrap 連線中斷"));
     sock.onerror = (err) => fail(err ?? new Error("bootstrap 連線錯誤"));
   });
+}
+
+/**
+ * 交接過渡的憑證判讀(3a):當代 owner 驗不過時,若組織明示背書了前任且該憑證確實是前任真簽,
+ * 回 true = 「陳舊,視同未簽發」(呼叫端 fallback 本地既知,不採信其內容);
+ * 兩把都驗不過即回 false,讓呼叫端照原路拋錯——偽造仍是硬錯誤,不因交接而放行。
+ */
+function staleFromPrevOwner(verifyCurrent: () => unknown, verifyPrev: () => unknown, prevOwnerPubSign: Uint8Array | undefined): boolean {
+  try {
+    verifyCurrent();
+    return false;
+  } catch {
+    if (!prevOwnerPubSign) return false;
+    try {
+      verifyPrev();
+      return true;
+    } catch {
+      return false;
+    }
+  }
 }

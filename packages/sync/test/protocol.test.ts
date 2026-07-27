@@ -59,6 +59,9 @@ const clientCases: ClientMessage[] = [
   { type: "memberCertPull", reqId: 19 },
   { type: "policyPush", reqId: 20, requireSigned: true, blob: new Uint8Array(67).fill(8) },
   { type: "policyPush", reqId: 21, requireSigned: false, blob: new Uint8Array() },
+  { type: "orgCertPush", reqId: 22, vaultId: "team-v", orgRootPubSign: new Uint8Array(32).fill(9), cert: new Uint8Array(101).fill(4) },
+  { type: "authOrg", token: "祕密-token-1234567890", orgId: "d".repeat(64), adminPubSign: new Uint8Array(32).fill(3), adminCert: new Uint8Array() },
+  { type: "authOrg", token: "祕密-token-1234567890", orgId: "e".repeat(64), adminPubSign: new Uint8Array(32).fill(4), adminCert: new Uint8Array(99).fill(2) },
 ];
 
 const serverCases: ServerMessage[] = [
@@ -91,7 +94,7 @@ const serverCases: ServerMessage[] = [
   { type: "shareAuthOk", docId: "doc-1", permission: "read", headSeq: 5, snapshotSeq: 3 },
   { type: "shareAuthOk", docId: "doc-2", permission: "write", headSeq: 0, snapshotSeq: 0 },
   { type: "authChallenge", nonce: new Uint8Array(32).fill(5) },
-  { type: "envelopeList", reqId: 8, envelopes: [], roleCred: new Uint8Array(), restrictedSpaceIds: [], policy: new Uint8Array() },
+  { type: "envelopeList", reqId: 8, envelopes: [], roleCred: new Uint8Array(), restrictedSpaceIds: [], policy: new Uint8Array(), orgTeamCert: new Uint8Array() },
   {
     type: "envelopeList",
     reqId: 8,
@@ -102,6 +105,7 @@ const serverCases: ServerMessage[] = [
     roleCred: new Uint8Array(67).fill(6),
     restrictedSpaceIds: ["space-1", "space-2"],
     policy: new Uint8Array(68).fill(7),
+    orgTeamCert: new Uint8Array(101).fill(4),
   },
   { type: "memberCatalog", reqId: 9, members: [] },
   {
@@ -118,6 +122,7 @@ const serverCases: ServerMessage[] = [
   { type: "keyRotated", epoch: 7 },
   { type: "memberCertList", reqId: 20, certs: [] },
   { type: "memberCertList", reqId: 21, certs: [new Uint8Array(99).fill(5), new Uint8Array(99).fill(9)] },
+  { type: "orgAuthOk", orgId: "f".repeat(64) },
 ];
 
 describe("同步協議編解碼", () => {

@@ -232,4 +232,43 @@ describe("SyncStore", () => {
     store.createShare("p1", "personal", "doc-9", "read");
     expect(store.resolveShare("p1")).toBeDefined();
   });
+
+  it("組織綁定:寫入後可讀回綁定與團隊憑證,serial 單調", () => {
+    const store = makeStore();
+    store.putOrgBinding("v1", "org-a", bytes(9, 9), bytes(1, 2, 3), 1, "owner-1");
+    const b = store.orgBinding("v1");
+    expect(b?.orgId).toBe("org-a");
+    expect(Array.from(b!.rootPubSign)).toEqual([9, 9]);
+    expect(b?.serial).toBe(1);
+    expect(Array.from(store.orgTeamCert("v1")!)).toEqual([1, 2, 3]);
+    store.putOrgBinding("v1", "org-a", bytes(9, 9), bytes(4, 5), 2, "owner-2");
+    expect(store.orgBinding("v1")?.serial).toBe(2);
+    expect(store.orgBinding("v1")?.ownerMemberId).toBe("owner-2");
+  });
+
+  it("未綁組織的 vault:orgBinding/orgTeamCert 皆 undefined(不誤報已綁)", () => {
+    const store = makeStore();
+    expect(store.orgBinding("v1")).toBeUndefined();
+    expect(store.orgTeamCert("v1")).toBeUndefined();
+  });
+
+  it("transferOwner:換 owner 並把新舊 owner 的角色一併搬正", () => {
+    const store = makeStore();
+    store.enrollMember("v1", "m-old", bytes(1), bytes(2), "viewer");
+    store.enrollMember("v1", "m-new", bytes(3), bytes(4), "editor");
+    store.claimOwner("v1", "m-old");
+    expect(store.transferOwner("v1", "m-new")).toBe(true);
+    expect(store.ownerOf("v1")).toBe("m-new");
+    expect(store.getMember("v1", "m-new")?.role).toBe("owner");
+    // 舊 owner 不被踢出團隊,只降為 editor(他仍持有 root、仍是成員)
+    expect(store.getMember("v1", "m-old")?.role).toBe("editor");
+  });
+
+  it("transferOwner 指向非成員回 false(不製造無公鑰的幽靈 owner)", () => {
+    const store = makeStore();
+    store.enrollMember("v1", "m-old", bytes(1), bytes(2), "viewer");
+    store.claimOwner("v1", "m-old");
+    expect(store.transferOwner("v1", "nobody")).toBe(false);
+    expect(store.ownerOf("v1")).toBe("m-old");
+  });
 });

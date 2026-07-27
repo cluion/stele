@@ -1200,6 +1200,7 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
   const [members, setMembers] = useState<TeamMember[]>([]);
   // 金鑰輪換(2c-2)結果:移除後自動輪換或手動輪換的成敗提示
   const [rotateNote, setRotateNote] = useState<{ ok: boolean; reason?: string } | null>(null);
+  const [orgBundle, setOrgBundle] = useState(""); // 組織綁定碼(3a),owner 貼上後綁定
   // 空間存取(per-space 成員子集):空間清單與編輯中的名單
   const [spacesList, setSpacesList] = useState<SpaceInfo[]>([]);
   const [accessEdit, setAccessEdit] = useState<{ spaceId: string; picked: Set<string> } | null>(null);
@@ -1283,6 +1284,23 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
     if (enabled && !window.confirm(t("team.signing.confirm"))) return;
     run(async () => {
       await window.stele.teamSetRequireSigned(enabled);
+      reload();
+    });
+  };
+  /** owner 把團隊綁到組織(3a):貼上組織給的綁定碼,信任錨自此上提到組織根 */
+  const bindOrg = (): void => {
+    const bundle = orgBundle.trim();
+    if (bundle.length === 0 || !window.confirm(t("team.org.confirm"))) return;
+    run(async () => {
+      await window.stele.teamBindOrg(bundle);
+      setOrgBundle("");
+      reload();
+    });
+  };
+  /** 新 owner 接管重簽:以自己的簽章重發全員信封與憑證,前任簽章即刻失效 */
+  const takeover = (): void => {
+    run(async () => {
+      await window.stele.teamTakeover();
       reload();
     });
   };
@@ -1422,6 +1440,37 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
                 />
                 <span>{info.requireSigned ? t("team.signing.on") : t("team.signing.off")}</span>
               </label>
+            </section>
+            <section className="team-section">
+              <h3>{t("team.org.title")}</h3>
+              <p className="placeholder">{t("team.org.hint")}</p>
+              <p className="placeholder">{t("team.org.myKey", { key: info.myPubSign })}</p>
+              {info.orgId ? (
+                <>
+                  <p className="placeholder">{t("team.org.bound", { orgId: info.orgId.slice(0, 12), serial: String(info.orgSerial) })}</p>
+                  {info.takeoverNeeded && (
+                    <div className="team-rotate-row">
+                      <p className="error">{t("team.org.takeoverHint")}</p>
+                      <button disabled={busy} onClick={takeover}>
+                        {t("team.org.takeover")}
+                      </button>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="team-invite-row">
+                  <input
+                    type="text"
+                    value={orgBundle}
+                    placeholder={t("team.org.placeholder")}
+                    disabled={busy}
+                    onChange={(e) => setOrgBundle(e.target.value)}
+                  />
+                  <button disabled={busy || orgBundle.trim().length === 0} onClick={bindOrg}>
+                    {t("team.org.bind")}
+                  </button>
+                </div>
+              )}
             </section>
             <section className="team-section">
               <h3>{t("team.spaces.title")}</h3>

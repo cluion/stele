@@ -168,7 +168,7 @@ export class SyncClient {
   /** 強制簽章模式(P4 §7.3):true 時 unsigned 寫入一律拒;由 owner 簽章的 vault 政策驅動,可熱更新 */
   private requireSigned: boolean;
 
-  constructor(private readonly opts: SyncClientOptions) {
+  constructor(private opts: SyncClientOptions) {
     this.cipher = opts.cipher ?? identityCipher;
     this.epoch = opts.epoch ?? 0;
     this.requireSigned = opts.requireSignedWrites ?? false;
@@ -180,6 +180,18 @@ export class SyncClient {
    */
   setRequireSignedWrites(enabled: boolean): void {
     this.requireSigned = enabled;
+  }
+
+  /**
+   * 熱換信任錨(3a):組織撤換團隊 owner 後,成員端的當代 owner 公鑰隨之改變。
+   * 不換的話,新 owner 重簽的成員目錄會被整份判為偽造、所有寫入被 poison-skip——執行中的連線必須跟上。
+   * 換錨即清空目錄並重拉:舊錨驗出來的成員資料一律不留(可能是前任才背書的組合)。
+   */
+  setOwnerPubSign(ownerPubSign: Uint8Array): void {
+    if (this.opts.ownerPubSign && Buffer.from(this.opts.ownerPubSign).equals(Buffer.from(ownerPubSign))) return;
+    this.opts = { ...this.opts, ownerPubSign };
+    this.memberDir.clear();
+    void this.pullDirectory();
   }
 
   /**
