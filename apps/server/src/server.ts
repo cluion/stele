@@ -12,6 +12,7 @@ import {
   verifyOrgTeamCert,
   orgIdFromRootPubSign,
   orgMemberCertSerial,
+  orgPolicyFields,
   type ClientMessage,
   type ServerMessage,
   type MemberRole,
@@ -568,6 +569,11 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
             restrictedSpaceIds: opts.store.restrictedSpaceIds(vault),
             policy: opts.store.vaultPolicy(vault) ?? new Uint8Array(),
             orgTeamCert: opts.store.orgTeamCert(vault) ?? new Uint8Array(),
+            orgPolicy: (() => {
+              const b = opts.store.orgBinding(vault);
+              return (b && opts.store.orgPolicy(b.orgId)) ?? new Uint8Array();
+            })(),
+            rotationRequested: opts.store.pendingRotation(vault),
           });
           break;
         case "envelopePush": {
@@ -658,6 +664,7 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
             refuse("bad-epoch", "epoch 須恰為當前+1");
             return;
           }
+          opts.store.setPendingRotation(vault, false); // 組織要求的輪換已完成
           const rotated = encodeServerMessage({ type: "keyRotated", epoch: msg.epoch });
           for (const peer of vaults.get(vault) ?? []) {
             if (peer.readyState !== WebSocket.OPEN) continue;
@@ -694,8 +701,14 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         send({ type: "orgMemberCertList", reqId: msg.reqId, entries: binding ? opts.store.listOrgMemberCerts(binding.orgId) : [] });
         return;
       }
-      if (msg.type === "orgMemberCertPush" || msg.type === "orgVaultList" || msg.type === "orgMemberList") {
-        refuse("forbidden", "名冊與跨團隊總覽僅限組織管理連線");
+      if (
+        msg.type === "orgMemberCertPush" ||
+        msg.type === "orgVaultList" ||
+        msg.type === "orgMemberList" ||
+        msg.type === "orgRevoke" ||
+        msg.type === "orgPolicyPush"
+      ) {
+        refuse("forbidden", "組織治理動作僅限組織管理連線");
         return;
       }
       if (msg.type === "orgCertPush") {
@@ -792,7 +805,7 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         scope === undefined &&
         (msg.type === "push" || msg.type === "snapshotPush") &&
         opts.store.ownerOf(vault) !== undefined &&
-        opts.store.requiresSignedWrites(vault) &&
+        opts.store.requiresSignedWritesEffective(vault) &&
         msg.authorMemberId === ""
       ) {
         send({ type: "error", code: "signature-required", message: "此團隊要求簽章寫入,請升級用戶端" });
@@ -898,6 +911,42 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
               return;
             }
             send({ type: "memberCatalog", reqId: msg.reqId, members: opts.store.listMembers(msg.vaultId) });
+          } else if (msg.type === "orgRevoke") {
+            /**
+             * 一次全撤(離職):把此人從本組織每個團隊移除、當場踢線,並標記各團隊待輪換。
+             * **跳過他是擁有者的團隊**——移除擁有者會讓該團隊無人簽得動憑證與信封;
+             * 組織應先指派新擁有者(orgCertPush)再撤,回報中明列這些團隊供管理員處理。
+             */
+            if (!validId(msg.memberId)) {
+              refuse("bad-message", "非法 member id");
+              return;
+            }
+            const removed: string[] = [];
+            const skippedOwner: string[] = [];
+            for (const v of opts.store.vaultsOfOrg(orgScope.orgId)) {
+              if (!opts.store.getMember(v.vaultId, msg.memberId)) continue;
+              if (opts.store.ownerOf(v.vaultId) === msg.memberId) {
+                skippedOwner.push(v.vaultId);
+                continue;
+              }
+              opts.store.removeMember(v.vaultId, msg.memberId);
+              // 移除只切斷伺服器層存取;被撤者手上的舊 root 要靠輪換才作廢,故標記催促擁有者
+              opts.store.setPendingRotation(v.vaultId, true);
+              kickMember(v.vaultId, msg.memberId, "removed", "已被組織移出此團隊");
+              removed.push(v.vaultId);
+            }
+            send({ type: "orgRevokeResult", reqId: msg.reqId, removed, skippedOwner });
+          } else if (msg.type === "orgPolicyPush") {
+            const fields = orgPolicyFields(msg.blob);
+            if (!fields) {
+              refuse("bad-message", "組織政策格式錯誤");
+              return;
+            }
+            if (!opts.store.putOrgPolicy(orgScope.orgId, msg.blob, fields.requireSignedWrites, fields.serial)) {
+              refuse("stale-cert", "組織政策序號須遞增");
+              return;
+            }
+            send({ type: "ok", reqId: msg.reqId });
           } else if (msg.type === "orgMemberCertPull") {
             send({ type: "orgMemberCertList", reqId: msg.reqId, entries: opts.store.listOrgMemberCerts(orgScope.orgId) });
           } else refuse("forbidden", "組織管理連線僅可治理,不得存取內容");

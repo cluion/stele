@@ -1,7 +1,7 @@
 import { encodeClientMessage, decodeServerMessage, type ClientMessage, type ServerMessage, type MemberInfo } from "./protocol.ts";
 import type { SocketLike } from "./client.ts";
 import type { SyncIdentity } from "./identity.ts";
-import { orgChallengeBytes, orgIdFromRootPubSign, signOrgTeamCert, signOrgMemberCert } from "./org-credential.ts";
+import { orgChallengeBytes, orgIdFromRootPubSign, signOrgTeamCert, signOrgMemberCert, signOrgPolicy } from "./org-credential.ts";
 
 /**
  * 組織管理連線(3a):org admin 對**組織根**證明身分後取得的連線,只能治理、碰不到任何 doc 內容。
@@ -136,6 +136,25 @@ export class OrgAdminSession {
   async members(vaultId: string): Promise<MemberInfo[]> {
     const msg = await this.request((reqId) => ({ type: "orgMemberList", reqId, vaultId }), "memberCatalog");
     return msg.members;
+  }
+
+  /**
+   * 一次全撤(3b-2):把某人從本組織**所有**團隊移除並當場踢線。
+   * 回報 removed(已移除)與 skippedOwner(他是該團隊擁有者而略過——請先指派新擁有者再撤)。
+   * 移除是伺服器層即時生效;被撤者手上的舊 root 要各團隊擁有者輪換才作廢,伺服器已標記催促。
+   */
+  async revokeEverywhere(memberId: string): Promise<{ removed: string[]; skippedOwner: string[] }> {
+    const msg = await this.request((reqId) => ({ type: "orgRevoke", reqId, memberId }), "orgRevokeResult");
+    return { removed: msg.removed, skippedOwner: msg.skippedOwner };
+  }
+
+  /**
+   * 下發組織政策(3b-2):與各團隊自己的政策**取較嚴者**,組織只能加嚴不能放寬。
+   * serial 須大於伺服器已存的(反回滾)。
+   */
+  async setRequireSignedWrites(enabled: boolean, serial: number): Promise<void> {
+    const blob = signOrgPolicy(this.identity.sign, { requireSignedWrites: enabled, serial }, this.adminCert.length > 0 ? this.adminCert : undefined);
+    await this.request((reqId) => ({ type: "orgPolicyPush", reqId, requireSigned: enabled, blob }), "ok");
   }
 
   close(): void {

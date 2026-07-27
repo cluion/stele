@@ -4,7 +4,7 @@ import { identityChallengeBytes, type SyncIdentity } from "./identity.ts";
 import { wrapKey, type WrapContext } from "./crypto.ts";
 import { verifyRoleCredential, signMemberCredential } from "./role-credential.ts";
 import { verifyVaultPolicy } from "./vault-policy.ts";
-import { verifyOrgTeamCert } from "./org-credential.ts";
+import { verifyOrgTeamCert, verifyOrgPolicy } from "./org-credential.ts";
 
 /**
  * 團隊 vault 的金鑰 bootstrap(2b):在建 SyncManager **之前**跑完的獨立握手。
@@ -77,6 +77,8 @@ export type TeamBootstrapResult =
        * 不把「政策缺席」當成關閉,擋惡意伺服器以抑制政策偷降級已 pin 的成員。
        */
       requireSignedWrites: boolean | undefined;
+      /** 組織要求輪換金鑰(3b-2):擁有者端據此提示;非擁有者無從處理,UI 不必顯示 */
+      rotationRequested: boolean;
     }
   | { status: "pending" };
 
@@ -169,12 +171,29 @@ export function bootstrapTeamKey(opts: TeamBootstrapOptions): Promise<TeamBootst
         // Vault 政策(§7.3):驗 owner 簽章;偽造/挪用即拋(擋盲中繼捏造政策)。
         // 政策缺席或非當代 → undefined(呼叫端保留既有強制態):惡意伺服器抑制政策無法偷降級,
         // 舊紀元政策(真簽但已被輪換作廢)也不採信,擋降級/升級重放。只有當代明確政策才決定 on/off。
+        // 組織政策(3b-2):與團隊政策**取較嚴者**——任一開啟即開啟。組織只能加嚴不能放寬,
+        // 否則一張真簽但寬鬆的組織政策就能鬆綁團隊已開啟的強制簽章。偽簽即拋(擋伺服器捏造)
+        let orgRequireSigned: boolean | undefined;
+        if (opts.orgRootPubSign && msg.orgPolicy.length > 0) {
+          orgRequireSigned = verifyOrgPolicy(msg.orgPolicy, opts.orgRootPubSign, Math.floor(Date.now() / 1000)).requireSignedWrites;
+        }
         let requireSignedWrites: boolean | undefined;
         if (msg.policy.length > 0 && !staleFromPrevOwner(() => verifyVaultPolicy(msg.policy, ownerPubSign, vaultId), () => verifyVaultPolicy(msg.policy, prevOwnerPubSign!, vaultId), prevOwnerPubSign)) {
           const pol = verifyVaultPolicy(msg.policy, ownerPubSign, vaultId);
           if (pol.epoch === env.epoch) requireSignedWrites = pol.requireSignedWrites;
         }
-        done({ status: "ready", root, epoch: env.epoch, role, orgOwner, spaceKeys, restrictedSpaceIds: msg.restrictedSpaceIds, requireSignedWrites });
+        done({
+          status: "ready",
+          root,
+          epoch: env.epoch,
+          role,
+          orgOwner,
+          spaceKeys,
+          restrictedSpaceIds: msg.restrictedSpaceIds,
+          // 取較嚴:組織開啟即開啟;組織未設(undefined)則由團隊政策決定(缺席仍保留呼叫端 pin)
+          requireSignedWrites: orgRequireSigned === true ? true : requireSignedWrites,
+          rotationRequested: msg.rotationRequested,
+        });
         break;
       }
       case "error":

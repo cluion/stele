@@ -89,6 +89,11 @@ export type ClientMessage =
   // 跨團隊總覽(3b-1,組織連線限定):列本組織的 vault,及某 vault 的成員
   | { type: "orgVaultList"; reqId: number }
   | { type: "orgMemberList"; reqId: number; vaultId: string }
+  // 一次全撤(3b-2,組織連線限定):把某人從本組織**所有**團隊移除並當場踢線,各團隊標記待輪換。
+  // 移除是伺服器層、即時生效;金鑰輪換需要 root,只有各團隊擁有者做得到,故以旗標催促而非阻擋營運
+  | { type: "orgRevoke"; reqId: number; memberId: string }
+  // 組織政策(3b-2,組織連線限定):與團隊政策取較嚴者下發
+  | { type: "orgPolicyPush"; reqId: number; requireSigned: boolean; blob: Uint8Array }
   // doc 寫入帶 client epoch(2c-2 寫入柵欄):team vault 上伺服器拒 epoch≠當前,
   // 防止輪換窗口內舊 root 密文污染共享日誌;個人 vault/share 連線恆送 0(不套柵欄)。
   // authorMemberId + sig(P4 第二階段):作者對此寫入的簽章,收件端查目錄驗;個人/未簽 vault 送空字串 + 空陣列
@@ -142,6 +147,13 @@ export type ServerMessage =
       restrictedSpaceIds: string[];
       policy: Uint8Array;
       orgTeamCert: Uint8Array;
+      /** 組織政策 blob(3b-2);空 = 未綁組織或組織未設。與團隊政策取較嚴者 */
+      orgPolicy: Uint8Array;
+      /**
+       * 組織要求輪換金鑰(3b-2):組織一次全撤只切斷了伺服器層存取,被撤者手上的舊 root
+       * 要輪換才作廢——而輪換需要 root,只有擁有者做得到。明碼旗標,純催促用途,非安全邊界。
+       */
+      rotationRequested: boolean;
     }
   | { type: "memberCatalog"; reqId: number; members: MemberInfo[] }
   | { type: "enrollCreated"; reqId: number; token: string }
@@ -155,6 +167,9 @@ export type ServerMessage =
   | { type: "orgMemberCertList"; reqId: number; entries: { memberId: string; blob: Uint8Array }[] }
   // 跨團隊總覽回覆(3b-1):管理平面資料,不含任何金鑰
   | { type: "orgVaultCatalog"; reqId: number; vaults: { vaultId: string; ownerMemberId: string; memberCount: number; serial: number }[] }
+  // 一次全撤的結果:removed = 已移除的團隊;skippedOwner = 因對方是該團隊擁有者而略過的團隊
+  // (移除擁有者會讓團隊無人能簽發憑證與信封;組織應先指派新擁有者再撤)
+  | { type: "orgRevokeResult"; reqId: number; removed: string[]; skippedOwner: string[] }
   // 組織管理連線認證成功(3a):此連線只能治理(推團隊憑證),doc 內容一律拒——管理平面與金鑰平面分離
   | { type: "orgAuthOk"; orgId: string };
 
@@ -189,6 +204,8 @@ const CLIENT_TAG = {
   orgMemberCertPull: 27,
   orgVaultList: 28,
   orgMemberList: 29,
+  orgRevoke: 30,
+  orgPolicyPush: 31,
 } as const;
 const SERVER_TAG = {
   authOk: 0,
@@ -211,6 +228,7 @@ const SERVER_TAG = {
   orgAuthOk: 17,
   orgMemberCertList: 18,
   orgVaultCatalog: 19,
+  orgRevokeResult: 20,
 } as const;
 
 const PERM_TAG: Record<SharePermission, number> = { read: 0, write: 1 };
@@ -310,6 +328,15 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
     case "orgMemberList":
       encoding.writeVarUint(enc, msg.reqId);
       encoding.writeVarString(enc, msg.vaultId);
+      break;
+    case "orgRevoke":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarString(enc, msg.memberId);
+      break;
+    case "orgPolicyPush":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarUint(enc, msg.requireSigned ? 1 : 0);
+      encoding.writeVarUint8Array(enc, msg.blob);
       break;
     case "authOrg":
       encoding.writeVarString(enc, msg.token);
@@ -449,6 +476,15 @@ export function decodeClientMessage(data: Uint8Array): ClientMessage {
       return { type: "orgVaultList", reqId: decoding.readVarUint(dec) };
     case CLIENT_TAG.orgMemberList:
       return { type: "orgMemberList", reqId: decoding.readVarUint(dec), vaultId: decoding.readVarString(dec) };
+    case CLIENT_TAG.orgRevoke:
+      return { type: "orgRevoke", reqId: decoding.readVarUint(dec), memberId: decoding.readVarString(dec) };
+    case CLIENT_TAG.orgPolicyPush:
+      return {
+        type: "orgPolicyPush",
+        reqId: decoding.readVarUint(dec),
+        requireSigned: decoding.readVarUint(dec) === 1,
+        blob: readPayload(dec),
+      };
     case CLIENT_TAG.authOrg:
       return {
         type: "authOrg",
@@ -582,6 +618,8 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
       for (const id of msg.restrictedSpaceIds) encoding.writeVarString(enc, id);
       encoding.writeVarUint8Array(enc, msg.policy);
       encoding.writeVarUint8Array(enc, msg.orgTeamCert);
+      encoding.writeVarUint8Array(enc, msg.orgPolicy);
+      encoding.writeVarUint(enc, msg.rotationRequested ? 1 : 0);
       break;
     case "memberCatalog":
       encoding.writeVarUint(enc, msg.reqId);
@@ -614,6 +652,13 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
         encoding.writeVarString(enc, e.memberId);
         encoding.writeVarUint8Array(enc, e.blob);
       }
+      break;
+    case "orgRevokeResult":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarUint(enc, msg.removed.length);
+      for (const v of msg.removed) encoding.writeVarString(enc, v);
+      encoding.writeVarUint(enc, msg.skippedOwner.length);
+      for (const v of msg.skippedOwner) encoding.writeVarString(enc, v);
       break;
     case "orgVaultCatalog":
       encoding.writeVarUint(enc, msg.reqId);
@@ -724,7 +769,9 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
       for (let i = 0; i < spaceCount; i++) restrictedSpaceIds.push(decoding.readVarString(dec));
       const policy = readPayload(dec);
       const orgTeamCert = readPayload(dec);
-      return { type: "envelopeList", reqId, envelopes, roleCred, restrictedSpaceIds, policy, orgTeamCert };
+      const orgPolicy = readPayload(dec);
+      const rotationRequested = decoding.readVarUint(dec) === 1;
+      return { type: "envelopeList", reqId, envelopes, roleCred, restrictedSpaceIds, policy, orgTeamCert, orgPolicy, rotationRequested };
     }
     case SERVER_TAG.memberCatalog: {
       const reqId = decoding.readVarUint(dec);
@@ -755,6 +802,17 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
       const entries: { memberId: string; blob: Uint8Array }[] = [];
       for (let i = 0; i < count; i++) entries.push({ memberId: decoding.readVarString(dec), blob: readPayload(dec) });
       return { type: "orgMemberCertList", reqId, entries };
+    }
+    case SERVER_TAG.orgRevokeResult: {
+      const reqId = decoding.readVarUint(dec);
+      const readList = (): string[] => {
+        const n = decoding.readVarUint(dec);
+        const out: string[] = [];
+        for (let i = 0; i < n; i++) out.push(decoding.readVarString(dec));
+        return out;
+      };
+      const removed = readList();
+      return { type: "orgRevokeResult", reqId, removed, skippedOwner: readList() };
     }
     case SERVER_TAG.orgVaultCatalog: {
       const reqId = decoding.readVarUint(dec);

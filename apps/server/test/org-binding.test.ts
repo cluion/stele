@@ -378,6 +378,95 @@ describe("組織綁定與跨團隊撤換 owner(3a)", () => {
     await expect(org.members("org-overview-out")).rejects.toThrow(/forbidden|不屬於本組織/);
   });
 
+  it("一次全撤:跨團隊即時移除並踢線,擁有者的團隊被略過並回報,各團隊標記待輪換", async () => {
+    const orgRoot = await deriveIdentity(generateSeed());
+    const t1 = await setupTeam("revoke-1");
+    const t2 = await setupTeam("revoke-2");
+    // 讓 t1 的成員也加入 t2,模擬「同一個人在多團隊」(身分本來就跨 vault 全域)
+    const tok = await t2.admin.inviteToken(3600, "editor");
+    await bootstrapTeamKey({
+      url: url(),
+      token: TOKEN,
+      vaultId: "revoke-2",
+      identity: t1.member,
+      ownerPubSign: t2.owner.pubSign,
+      enrollmentToken: tok,
+      createSocket: wsSocket,
+    });
+    await t2.admin.approve((await t2.admin.members()).find((m) => m.memberId === t1.member.memberId)!, t2.root, 0);
+    for (const [t, id] of [
+      [t1, "revoke-1"],
+      [t2, "revoke-2"],
+    ] as const) {
+      await t.admin.bindOrg(orgRoot.pubSign, signOrgTeamCert(orgRoot.sign, { vaultId: id, ownerPubSign: t.owner.pubSign, serial: 1 }, undefined));
+      t.admin.close();
+    }
+    // 第三個團隊:此人正是擁有者,全撤應略過它並回報
+    const t3 = await setupTeam("revoke-3");
+    await t3.admin.bindOrg(orgRoot.pubSign, signOrgTeamCert(orgRoot.sign, { vaultId: "revoke-3", ownerPubSign: t3.owner.pubSign, serial: 1 }, undefined));
+    t3.admin.close();
+
+    // 離職者維持一條活躍連線,全撤應當場斷掉
+    const live = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId: "revoke-1", identity: t1.member, createSocket: wsSocket });
+    await expect(live.memberDirectory(t1.owner.pubSign)).resolves.toBeInstanceOf(Array);
+
+    const org = await OrgAdminSession.open({ url: url(), token: TOKEN, orgRootPubSign: orgRoot.pubSign, identity: orgRoot, createSocket: wsSocket });
+    const res = await org.revokeEverywhere(t1.member.memberId);
+    expect(res.removed.sort()).toEqual(["revoke-1", "revoke-2"]);
+    expect(res.skippedOwner).toEqual([]); // 此人不是任何團隊的擁有者
+
+    // 兩個團隊都已移除、都標記待輪換(舊 root 要輪換才作廢,而輪換只有擁有者做得到)
+    for (const v of ["revoke-1", "revoke-2"]) {
+      expect(store.getMember(v, t1.member.memberId)).toBeUndefined();
+      expect(store.pendingRotation(v)).toBe(true);
+    }
+    // 活躍連線當場被踢
+    await expect(live.memberDirectory(t1.owner.pubSign)).rejects.toThrow(/中斷|已關閉|removed/);
+
+    // 被撤者重連即被拒(邀請碼已消耗,重新加入需新碼)
+    await expect(
+      bootstrapTeamKey({ url: url(), token: TOKEN, vaultId: "revoke-1", identity: t1.member, ownerPubSign: t1.owner.pubSign, createSocket: wsSocket }),
+    ).rejects.toThrow(/enroll-required|邀請碼/);
+
+    // 擁有者輪換後旗標自動清除
+    const ownerAdmin = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId: "revoke-1", identity: t1.owner, createSocket: wsSocket });
+    await ownerAdmin.approve((await ownerAdmin.members()).find((m) => m.memberId === t1.owner.memberId)!, new Uint8Array(32).fill(7), 1);
+    await ownerAdmin.rotateKey(1);
+    ownerAdmin.close();
+    expect(store.pendingRotation("revoke-1")).toBe(false);
+
+    // 撤到擁有者身上:略過並回報,團隊不會被斬首
+    const res2 = await org.revokeEverywhere(t3.owner.memberId);
+    expect(res2.skippedOwner).toEqual(["revoke-3"]);
+    expect(store.ownerOf("revoke-3")).toBe(t3.owner.memberId);
+    org.close();
+  });
+
+  it("組織政策與團隊政策取較嚴者:組織開啟即全組織生效,且不能放寬團隊已開的", async () => {
+    const vaultId = "org-policy";
+    const orgRoot = await deriveIdentity(generateSeed());
+    const { owner, member, admin } = await setupTeam(vaultId);
+    await admin.bindOrg(orgRoot.pubSign, signOrgTeamCert(orgRoot.sign, { vaultId, ownerPubSign: owner.pubSign, serial: 1 }, undefined));
+
+    // 團隊自己沒開,組織開 → 成員端生效
+    const org = await OrgAdminSession.open({ url: url(), token: TOKEN, orgRootPubSign: orgRoot.pubSign, identity: orgRoot, createSocket: wsSocket });
+    await org.setRequireSignedWrites(true, 1);
+    const res = await bootstrap(vaultId, member, owner.pubSign, { root: orgRoot.pubSign });
+    expect(res.status === "ready" && res.requireSignedWrites).toBe(true);
+    expect(store.requiresSignedWritesEffective(vaultId)).toBe(true);
+
+    // 團隊自己開、組織關 → 仍是開(組織只能加嚴,不能放寬團隊的決定)
+    await admin.setRequireSignedWrites(true, 0);
+    await org.setRequireSignedWrites(false, 2);
+    const res2 = await bootstrap(vaultId, member, owner.pubSign, { root: orgRoot.pubSign });
+    expect(res2.status === "ready" && res2.requireSignedWrites).toBe(true);
+
+    // 政策序號不得回退
+    await expect(org.setRequireSignedWrites(true, 2)).rejects.toThrow(/stale-cert|序號須遞增/);
+    org.close();
+    admin.close();
+  });
+
   it("未知組織不得認證(不讓人憑空宣稱組織身分)", async () => {
     const strangerRoot = await deriveIdentity(generateSeed());
     await expect(

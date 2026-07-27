@@ -327,6 +327,100 @@ export function verifyOrgMemberCert(blob: Uint8Array, orgRootPubSign: Uint8Array
   };
 }
 
+/**
+ * 組織政策(3b-2):組織對全組織下發的安全開關。
+ *
+ * 與團隊自己的 vault 政策**取較嚴者**——組織只能加嚴、不能放寬。這是刻意的:
+ * 若允許放寬,惡意伺服器就能拿一張(真簽的)寬鬆組織政策去鬆綁某個團隊已開啟的強制簽章。
+ *
+ * blob 格式:[版本 varuint][flags varuint][serial varuint][adminCert 長度前綴][簽發者簽章 64B]
+ * 旗標位元同 vault 政策:bit 0 = 強制簽章寫入。
+ */
+
+const ORG_POLICY_VERSION = 1;
+const ORG_POLICY_DOMAIN = new TextEncoder().encode("stele-org-policy-v1");
+const ORG_FLAG_REQUIRE_SIGNED = 1;
+
+export interface OrgPolicyClaims {
+  requireSignedWrites: boolean;
+  /** 單調序號:政策的反回滾水位(與團隊憑證、名冊各自獨立) */
+  serial: number;
+}
+
+export interface VerifiedOrgPolicy {
+  requireSignedWrites: boolean;
+  serial: number;
+  issuerMemberId: string;
+}
+
+function orgPolicyBytes(flags: number, serial: number): Uint8Array {
+  const enc = encoding.createEncoder();
+  encoding.writeVarUint8Array(enc, ORG_POLICY_DOMAIN);
+  encoding.writeVarUint(enc, flags);
+  encoding.writeVarUint(enc, serial);
+  return encoding.toUint8Array(enc);
+}
+
+/** 簽發組織政策;adminCert 省略 = org root 直簽 */
+export function signOrgPolicy(
+  issuerSign: (message: Uint8Array) => Uint8Array,
+  claims: OrgPolicyClaims,
+  adminCert: Uint8Array | undefined,
+): Uint8Array {
+  const flags = claims.requireSignedWrites ? ORG_FLAG_REQUIRE_SIGNED : 0;
+  const enc = encoding.createEncoder();
+  encoding.writeVarUint(enc, ORG_POLICY_VERSION);
+  encoding.writeVarUint(enc, flags);
+  encoding.writeVarUint(enc, claims.serial);
+  encoding.writeVarUint8Array(enc, adminCert ?? new Uint8Array());
+  const head = encoding.toUint8Array(enc);
+  const sig = issuerSign(orgPolicyBytes(flags, claims.serial));
+  const out = new Uint8Array(head.length + SIG_LEN);
+  out.set(head, 0);
+  out.set(sig, head.length);
+  return out;
+}
+
+/** 驗組織政策:確立簽發者(root 或未過期委任)後驗簽;偽簽/竄改/過期/截斷一律拋 */
+export function verifyOrgPolicy(blob: Uint8Array, orgRootPubSign: Uint8Array, nowSec: number): VerifiedOrgPolicy {
+  const dec = decoding.createDecoder(blob);
+  let flags: number;
+  let serial: number;
+  let adminCert: Uint8Array;
+  try {
+    const version = decoding.readVarUint(dec);
+    if (version !== ORG_POLICY_VERSION) throw new Error(`未知的組織政策版本:${version}`);
+    flags = decoding.readVarUint(dec);
+    serial = decoding.readVarUint(dec);
+    adminCert = decoding.readVarUint8Array(dec);
+  } catch (err) {
+    throw err instanceof Error && err.message.startsWith("未知的組織政策版本") ? err : new Error("組織政策不完整");
+  }
+  const sig = blob.slice(dec.pos);
+  if (sig.length !== SIG_LEN) throw new Error("組織政策不完整");
+  const issuer =
+    adminCert.length === 0
+      ? { pubSign: orgRootPubSign, memberId: memberIdFromPubSign(orgRootPubSign) }
+      : (() => {
+          const v = verifyOrgAdminCert(adminCert, orgRootPubSign, nowSec);
+          return { pubSign: v.adminPubSign, memberId: v.adminMemberId };
+        })();
+  if (!verifyEd(sig, orgPolicyBytes(flags, serial), issuer.pubSign)) throw new Error("組織政策簽章驗證失敗");
+  return { requireSignedWrites: (flags & ORG_FLAG_REQUIRE_SIGNED) !== 0, serial, issuerMemberId: issuer.memberId };
+}
+
+/** 只取組織政策的序號與旗標,不驗簽(供伺服器單調把關與自身縱深防禦);格式不符回 undefined */
+export function orgPolicyFields(blob: Uint8Array): { requireSignedWrites: boolean; serial: number } | undefined {
+  try {
+    const dec = decoding.createDecoder(blob);
+    if (decoding.readVarUint(dec) !== ORG_POLICY_VERSION) return undefined;
+    const flags = decoding.readVarUint(dec);
+    return { requireSignedWrites: (flags & ORG_FLAG_REQUIRE_SIGNED) !== 0, serial: decoding.readVarUint(dec) };
+  } catch {
+    return undefined;
+  }
+}
+
 /** 組織管理連線的 challenge 域:與 vault 的 stele-auth-v1 分開,擋「對某 vault 的證明被挪用為組織管理權」 */
 const ORG_AUTH_DOMAIN = new TextEncoder().encode("stele-org-auth-v1");
 

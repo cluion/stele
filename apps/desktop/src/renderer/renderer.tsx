@@ -1439,6 +1439,7 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
                   {busy ? t("team.rotate.busy") : t("team.rotate.button")}
                 </button>
               </div>
+              {info.rotationRequested && <p className="error">{t("team.rotate.orgRequested")}</p>}
               {rotateNote && (
                 <p className={rotateNote.ok ? "placeholder" : "error"}>
                   {rotateNote.ok ? t("team.rotate.done") : t("team.rotate.failed", { reason: rotateNote.reason ?? "" })}

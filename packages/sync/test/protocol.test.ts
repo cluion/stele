@@ -66,6 +66,8 @@ const clientCases: ClientMessage[] = [
   { type: "orgMemberCertPull", reqId: 24 },
   { type: "orgVaultList", reqId: 25 },
   { type: "orgMemberList", reqId: 26, vaultId: "team-v" },
+  { type: "orgRevoke", reqId: 31, memberId: "c".repeat(64) },
+  { type: "orgPolicyPush", reqId: 32, requireSigned: true, blob: new Uint8Array(70).fill(3) },
 ];
 
 const serverCases: ServerMessage[] = [
@@ -98,7 +100,7 @@ const serverCases: ServerMessage[] = [
   { type: "shareAuthOk", docId: "doc-1", permission: "read", headSeq: 5, snapshotSeq: 3 },
   { type: "shareAuthOk", docId: "doc-2", permission: "write", headSeq: 0, snapshotSeq: 0 },
   { type: "authChallenge", nonce: new Uint8Array(32).fill(5) },
-  { type: "envelopeList", reqId: 8, envelopes: [], roleCred: new Uint8Array(), restrictedSpaceIds: [], policy: new Uint8Array(), orgTeamCert: new Uint8Array() },
+  { type: "envelopeList", reqId: 8, envelopes: [], roleCred: new Uint8Array(), restrictedSpaceIds: [], policy: new Uint8Array(), orgTeamCert: new Uint8Array(), orgPolicy: new Uint8Array(), rotationRequested: false },
   {
     type: "envelopeList",
     reqId: 8,
@@ -110,6 +112,8 @@ const serverCases: ServerMessage[] = [
     restrictedSpaceIds: ["space-1", "space-2"],
     policy: new Uint8Array(68).fill(7),
     orgTeamCert: new Uint8Array(101).fill(4),
+    orgPolicy: new Uint8Array(70).fill(3),
+    rotationRequested: true,
   },
   { type: "memberCatalog", reqId: 9, members: [] },
   {
@@ -137,6 +141,8 @@ const serverCases: ServerMessage[] = [
     ],
   },
   { type: "orgVaultCatalog", reqId: 29, vaults: [] },
+  { type: "orgRevokeResult", reqId: 33, removed: [], skippedOwner: [] },
+  { type: "orgRevokeResult", reqId: 34, removed: ["t1", "t2"], skippedOwner: ["t3"] },
   {
     type: "orgVaultCatalog",
     reqId: 30,

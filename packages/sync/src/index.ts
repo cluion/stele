@@ -78,12 +78,17 @@ export {
   signOrgMemberCert,
   verifyOrgMemberCert,
   orgMemberCertSerial,
+  signOrgPolicy,
+  verifyOrgPolicy,
+  orgPolicyFields,
   type OrgAdminClaims,
   type VerifiedOrgAdmin,
   type OrgTeamClaims,
   type VerifiedOrgTeam,
   type OrgMemberClaims,
   type VerifiedOrgMember,
+  type OrgPolicyClaims,
+  type VerifiedOrgPolicy,
 } from "./org-credential.ts";
 export { signWrite, verifyWrite, type WriteKind, type WriteAuthFields } from "./update-signature.ts";
 export { signVaultPolicy, verifyVaultPolicy, type VaultPolicyClaims, type VerifiedPolicy } from "./vault-policy.ts";

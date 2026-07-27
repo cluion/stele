@@ -144,6 +144,8 @@ export type TeamInfo =
       orgId?: string;
       /** 已採信的團隊憑證序號(反回滾水位) */
       orgSerial: number;
+      /** 組織要求輪換金鑰(3b-2):有人被組織撤除,舊金鑰須擁有者輪換才作廢 */
+      rotationRequested: boolean;
       /** 組織已把 owner 換成我,但信封還是前任簽的 → 應盡快接管重簽 */
       takeoverNeeded: boolean;
       /** 本人簽章公鑰 base64:綁組織/被指派為擁有者時要交給組織 */

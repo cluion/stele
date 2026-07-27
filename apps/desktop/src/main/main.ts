@@ -168,6 +168,8 @@ let teamRuntime:
       takeoverNeeded: boolean;
       /** 組織名冊(3b-1):memberId → 組織背書的顯示名/部門;未綁組織或拉不到時為空 */
       orgNames: Map<string, { displayName: string; department?: string }>;
+      /** 組織要求輪換金鑰(3b-2):一次全撤後,舊 root 須由擁有者輪換才作廢 */
+      rotationRequested: boolean;
     }
   | undefined;
 /** 成員端收 keyRotated 後重試 bootstrap 的計時器;切 vault 時清除 */
@@ -336,6 +338,7 @@ function adoptTeamBootstrap(
     role?: MemberRole;
     requireSignedWrites: boolean | undefined;
     orgOwner?: { ownerPubSign: Uint8Array; ownerMemberId: string; serial: number; envelopeFromPrevOwner: boolean };
+    rotationRequested?: boolean;
   },
 ): void {
   if (!teamRuntime) return;
@@ -358,6 +361,7 @@ function adoptTeamBootstrap(
   const nextReq = res.requireSignedWrites ?? teamRuntime.requireSigned;
   teamRuntime.requireSigned = nextReq;
   persistRequireSigned(next.root, nextReq);
+  teamRuntime.rotationRequested = res.rotationRequested === true;
 }
 
 /** 金鑰就緒後把 SyncManager 接上目前 vault(personal 與 team 共用);含輪換續跑檢查 */
@@ -446,6 +450,10 @@ async function refreshTeamRole(next: VaultSession, memberIdentity: SyncIdentity)
       }
       // 強制簽章政策(§7.3)同紀元變更:owner 切換後成員重連即近即時套用(不必等輪換);
       // 政策缺席(undefined)保留既有 pin,不因抑制而降級(fail-closed)
+      if (res.rotationRequested !== undefined && res.rotationRequested !== rt.rotationRequested) {
+        rt.rotationRequested = res.rotationRequested; // 組織要求輪換:重連即反映到 UI
+        sendAll("team:changed");
+      }
       const nextReq = res.requireSignedWrites ?? rt.requireSigned;
       if (nextReq !== rt.requireSigned) {
         rt.requireSigned = nextReq;
@@ -534,6 +542,7 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
         orgSerial: loaded.orgSerial,
         takeoverNeeded: false,
         orgNames: new Map(),
+        rotationRequested: false,
       };
       try {
         const res = await bootstrapTeamKey({
@@ -806,6 +815,8 @@ async function rotateNow(): Promise<{ rotated: boolean; error?: string }> {
       },
     });
     rmSync(markerPath, { force: true });
+    rt.rotationRequested = false; // 組織要求的輪換已完成(伺服器同時清了旗標)
+    sendAll("team:changed");
     return { rotated: true };
   } catch (err) {
     console.error("金鑰輪換失敗:", err);
@@ -826,6 +837,8 @@ ipcMain.handle("team:info", async () => {
     // 組織綁定(3a):orgId 由組織根公鑰導出;未綁組織為 undefined
     orgId: teamRuntime.orgRootPubSign ? orgIdFromRootPubSign(teamRuntime.orgRootPubSign) : undefined,
     orgSerial: teamRuntime.orgSerial,
+    // 組織要求輪換(3b-2):有人被組織撤除,舊金鑰須由擁有者輪換才真的作廢
+    rotationRequested: teamRuntime.rotationRequested,
     // 需要接管重簽:憑證認定我是 owner,但我手上的 root 信封還是前任簽的(撤換後的過渡態)
     takeoverNeeded: teamRuntime.takeoverNeeded && (await isTeamOwner()),
     // 我的簽章公鑰:綁組織/指派擁有者時要交給組織(組織據此簽發團隊憑證)

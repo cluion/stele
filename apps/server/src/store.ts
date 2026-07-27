@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS org_bindings (
   cert BLOB NOT NULL,
   serial INTEGER NOT NULL DEFAULT 0,
   owner_member_id TEXT NOT NULL,
+  pending_rotation INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS org_bindings_by_org ON org_bindings (org_id);
@@ -117,6 +118,13 @@ CREATE TABLE IF NOT EXISTS org_members (
   serial INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
   PRIMARY KEY (org_id, member_id)
+);
+CREATE TABLE IF NOT EXISTS org_policy (
+  org_id TEXT PRIMARY KEY,
+  blob BLOB NOT NULL,
+  require_signed INTEGER NOT NULL DEFAULT 0,
+  serial INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE TABLE IF NOT EXISTS enrollment_tokens (
   token TEXT PRIMARY KEY,
@@ -139,6 +147,7 @@ function migrateRoles(db: Database.Database): void {
     "ALTER TABLE updates ADD COLUMN sig BLOB NOT NULL DEFAULT x''",
     "ALTER TABLE snapshots ADD COLUMN author_member_id TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE snapshots ADD COLUMN sig BLOB NOT NULL DEFAULT x''",
+    "ALTER TABLE org_bindings ADD COLUMN pending_rotation INTEGER NOT NULL DEFAULT 0",
   ]) {
     try {
       db.exec(sql);
@@ -590,6 +599,58 @@ export class SyncStore {
       )
       .all(orgId) as { vault_id: string; owner_member_id: string; serial: number; member_count: number }[];
     return rows.map((r) => ({ vaultId: r.vault_id, ownerMemberId: r.owner_member_id, memberCount: r.member_count, serial: r.serial }));
+  }
+
+  /**
+   * 組織政策(3b-2):存放並記下明碼旗標供伺服器縱深防禦。serial 須嚴格遞增,回傳是否寫入。
+   * 真相仍在成員端對組織根驗簽——此處的明碼只用來擋 unsigned 寫入,非安全邊界。
+   */
+  putOrgPolicy(orgId: string, blob: Uint8Array, requireSigned: boolean, serial: number): boolean {
+    const put = this.db.transaction((): boolean => {
+      const row = this.db.prepare("SELECT serial FROM org_policy WHERE org_id = ?").get(orgId) as { serial: number } | undefined;
+      if (row && serial <= row.serial) return false;
+      this.db
+        .prepare(
+          "INSERT INTO org_policy (org_id, blob, require_signed, serial) VALUES (?, ?, ?, ?) " +
+            "ON CONFLICT (org_id) DO UPDATE SET blob = excluded.blob, require_signed = excluded.require_signed, " +
+            "serial = excluded.serial, updated_at = unixepoch()",
+        )
+        .run(orgId, Buffer.from(blob), requireSigned ? 1 : 0, serial);
+      return true;
+    });
+    return put();
+  }
+
+  /** 某組織的政策 blob(隨 envelopeList 發還成員驗簽);未設回 undefined */
+  orgPolicy(orgId: string): Uint8Array | undefined {
+    const row = this.db.prepare("SELECT blob FROM org_policy WHERE org_id = ?").get(orgId) as { blob: Buffer } | undefined;
+    return row && new Uint8Array(row.blob);
+  }
+
+  /**
+   * 此 vault 是否要求簽章寫入:**團隊政策與其所屬組織政策取較嚴者**(任一開啟即開啟)。
+   * 組織只能加嚴不能放寬——否則一張寬鬆的組織政策就能鬆綁團隊已開啟的強制簽章。
+   */
+  requiresSignedWritesEffective(vaultId: string): boolean {
+    if (this.requiresSignedWrites(vaultId)) return true;
+    const binding = this.orgBinding(vaultId);
+    if (!binding) return false;
+    const row = this.db.prepare("SELECT require_signed FROM org_policy WHERE org_id = ?").get(binding.orgId) as { require_signed: number } | undefined;
+    return row?.require_signed === 1;
+  }
+
+  /**
+   * 標記/清除「組織要求輪換金鑰」(3b-2)。組織一次全撤只能即時切斷伺服器層存取,
+   * 被撤者手上的舊 root 要靠輪換才作廢,而輪換需要 root——只有團隊擁有者做得到,故以旗標催促。
+   */
+  setPendingRotation(vaultId: string, pending: boolean): void {
+    this.db.prepare("UPDATE org_bindings SET pending_rotation = ? WHERE vault_id = ?").run(pending ? 1 : 0, vaultId);
+  }
+
+  /** 此 vault 是否有待處理的組織輪換要求 */
+  pendingRotation(vaultId: string): boolean {
+    const row = this.db.prepare("SELECT pending_rotation FROM org_bindings WHERE vault_id = ?").get(vaultId) as { pending_rotation: number } | undefined;
+    return row?.pending_rotation === 1;
   }
 
   /** 團隊憑證 blob(隨 envelopeList 發還成員驗鏈);未綁組織回 undefined */

@@ -1,5 +1,14 @@
 import { describe, it, expect, beforeAll } from "vitest";
-import { generateSeed, deriveIdentity, signOrgAdminCert, signOrgMemberCert, verifyOrgMemberCert, type SyncIdentity } from "../src/index.ts";
+import {
+  generateSeed,
+  deriveIdentity,
+  signOrgAdminCert,
+  signOrgMemberCert,
+  verifyOrgMemberCert,
+  signOrgPolicy,
+  verifyOrgPolicy,
+  type SyncIdentity,
+} from "../src/index.ts";
 
 /**
  * 組織名冊(3b-1):組織為「memberId ↔ 顯示名」背書,讓協作與留言上的名字從自我宣稱的字串
@@ -63,5 +72,42 @@ describe("組織名冊條目", () => {
   it("截斷的條目驗不過(不完整即拒)", () => {
     const blob = signOrgMemberCert(root.sign, claims(), undefined);
     expect(() => verifyOrgMemberCert(blob.slice(0, blob.length - 8), root.pubSign, MEMBER, NOW)).toThrow(/不完整|驗證失敗/);
+  });
+});
+
+/**
+ * 組織政策(3b-2):組織對全組織下發的安全開關,與團隊自己的政策**取較嚴者**——
+ * 組織只能加嚴不能放寬,否則惡意伺服器可拿組織政策去鬆綁某個團隊已開啟的強制簽章。
+ */
+describe("組織政策", () => {
+  let root: SyncIdentity;
+  let admin: SyncIdentity;
+  let mallory: SyncIdentity;
+  const NOW = 1_800_000_000;
+
+  beforeAll(async () => {
+    root = await deriveIdentity(generateSeed());
+    admin = await deriveIdentity(generateSeed());
+    mallory = await deriveIdentity(generateSeed());
+  });
+
+  it("正簽正驗:回強制簽章旗標與序號", () => {
+    const v = verifyOrgPolicy(signOrgPolicy(root.sign, { requireSignedWrites: true, serial: 3 }, undefined), root.pubSign, NOW);
+    expect(v.requireSignedWrites).toBe(true);
+    expect(v.serial).toBe(3);
+  });
+
+  it("委任的 admin 可簽發(root 離線)", () => {
+    const adminCert = signOrgAdminCert(root.sign, { adminPubSign: admin.pubSign, notAfter: 0 });
+    expect(verifyOrgPolicy(signOrgPolicy(admin.sign, { requireSignedWrites: true, serial: 1 }, adminCert), root.pubSign, NOW).requireSignedWrites).toBe(true);
+  });
+
+  it("非組織鏈簽的政策驗不過(擋伺服器捏造組織級開關)", () => {
+    expect(() => verifyOrgPolicy(signOrgPolicy(mallory.sign, { requireSignedWrites: false, serial: 9 }, undefined), root.pubSign, NOW)).toThrow(/驗證失敗/);
+  });
+
+  it("過期委任簽的政策驗不過", () => {
+    const expired = signOrgAdminCert(root.sign, { adminPubSign: admin.pubSign, notAfter: NOW - 1 });
+    expect(() => verifyOrgPolicy(signOrgPolicy(admin.sign, { requireSignedWrites: true, serial: 1 }, expired), root.pubSign, NOW)).toThrow(/已過期/);
   });
 });

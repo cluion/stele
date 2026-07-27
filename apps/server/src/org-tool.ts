@@ -29,6 +29,8 @@ import {
  *   pnpm org name <根金鑰檔> <url> <token> <memberId> <顯示名> <serial> [部門]
  *                                                             設定名冊上的顯示名(組織背書,成員端可驗)
  *   pnpm org vaults <根金鑰檔> <url> <token>                    列出本組織的團隊(擁有者、成員數、憑證序號)
+ *   pnpm org revoke <根金鑰檔> <url> <token> <memberId>          離職一次全撤:從本組織所有團隊移除並踢線
+ *   pnpm org policy <根金鑰檔> <url> <token> <on|off> <serial>   組織級強制簽章(與團隊政策取較嚴者)
  */
 
 const b64 = (b: Uint8Array): string => Buffer.from(b).toString("base64");
@@ -127,8 +129,40 @@ async function main(argv: string[]): Promise<void> {
       }
       break;
     }
+    case "revoke": {
+      const [file, url, token, memberId] = args;
+      if (!file || !url || !token || !memberId) throw new Error("用法:revoke <根金鑰檔> <url> <token> <memberId>");
+      const root = await loadRoot(file);
+      const session = await OrgAdminSession.open({ url, token, orgRootPubSign: root.pubSign, identity: root, createSocket });
+      try {
+        const res = await session.revokeEverywhere(memberId);
+        console.log(res.removed.length > 0 ? `已從這些團隊移除:${res.removed.join("、")}` : "此人不在本組織任何團隊中");
+        if (res.skippedOwner.length > 0) {
+          console.log(`⚠️  以下團隊已略過(此人是擁有者,請先指派新擁有者再撤):${res.skippedOwner.join("、")}`);
+        }
+        if (res.removed.length > 0) {
+          console.log("提醒:移除只切斷了伺服器層存取;請通知各團隊擁有者輪換金鑰,對方手上的舊金鑰才會失效。");
+        }
+      } finally {
+        session.close();
+      }
+      break;
+    }
+    case "policy": {
+      const [file, url, token, onOff, serial] = args;
+      if (!file || !url || !token || !onOff || !serial) throw new Error("用法:policy <根金鑰檔> <url> <token> <on|off> <serial>");
+      const root = await loadRoot(file);
+      const session = await OrgAdminSession.open({ url, token, orgRootPubSign: root.pubSign, identity: root, createSocket });
+      try {
+        await session.setRequireSignedWrites(onOff === "on", Number(serial));
+        console.log(`組織強制簽章已設為 ${onOff}(序號 ${serial});與各團隊自己的設定取較嚴者`);
+      } finally {
+        session.close();
+      }
+      break;
+    }
     default:
-      console.error("指令:init / admin-cert / bundle / assign / name / vaults(詳見 org-tool.ts 檔頭)");
+      console.error("指令:init / admin-cert / bundle / assign / name / vaults / revoke / policy(詳見 org-tool.ts 檔頭)");
       process.exitCode = 1;
   }
 }
