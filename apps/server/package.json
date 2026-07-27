@@ -1,7 +1,7 @@
 {
   "name": "@stele/server",
   "private": true,
-  "version": "0.18.0",
+  "version": "0.19.0",
   "type": "module",
   "license": "MIT",
   "exports": {
@@ -11,7 +11,8 @@
     "build": "node scripts/build.mjs",
     "start": "pnpm build && node dist/main.cjs",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "org": "pnpm build && node dist/org-tool.cjs"
   },
   "dependencies": {
     "@stele/sync": "workspace:*",
