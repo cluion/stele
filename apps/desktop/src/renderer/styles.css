@@ -445,7 +445,7 @@ body {
   padding: var(--sp-2) var(--sp-3);
   outline: none;
 }
-.share-link button.primary { white-space: nowrap; }
+.share-link button { white-space: nowrap; } /* 按鈕文字被擠成兩行是跑版:輸入框收縮、按鈕不折行 */
 .share-row {
   display: flex;
   align-items: center;
@@ -721,6 +721,8 @@ body {
 .switcher.team button.danger:hover { border-color: var(--err); color: var(--err); }
 .switcher.team button:disabled { opacity: 0.5; cursor: default; }
 .team-invite-row { display: flex; gap: var(--sp-2); align-items: center; }
+.team-invite-row input { flex: 1; min-width: 0; }
+.team-invite-row button { white-space: nowrap; flex: 0 0 auto; }
 .team-invite-row select { padding: var(--sp-1) var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font: inherit; }
 .link-btn { font-size: var(--fs-sm); color: var(--text-muted); font-weight: 400; }
 .link-btn:hover { color: var(--accent); }

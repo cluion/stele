@@ -1217,6 +1217,7 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
   // 金鑰輪換(2c-2)結果:移除後自動輪換或手動輪換的成敗提示
   const [rotateNote, setRotateNote] = useState<{ ok: boolean; reason?: string } | null>(null);
   const [orgBundle, setOrgBundle] = useState(""); // 組織綁定碼(3a),owner 貼上後綁定
+  const [keyCopied, setKeyCopied] = useState(false); // 身分公鑰已複製的提示
   // 空間存取(per-space 成員子集):空間清單與編輯中的名單
   const [spacesList, setSpacesList] = useState<SpaceInfo[]>([]);
   const [accessEdit, setAccessEdit] = useState<{ spaceId: string; picked: Set<string> } | null>(null);
@@ -1460,7 +1461,19 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
             <section className="team-section">
               <h3>{t("team.org.title")}</h3>
               <p className="placeholder">{t("team.org.hint")}</p>
-              <p className="placeholder">{t("team.org.myKey", { key: info.myPubSign })}</p>
+              {/* 公鑰是要交給組織的東西:比照邀請碼給可全選的輸入框與複製鈕,
+                  塞進說明文字裡會在中間斷行、複製時容易漏字 */}
+              <p className="placeholder">{t("team.org.myKey")}</p>
+              <div className="share-link">
+                <input readOnly value={info.myPubSign} onFocus={(e) => e.target.select()} />
+                <button
+                  onClick={() => {
+                    void navigator.clipboard.writeText(info.myPubSign).then(() => setKeyCopied(true));
+                  }}
+                >
+                  {keyCopied ? t("team.org.keyCopied") : t("team.org.copyKey")}
+                </button>
+              </div>
               {info.orgId ? (
                 <>
                   <p className="placeholder">{t("team.org.bound", { orgId: info.orgId.slice(0, 12), serial: String(info.orgSerial) })}</p>
