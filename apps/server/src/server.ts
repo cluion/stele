@@ -155,6 +155,16 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
     }
   };
 
+  /**
+   * 踢掉某 vault 全體成員的活躍連線(3a 撤換 owner 用)。
+   * 為何是全體:撤換後新 owner 會以自己的簽章重發全員憑證,任何仍抱著舊信任錨的連線,
+   * 一旦重拉目錄就會整份驗不過而丟棄寫入。與其留一個「最終會自癒」的窗口,不如當場斷線,
+   * 讓每個人確定性地重跑 bootstrap 換錨(與 memberSetRole 踢人同一套 pattern)。
+   */
+  const kickVaultMembers = (vault: string, code: string, message: string): void => {
+    for (const member of memberConns.get(vault)?.keys() ?? []) kickMember(vault, member, code, message);
+  };
+
   // 死連線偵測:兩輪沒回 pong 就終止,避免 vaults 累積殭屍連線
   const heartbeat = setInterval(() => {
     for (const ws of wss.clients) {
@@ -443,8 +453,8 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
       opts.store.putOrgBinding(msg.vaultId, orgIdFromRootPubSign(msg.orgRootPubSign), msg.orgRootPubSign, msg.cert, verified.serial, verified.ownerMemberId);
       // 角色已變的兩位:踢掉活躍連線,重連後以新角色生效(同 memberSetRole 的作法)
       if (prevOwner !== undefined && prevOwner !== verified.ownerMemberId) {
-        kickMember(msg.vaultId, prevOwner, "role-changed", "團隊擁有者已由組織變更,請重新連線");
-        kickMember(msg.vaultId, verified.ownerMemberId, "role-changed", "團隊擁有者已由組織變更,請重新連線");
+        // 全體斷線:前後任的角色變了,其餘成員的信任錨也變了(新 owner 即將重簽全部憑證)
+        kickVaultMembers(msg.vaultId, "role-changed", "團隊擁有者已由組織變更,請重新連線");
       }
       send({ type: "ok", reqId: msg.reqId });
     };

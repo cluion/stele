@@ -152,6 +152,35 @@ describe("組織綁定與跨團隊撤換 owner(3a)", () => {
     expect(res.status === "ready" && res.role).toBe("owner");
   });
 
+  it("撤換 owner:全體成員連線都被踢,不留任何人抱著舊錨繼續跑", async () => {
+    const vaultId = "org-kick-all";
+    const orgRoot = await deriveIdentity(generateSeed());
+    const owner = await deriveIdentity(generateSeed());
+    const successor = await deriveIdentity(generateSeed());
+    const bystander = await deriveIdentity(generateSeed()); // 全程沒參與管理的一般成員
+    const root = await createTeamVault({ url: url(), token: TOKEN, vaultId, identity: owner, createSocket: wsSocket });
+    const admin = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId, identity: owner, createSocket: wsSocket });
+    for (const who of [successor, bystander]) {
+      const tok = await admin.inviteToken(3600, "editor");
+      await bootstrapTeamKey({ url: url(), token: TOKEN, vaultId, identity: who, ownerPubSign: owner.pubSign, enrollmentToken: tok, createSocket: wsSocket });
+      await admin.approve((await admin.members()).find((m) => m.memberId === who.memberId)!, root, 0);
+    }
+    await admin.bindOrg(orgRoot.pubSign, signOrgTeamCert(orgRoot.sign, { vaultId, ownerPubSign: owner.pubSign, serial: 1 }, undefined));
+    admin.close();
+
+    // 旁觀者維持一條活躍連線(此刻用的是舊錨)
+    const live = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId, identity: bystander, createSocket: wsSocket });
+    await expect(live.memberDirectory(owner.pubSign)).resolves.toBeInstanceOf(Array);
+
+    const org = await OrgAdminSession.open({ url: url(), token: TOKEN, orgRootPubSign: orgRoot.pubSign, identity: orgRoot, createSocket: wsSocket });
+    await org.assignOwner(vaultId, successor.pubSign, 2, owner.pubSign);
+    org.close();
+
+    // 撤換後這條連線必須斷:否則他會抱著舊錨繼續跑,重連時才以舊錨拉到新 owner 簽的目錄而整份驗不過
+    await expect(live.memberDirectory(owner.pubSign)).rejects.toThrow(/中斷|已關閉|role-changed/);
+    live.close();
+  });
+
   it("已綁組織卻收不到團隊憑證:fail-closed 拋錯,不降級回舊信任錨", async () => {
     const vaultId = "org-suppressed";
     const orgRoot = await deriveIdentity(generateSeed());
