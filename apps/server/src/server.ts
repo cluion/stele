@@ -933,6 +933,11 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
               // 移除只切斷伺服器層存取;被撤者手上的舊 root 要靠輪換才作廢,故標記催促擁有者
               opts.store.setPendingRotation(v.vaultId, true);
               kickMember(v.vaultId, msg.memberId, "removed", "已被組織移出此團隊");
+              // 推送給留任者:不推的話,在線的擁有者要等重開 app 才知道該輪換(走查實測)
+              const notice = encodeServerMessage({ type: "orgNotice", rotationRequested: true });
+              for (const peer of vaults.get(v.vaultId) ?? []) {
+                if (peer.readyState === WebSocket.OPEN && !restrictedDoc.has(peer)) peer.send(notice);
+              }
               removed.push(v.vaultId);
             }
             send({ type: "orgRevokeResult", reqId: msg.reqId, removed, skippedOwner });

@@ -141,6 +141,8 @@ const serverCases: ServerMessage[] = [
     ],
   },
   { type: "orgVaultCatalog", reqId: 29, vaults: [] },
+  { type: "orgNotice", rotationRequested: true },
+  { type: "orgNotice", rotationRequested: false },
   { type: "orgRevokeResult", reqId: 33, removed: [], skippedOwner: [] },
   { type: "orgRevokeResult", reqId: 34, removed: ["t1", "t2"], skippedOwner: ["t3"] },
   {

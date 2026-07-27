@@ -171,7 +171,13 @@ export type ServerMessage =
   // (移除擁有者會讓團隊無人能簽發憑證與信封;組織應先指派新擁有者再撤)
   | { type: "orgRevokeResult"; reqId: number; removed: string[]; skippedOwner: string[] }
   // 組織管理連線認證成功(3a):此連線只能治理(推團隊憑證),doc 內容一律拒——管理平面與金鑰平面分離
-  | { type: "orgAuthOk"; orgId: string };
+  | { type: "orgAuthOk"; orgId: string }
+  /**
+   * 組織治理通知(3b-2):目前只有「組織要求輪換金鑰」。全撤只切斷伺服器層存取,
+   * 舊金鑰要擁有者輪換才作廢——若不推送,在線的擁有者要等到重開 app 才知道(走查實測)。
+   * 純催促用途,非安全邊界:惡意伺服器抑制它,最壞情況是擁有者晚一點才輪換。
+   */
+  | { type: "orgNotice"; rotationRequested: boolean };
 
 const CLIENT_TAG = {
   auth: 0,
@@ -229,6 +235,7 @@ const SERVER_TAG = {
   orgMemberCertList: 18,
   orgVaultCatalog: 19,
   orgRevokeResult: 20,
+  orgNotice: 21,
 } as const;
 
 const PERM_TAG: Record<SharePermission, number> = { read: 0, write: 1 };
@@ -645,6 +652,9 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
     case "orgAuthOk":
       encoding.writeVarString(enc, msg.orgId);
       break;
+    case "orgNotice":
+      encoding.writeVarUint(enc, msg.rotationRequested ? 1 : 0);
+      break;
     case "orgMemberCertList":
       encoding.writeVarUint(enc, msg.reqId);
       encoding.writeVarUint(enc, msg.entries.length);
@@ -796,6 +806,8 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
       return { type: "keyRotated", epoch: decoding.readVarUint(dec) };
     case SERVER_TAG.orgAuthOk:
       return { type: "orgAuthOk", orgId: decoding.readVarString(dec) };
+    case SERVER_TAG.orgNotice:
+      return { type: "orgNotice", rotationRequested: decoding.readVarUint(dec) === 1 };
     case SERVER_TAG.orgMemberCertList: {
       const reqId = decoding.readVarUint(dec);
       const count = decoding.readVarUint(dec);

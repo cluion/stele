@@ -170,6 +170,12 @@ let teamRuntime:
       orgNames: Map<string, { displayName: string; department?: string }>;
       /** 組織要求輪換金鑰(3b-2):一次全撤後,舊 root 須由擁有者輪換才作廢 */
       rotationRequested: boolean;
+      /**
+       * 已被移出團隊:**終局狀態**。收到 removed/enroll-required 後,socket 關閉會緊接著送出
+       * 「離線」狀態把提示蓋掉——使用者就再也看不到自己已被移除(走查實測 45 秒都沒出現提示)。
+       * 因此以此旗標把 revoked 釘住,之後的傳輸狀態一律不覆蓋。
+       */
+      revoked: boolean;
     }
   | undefined;
 /** 成員端收 keyRotated 後重試 bootstrap 的計時器;切 vault 時清除 */
@@ -252,6 +258,12 @@ function persistOrgOwner(root: string, ownerPubSign: Uint8Array, serial: number)
   }
 }
 
+/** bootstrap 失敗是否肇因於「已不是成員」(被移除後重連被拒):與在線被踢同一種提示 */
+function isRevokedFailure(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("enroll-required") || msg.includes("removed") || msg.includes("邀請碼");
+}
+
 /** bootstrap 失敗是否肇因於組織團隊憑證(缺席、序號回退、鏈驗不過)——決定要給哪種可自救的提示 */
 function isOrgCertFailure(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -295,8 +307,10 @@ function fingerprintOf(pub: Uint8Array): string {
 }
 
 function broadcastSyncStatus(status: string): void {
+  // 已被移出團隊是終局:斷線/重連的狀態不得把提示蓋掉(否則使用者只看到「離線」)
+  const effective = teamRuntime?.revoked ? "revoked" : status;
   for (const w of windows) {
-    if (!w.isDestroyed()) w.webContents.send("sync:status", status);
+    if (!w.isDestroyed()) w.webContents.send("sync:status", effective);
   }
 }
 
@@ -380,6 +394,14 @@ function attachSyncManager(next: VaultSession, settings: SyncSettings, keySource
     requireSignedWrites: teamRuntime?.requireSigned, // 強制簽章模式(§7.3):拒 unsigned 寫入
     epoch: teamRuntime?.epoch,
     onKeyRotated: teamRuntime ? (epoch) => void handleKeyRotated(epoch) : undefined,
+    // 組織要求輪換(3b-2):在線即時反映到擁有者的團隊面板,不必等重開
+    onOrgNotice: teamRuntime
+      ? (rotationRequested) => {
+          if (!teamRuntime || teamRuntime.rotationRequested === rotationRequested) return;
+          teamRuntime.rotationRequested = rotationRequested;
+          sendAll("team:changed");
+        }
+      : undefined,
     onRevoked: teamRuntime ? () => handleRevoked(next) : undefined,
     onPresence: (rel, participants) => {
       for (const w of windows) {
@@ -410,6 +432,7 @@ function handleRevoked(next: VaultSession): void {
   if (session !== next) return;
   clearTimeout(rotateRetryTimer);
   clearTimeout(pendingRetryTimer);
+  if (teamRuntime) teamRuntime.revoked = true;
   broadcastSyncStatus("revoked");
   sendAll("team:changed");
 }
@@ -450,6 +473,8 @@ async function refreshTeamRole(next: VaultSession, memberIdentity: SyncIdentity)
       }
       // 強制簽章政策(§7.3)同紀元變更:owner 切換後成員重連即近即時套用(不必等輪換);
       // 政策缺席(undefined)保留既有 pin,不因抑制而降級(fail-closed)
+      // 組織名冊可能改過(改名/新人入職):重連時順手刷新,不必等重開 app
+      void loadOrgNames(rt, memberIdentity).then(() => sendAll("team:changed"));
       if (res.rotationRequested !== undefined && res.rotationRequested !== rt.rotationRequested) {
         rt.rotationRequested = res.rotationRequested; // 組織要求輪換:重連即反映到 UI
         sendAll("team:changed");
@@ -543,6 +568,7 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
         takeoverNeeded: false,
         orgNames: new Map(),
         rotationRequested: false,
+        revoked: false,
       };
       try {
         const res = await bootstrapTeamKey({
@@ -577,7 +603,13 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
         console.error("團隊金鑰 bootstrap 失敗:", err);
         // 組織憑證問題(缺席 fail-closed / 序號回退 / 鏈驗不過)自成一種狀態:
         // 這類失敗不是網路壞掉,而是「這個團隊的組織歸屬對不上」,得給使用者能自救的訊息
-        broadcastSyncStatus(isOrgCertFailure(err) ? "org-error" : "error");
+        if (isRevokedFailure(err)) {
+          // 重開 app 後才發現已被移除(重連被拒):與在線被踢是同一件事,提示要一致
+          if (teamRuntime) teamRuntime.revoked = true;
+          broadcastSyncStatus("revoked");
+        } else {
+          broadcastSyncStatus(isOrgCertFailure(err) ? "org-error" : "error");
+        }
       }
     }
   } else {
@@ -606,6 +638,7 @@ function initialVaultDir(): string | undefined {
 ipcMain.handle("vault:list", () => session?.list() ?? null);
 
 ipcMain.handle("sync:status", () => {
+  if (teamRuntime?.revoked) return "revoked"; // 終局狀態優先:重新查詢不該退回傳輸層的「離線」
   if (syncManager) return syncManager.status;
   // team vault 已認證但 owner 尚未包 root 給我:pending(初次查詢也要反映,不只靠 switchVault 廣播)
   if (teamRuntime && teamRuntime.root === undefined) return "pending";
@@ -1050,6 +1083,10 @@ ipcMain.handle("team:takeover", async () => {
     admin.close();
   }
   rt.takeoverNeeded = false;
+  // 接管時我剛以自己的簽章重發了全員憑證,其中包含我自己的 owner 角色——本機顯示要立刻跟上,
+  // 否則面板會停在舊角色直到下次重連(走查看到 owner=true 卻 role=editor 的不一致)
+  rt.role = "owner";
+  if (session) persistVerifiedRole(session.root, "owner");
   sendAll("team:changed");
   return { ok: true };
 });

@@ -140,6 +140,7 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
       epoch?: number;
       /** 金鑰已輪換:推送已暫停,呼叫端應重跑 bootstrap 取新 root 後呼叫 rotateRoot 收斂 */
       onKeyRotated?: (epoch: number) => void;
+      onOrgNotice?: (rotationRequested: boolean) => void;
       /** 被移出團隊(伺服器 removed/enroll-required):同步已停,呼叫端通知使用者 */
       onRevoked?: (code: string) => void;
       /** 輪換 repull 撞到尚未重加密的舊快照時的重試間隔(測試調短) */
@@ -200,6 +201,7 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
       requireSignedWrites: tuning?.requireSignedWrites,
       epoch: tuning?.epoch,
       onKeyRotated: tuning?.onKeyRotated,
+      onOrgNotice: tuning?.onOrgNotice,
       onRevoked: tuning?.onRevoked,
       repullRetryMs: tuning?.repullRetryMs,
       createSocket: (url) => new WebSocket(url) as unknown as SocketLike,

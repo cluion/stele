@@ -94,6 +94,8 @@ export interface SyncClientOptions {
   onKeyRotated?(epoch: number): void;
   /** 被移出團隊(伺服器 error code removed/enroll-required):已停止重連,上層據此通知使用者 */
   onRevoked?(code: string): void;
+  /** 組織治理通知(3b-2):目前只有「組織要求輪換金鑰」,供擁有者端即時提示 */
+  onOrgNotice?(rotationRequested: boolean): void;
   onStatus?(status: SyncStatus): void;
   /** 某 doc 的 awareness 狀態集變化(含遠端加入/離開);states 的 key 是 Yjs clientID */
   onAwareness?(docId: string, states: Map<number, AwarenessState>): void;
@@ -727,6 +729,9 @@ export class SyncClient {
         this.pendingShare.delete(msg.reqId);
         break;
       }
+      case "orgNotice":
+        this.opts.onOrgNotice?.(msg.rotationRequested);
+        break;
       case "keyRotated": {
         // 金鑰已輪換:立即暫停一切寫入(柵欄下舊 epoch 會被拒,更重要的是不能拿舊 root 產生新密文)
         // 上層 bootstrap 到新 root 後呼叫 applyRotation 恢復。舊 epoch 的重複廣播忽略
