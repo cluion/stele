@@ -82,6 +82,13 @@ export type ClientMessage =
   // 這是「owner 離職可撤換」的前提——admin 本就不是該 vault 的成員,走不了 authId。
   // adminCert 空 = org root 自己直連;否則為 root 簽的委任(伺服器對已知 org root 驗鏈)
   | { type: "authOrg"; token: string; orgId: string; adminPubSign: Uint8Array; adminCert: Uint8Array }
+  // 組織名冊(3b-1):org 簽的 {memberId, 顯示名, 部門, serial} blob。推限組織連線;
+  // 拉開放給任何已認證成員(名字是公開資訊,blob 自帶組織簽章擋捏造)
+  | { type: "orgMemberCertPush"; reqId: number; memberId: string; blob: Uint8Array }
+  | { type: "orgMemberCertPull"; reqId: number }
+  // 跨團隊總覽(3b-1,組織連線限定):列本組織的 vault,及某 vault 的成員
+  | { type: "orgVaultList"; reqId: number }
+  | { type: "orgMemberList"; reqId: number; vaultId: string }
   // doc 寫入帶 client epoch(2c-2 寫入柵欄):team vault 上伺服器拒 epoch≠當前,
   // 防止輪換窗口內舊 root 密文污染共享日誌;個人 vault/share 連線恆送 0(不套柵欄)。
   // authorMemberId + sig(P4 第二階段):作者對此寫入的簽章,收件端查目錄驗;個人/未簽 vault 送空字串 + 空陣列
@@ -144,6 +151,10 @@ export type ServerMessage =
   | { type: "keyRotated"; epoch: number }
   // 成員憑證目錄(P4):全 vault 的 owner 簽章成員憑證 blob,成員逐筆對 ownerPubSign 驗
   | { type: "memberCertList"; reqId: number; certs: Uint8Array[] }
+  // 組織名冊回覆(3b-1):每筆 {memberId, blob},收件端逐筆對 orgRootPubSign 驗、濾掉驗不過的
+  | { type: "orgMemberCertList"; reqId: number; entries: { memberId: string; blob: Uint8Array }[] }
+  // 跨團隊總覽回覆(3b-1):管理平面資料,不含任何金鑰
+  | { type: "orgVaultCatalog"; reqId: number; vaults: { vaultId: string; ownerMemberId: string; memberCount: number; serial: number }[] }
   // 組織管理連線認證成功(3a):此連線只能治理(推團隊憑證),doc 內容一律拒——管理平面與金鑰平面分離
   | { type: "orgAuthOk"; orgId: string };
 
@@ -174,6 +185,10 @@ const CLIENT_TAG = {
   policyPush: 23,
   orgCertPush: 24,
   authOrg: 25,
+  orgMemberCertPush: 26,
+  orgMemberCertPull: 27,
+  orgVaultList: 28,
+  orgMemberList: 29,
 } as const;
 const SERVER_TAG = {
   authOk: 0,
@@ -194,6 +209,8 @@ const SERVER_TAG = {
   keyRotated: 15,
   memberCertList: 16,
   orgAuthOk: 17,
+  orgMemberCertList: 18,
+  orgVaultCatalog: 19,
 } as const;
 
 const PERM_TAG: Record<SharePermission, number> = { read: 0, write: 1 };
@@ -278,6 +295,21 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
       encoding.writeVarString(enc, msg.vaultId);
       encoding.writeVarUint8Array(enc, msg.orgRootPubSign);
       encoding.writeVarUint8Array(enc, msg.cert);
+      break;
+    case "orgMemberCertPush":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarString(enc, msg.memberId);
+      encoding.writeVarUint8Array(enc, msg.blob);
+      break;
+    case "orgMemberCertPull":
+      encoding.writeVarUint(enc, msg.reqId);
+      break;
+    case "orgVaultList":
+      encoding.writeVarUint(enc, msg.reqId);
+      break;
+    case "orgMemberList":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarString(enc, msg.vaultId);
       break;
     case "authOrg":
       encoding.writeVarString(enc, msg.token);
@@ -404,6 +436,19 @@ export function decodeClientMessage(data: Uint8Array): ClientMessage {
         orgRootPubSign: readPayload(dec),
         cert: readPayload(dec),
       };
+    case CLIENT_TAG.orgMemberCertPush:
+      return {
+        type: "orgMemberCertPush",
+        reqId: decoding.readVarUint(dec),
+        memberId: decoding.readVarString(dec),
+        blob: readPayload(dec),
+      };
+    case CLIENT_TAG.orgMemberCertPull:
+      return { type: "orgMemberCertPull", reqId: decoding.readVarUint(dec) };
+    case CLIENT_TAG.orgVaultList:
+      return { type: "orgVaultList", reqId: decoding.readVarUint(dec) };
+    case CLIENT_TAG.orgMemberList:
+      return { type: "orgMemberList", reqId: decoding.readVarUint(dec), vaultId: decoding.readVarString(dec) };
     case CLIENT_TAG.authOrg:
       return {
         type: "authOrg",
@@ -562,6 +607,24 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
     case "orgAuthOk":
       encoding.writeVarString(enc, msg.orgId);
       break;
+    case "orgMemberCertList":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarUint(enc, msg.entries.length);
+      for (const e of msg.entries) {
+        encoding.writeVarString(enc, e.memberId);
+        encoding.writeVarUint8Array(enc, e.blob);
+      }
+      break;
+    case "orgVaultCatalog":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarUint(enc, msg.vaults.length);
+      for (const v of msg.vaults) {
+        encoding.writeVarString(enc, v.vaultId);
+        encoding.writeVarString(enc, v.ownerMemberId);
+        encoding.writeVarUint(enc, v.memberCount);
+        encoding.writeVarUint(enc, v.serial);
+      }
+      break;
     case "memberCertList":
       encoding.writeVarUint(enc, msg.reqId);
       encoding.writeVarUint(enc, msg.certs.length);
@@ -686,6 +749,27 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
       return { type: "keyRotated", epoch: decoding.readVarUint(dec) };
     case SERVER_TAG.orgAuthOk:
       return { type: "orgAuthOk", orgId: decoding.readVarString(dec) };
+    case SERVER_TAG.orgMemberCertList: {
+      const reqId = decoding.readVarUint(dec);
+      const count = decoding.readVarUint(dec);
+      const entries: { memberId: string; blob: Uint8Array }[] = [];
+      for (let i = 0; i < count; i++) entries.push({ memberId: decoding.readVarString(dec), blob: readPayload(dec) });
+      return { type: "orgMemberCertList", reqId, entries };
+    }
+    case SERVER_TAG.orgVaultCatalog: {
+      const reqId = decoding.readVarUint(dec);
+      const count = decoding.readVarUint(dec);
+      const vaults: { vaultId: string; ownerMemberId: string; memberCount: number; serial: number }[] = [];
+      for (let i = 0; i < count; i++) {
+        vaults.push({
+          vaultId: decoding.readVarString(dec),
+          ownerMemberId: decoding.readVarString(dec),
+          memberCount: decoding.readVarUint(dec),
+          serial: decoding.readVarUint(dec),
+        });
+      }
+      return { type: "orgVaultCatalog", reqId, vaults };
+    }
     case SERVER_TAG.memberCertList: {
       const reqId = decoding.readVarUint(dec);
       const count = decoding.readVarUint(dec);

@@ -1,7 +1,7 @@
-import { encodeClientMessage, decodeServerMessage, type ClientMessage, type ServerMessage } from "./protocol.ts";
+import { encodeClientMessage, decodeServerMessage, type ClientMessage, type ServerMessage, type MemberInfo } from "./protocol.ts";
 import type { SocketLike } from "./client.ts";
 import type { SyncIdentity } from "./identity.ts";
-import { orgChallengeBytes, orgIdFromRootPubSign, signOrgTeamCert } from "./org-credential.ts";
+import { orgChallengeBytes, orgIdFromRootPubSign, signOrgTeamCert, signOrgMemberCert } from "./org-credential.ts";
 
 /**
  * 組織管理連線(3a):org admin 對**組織根**證明身分後取得的連線,只能治理、碰不到任何 doc 內容。
@@ -111,6 +111,31 @@ export class OrgAdminSession {
       this.adminCert.length > 0 ? this.adminCert : undefined,
     );
     await this.request((reqId) => ({ type: "orgCertPush", reqId, vaultId, orgRootPubSign: this.orgRootPubSign, cert }), "ok");
+  }
+
+  /**
+   * 設定某人在組織名冊上的顯示名(3b-1)。serial 須大於伺服器已存的(反回滾)。
+   * 名冊只是「組織說這個 memberId 叫什麼」——不含金鑰,也不影響任何授權。
+   */
+  async setMemberName(memberId: string, displayName: string, serial: number, department?: string): Promise<void> {
+    const blob = signOrgMemberCert(
+      this.identity.sign,
+      { memberId, displayName, ...(department ? { department } : {}), serial },
+      this.adminCert.length > 0 ? this.adminCert : undefined,
+    );
+    await this.request((reqId) => ({ type: "orgMemberCertPush", reqId, memberId, blob }), "ok");
+  }
+
+  /** 本組織的團隊總覽(管理平面:vault、當代 owner、成員數、憑證序號) */
+  async vaults(): Promise<{ vaultId: string; ownerMemberId: string; memberCount: number; serial: number }[]> {
+    const msg = await this.request((reqId) => ({ type: "orgVaultList", reqId }), "orgVaultCatalog");
+    return msg.vaults;
+  }
+
+  /** 某團隊的成員清單(需該 vault 屬於本組織);含角色與是否已核准,不含任何金鑰 */
+  async members(vaultId: string): Promise<MemberInfo[]> {
+    const msg = await this.request((reqId) => ({ type: "orgMemberList", reqId, vaultId }), "memberCatalog");
+    return msg.members;
   }
 
   close(): void {

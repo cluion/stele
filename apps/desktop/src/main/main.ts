@@ -166,6 +166,8 @@ let teamRuntime:
       orgSerial: number;
       /** 我是憑證認定的 owner,但手上的信封還是前任簽的 → 待接管重簽(3a 交接過渡) */
       takeoverNeeded: boolean;
+      /** 組織名冊(3b-1):memberId → 組織背書的顯示名/部門;未綁組織或拉不到時為空 */
+      orgNames: Map<string, { displayName: string; department?: string }>;
     }
   | undefined;
 /** 成員端收 keyRotated 後重試 bootstrap 的計時器;切 vault 時清除 */
@@ -176,6 +178,25 @@ const rekeyMarkerFile = (vaultRoot: string): string => path.join(vaultRoot, ".st
 
 /** 建 socket:與 SyncManager 給 SyncClient 的同形,供 bootstrap/admin 對伺服器握手 */
 const createTeamSocket = (url: string): SocketLike => new WebSocket(url) as unknown as SocketLike;
+
+/**
+ * 拉組織名冊(3b-1)並逐筆對組織根驗;失敗不影響同步(名字只是顯示層,拉不到就沿用自選名)。
+ * 在建 SyncManager 前跑:協作游標的顯示名在建構當下就定案,晚拉會讓這次連線仍顯示舊名。
+ */
+async function loadOrgNames(rt: NonNullable<typeof teamRuntime>, identity: SyncIdentity): Promise<void> {
+  if (!rt.orgRootPubSign) return;
+  try {
+    const session = await TeamAdminSession.open({ ...rt.settings, identity, createSocket: createTeamSocket });
+    try {
+      const entries = await session.orgDirectory(rt.orgRootPubSign);
+      rt.orgNames = new Map(entries.map((e) => [e.memberId, { displayName: e.displayName, ...(e.department ? { department: e.department } : {}) }]));
+    } finally {
+      session.close();
+    }
+  } catch (err) {
+    console.error("拉組織名冊失敗(顯示名沿用本機設定):", err);
+  }
+}
 
 /** 我是不是此 team vault 的 owner(pubSign == 信任錨);owner 才給管理 IPC */
 async function isTeamOwner(): Promise<boolean> {
@@ -512,6 +533,7 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
         orgRootPubSign: loaded.orgRootPubSign,
         orgSerial: loaded.orgSerial,
         takeoverNeeded: false,
+        orgNames: new Map(),
       };
       try {
         const res = await bootstrapTeamKey({
@@ -529,6 +551,13 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
         if (loaded.enrollmentToken) clearEnrollmentToken(next.root);
         if (res.status === "ready") {
           adoptTeamBootstrap(next, res);
+          // 組織名冊(3b-1):在建 SyncManager 前拉,組織給我的名字才會用在這次連線的協作游標上。
+          // 名字只是顯示層,拉不到就沿用自選名——絕不因此擋住同步
+          if (teamRuntime) {
+            await loadOrgNames(teamRuntime, memberIdentity);
+            const mine = teamRuntime.orgNames.get(memberIdentity.memberId);
+            if (mine) loaded.settings.displayName = mine.displayName;
+          }
           attachSyncManager(next, loaded.settings, new WrappedKeySpaces(res.root, res.spaceKeys, res.restrictedSpaceIds), memberIdentity);
         } else {
           // pending:owner 尚未包 root 給我。不 start sync、不碰 vault-meta;背景輪詢,核准後免重開自動就緒
@@ -1013,7 +1042,19 @@ ipcMain.handle("team:takeover", async () => {
 });
 
 /** 已驗證的成員目錄(P4 attribution):供 renderer 標記留言作者;非團隊 vault 或未同步為空 */
-ipcMain.handle("team:directory", () => (teamRuntime ? (syncManager?.memberDirectory() ?? []) : []));
+/**
+ * 已驗證的成員目錄(P4 attribution)+ 組織名冊的顯示名(3b-1)。
+ * role 來自 owner 背書的成員憑證,orgName 來自組織背書的名冊——兩者都可驗;
+ * 沒有組織名時 UI 回退成員自選名(那是不可驗的,因此不加徽章)。
+ */
+ipcMain.handle("team:directory", () =>
+  teamRuntime
+    ? (syncManager?.memberDirectory() ?? []).map((m) => {
+        const org = teamRuntime?.orgNames.get(m.memberId);
+        return org ? { ...m, orgName: org.displayName, ...(org.department ? { orgDepartment: org.department } : {}) } : m;
+      })
+    : [],
+);
 
 ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {
   if (typeof rel !== "string") throw new Error("非法參數");

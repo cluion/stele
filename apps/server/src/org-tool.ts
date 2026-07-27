@@ -26,6 +26,9 @@ import {
  *                                                             產生綁定碼,交給團隊擁有者貼進 app
  *   pnpm org assign <根金鑰檔> <url> <token> <vaultId> <newOwnerPubSign(b64)> <serial> [prevOwnerPubSign(b64)]
  *                                                             直接連線指派新擁有者(不需團隊配合)
+ *   pnpm org name <根金鑰檔> <url> <token> <memberId> <顯示名> <serial> [部門]
+ *                                                             設定名冊上的顯示名(組織背書,成員端可驗)
+ *   pnpm org vaults <根金鑰檔> <url> <token>                    列出本組織的團隊(擁有者、成員數、憑證序號)
  */
 
 const b64 = (b: Uint8Array): string => Buffer.from(b).toString("base64");
@@ -93,8 +96,39 @@ async function main(argv: string[]): Promise<void> {
       }
       break;
     }
+    case "name": {
+      const [file, url, token, memberId, displayName, serial, department] = args;
+      if (!file || !url || !token || !memberId || !displayName || !serial) {
+        throw new Error("用法:name <根金鑰檔> <url> <token> <memberId> <顯示名> <serial> [部門]");
+      }
+      const root = await loadRoot(file);
+      const session = await OrgAdminSession.open({ url, token, orgRootPubSign: root.pubSign, identity: root, createSocket });
+      try {
+        await session.setMemberName(memberId, displayName, Number(serial), department);
+        console.log(`已設定 ${memberId.slice(0, 12)}… 的組織顯示名為「${displayName}」(序號 ${serial})`);
+      } finally {
+        session.close();
+      }
+      break;
+    }
+    case "vaults": {
+      const [file, url, token] = args;
+      if (!file || !url || !token) throw new Error("用法:vaults <根金鑰檔> <url> <token>");
+      const root = await loadRoot(file);
+      const session = await OrgAdminSession.open({ url, token, orgRootPubSign: root.pubSign, identity: root, createSocket });
+      try {
+        const vaults = await session.vaults();
+        if (vaults.length === 0) console.log("本組織尚無綁定的團隊");
+        for (const v of vaults) {
+          console.log(`${v.vaultId}\t擁有者 ${v.ownerMemberId.slice(0, 12)}…\t成員 ${v.memberCount}\t憑證序號 ${v.serial}`);
+        }
+      } finally {
+        session.close();
+      }
+      break;
+    }
     default:
-      console.error("指令:init / admin-cert / bundle / assign(詳見 org-tool.ts 檔頭)");
+      console.error("指令:init / admin-cert / bundle / assign / name / vaults(詳見 org-tool.ts 檔頭)");
       process.exitCode = 1;
   }
 }

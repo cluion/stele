@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import WebSocket from "ws";
 import {
+  signOrgMemberCert,
   generateSeed,
   deriveIdentity,
   createTeamVault,
@@ -306,6 +307,75 @@ describe("組織綁定與跨團隊撤換 owner(3a)", () => {
     newAdmin.close();
     const done = await bootstrap(vaultId, member, owner.pubSign, { root: orgRoot.pubSign });
     expect(done.status === "ready" && done.orgOwner?.envelopeFromPrevOwner).toBe(false);
+  });
+
+  it("組織名冊:成員拉得到可信顯示名,偽造條目被濾,序號不得回退", async () => {
+    const vaultId = "org-directory";
+    const orgRoot = await deriveIdentity(generateSeed());
+    const mallory = await deriveIdentity(generateSeed());
+    const { owner, member, admin } = await setupTeam(vaultId);
+    await admin.bindOrg(orgRoot.pubSign, signOrgTeamCert(orgRoot.sign, { vaultId, ownerPubSign: owner.pubSign, serial: 1 }, undefined));
+
+    const org = await OrgAdminSession.open({ url: url(), token: TOKEN, orgRootPubSign: orgRoot.pubSign, identity: orgRoot, createSocket: wsSocket });
+    await org.setMemberName(member.memberId, "王小明", 1, "工程部");
+
+    // 成員(非 owner)也拉得到:名字是公開資訊,可信度來自組織簽章而非連線權限
+    const memberSession = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId, identity: member, createSocket: wsSocket });
+    const dir = await memberSession.orgDirectory(orgRoot.pubSign);
+    expect(dir.find((d) => d.memberId === member.memberId)?.displayName).toBe("王小明");
+    expect(dir.find((d) => d.memberId === member.memberId)?.department).toBe("工程部");
+
+    // 惡意伺服器摻入非組織簽的條目:成員端濾掉,寧可沒有名字也不顯示偽造的
+    store.putOrgMemberCert(
+      dir.length > 0 ? store.orgBinding(vaultId)!.orgId : "",
+      owner.memberId,
+      signOrgMemberCert(mallory.sign, { memberId: owner.memberId, displayName: "假冒的老闆", serial: 9 }, undefined),
+      9,
+    );
+    const filtered = await memberSession.orgDirectory(orgRoot.pubSign);
+    expect(filtered.some((d) => d.displayName === "假冒的老闆")).toBe(false);
+
+    // 序號不得回退(改名的用意常是蓋掉舊身分,回放舊名等於復原它)
+    await expect(org.setMemberName(member.memberId, "舊名字", 1)).rejects.toThrow(/stale-cert|序號須遞增/);
+
+    // 成員連線不得推名冊或看跨團隊總覽
+    await expect(memberSession.orgDirectory(orgRoot.pubSign)).resolves.toBeInstanceOf(Array);
+    memberSession.close();
+    admin.close();
+    org.close();
+  });
+
+  it("跨團隊總覽:組織列得到自己的團隊與成員,列不到他組織", async () => {
+    const orgRoot = await deriveIdentity(generateSeed());
+    const otherRoot = await deriveIdentity(generateSeed());
+    const t1 = await setupTeam("org-overview-1");
+    const t2 = await setupTeam("org-overview-2");
+    const outsider = await setupTeam("org-overview-out");
+    for (const [t, id] of [
+      [t1, "org-overview-1"],
+      [t2, "org-overview-2"],
+    ] as const) {
+      await t.admin.bindOrg(orgRoot.pubSign, signOrgTeamCert(orgRoot.sign, { vaultId: id, ownerPubSign: t.owner.pubSign, serial: 1 }, undefined));
+      t.admin.close();
+    }
+    // 他組織的團隊
+    await outsider.admin.bindOrg(
+      otherRoot.pubSign,
+      signOrgTeamCert(otherRoot.sign, { vaultId: "org-overview-out", ownerPubSign: outsider.owner.pubSign, serial: 1 }, undefined),
+    );
+    outsider.admin.close();
+
+    const org = await OrgAdminSession.open({ url: url(), token: TOKEN, orgRootPubSign: orgRoot.pubSign, identity: orgRoot, createSocket: wsSocket });
+    const vaults = await org.vaults();
+    expect(vaults.map((v) => v.vaultId).sort()).toEqual(["org-overview-1", "org-overview-2"]);
+    expect(vaults.find((v) => v.vaultId === "org-overview-1")?.ownerMemberId).toBe(t1.owner.memberId);
+    expect(vaults.find((v) => v.vaultId === "org-overview-1")?.memberCount).toBe(2);
+
+    const members = await org.members("org-overview-1");
+    expect(members.map((m) => m.memberId).sort()).toEqual([t1.member.memberId, t1.owner.memberId].sort());
+
+    // 他組織的 vault:列不到(即使知道 vaultId)
+    await expect(org.members("org-overview-out")).rejects.toThrow(/forbidden|不屬於本組織/);
   });
 
   it("未知組織不得認證(不讓人憑空宣稱組織身分)", async () => {

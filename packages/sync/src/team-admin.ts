@@ -5,6 +5,7 @@ import { wrapKey } from "./crypto.ts";
 import { rootWrapContext, KEY_ID_ROOT } from "./bootstrap.ts";
 import { signRoleCredential, signMemberCredential, verifyMemberCredential, memberIdFromPubSign, type VerifiedMember } from "./role-credential.ts";
 import { signVaultPolicy } from "./vault-policy.ts";
+import { verifyOrgMemberCert, type VerifiedOrgMember } from "./org-credential.ts";
 
 /**
  * 團隊擁有者的管理連線(2b):一條認證好的連線,發邀請碼、列成員、核准(把 root 包給成員)、移除成員。
@@ -176,6 +177,24 @@ export class TeamAdminSession {
       if (!m.approved) continue; // pending 成員仍待核對指紋後 approve,接管不繞過那道閘
       await this.approve(m, root, epoch);
     }
+  }
+
+  /**
+   * 拉所屬組織的名冊並逐筆對組織根驗(3b-1);驗不過的濾掉——
+   * 顯示名寧可回退成員自選值,也不顯示任何未經組織背書的名字。
+   */
+  async orgDirectory(orgRootPubSign: Uint8Array): Promise<VerifiedOrgMember[]> {
+    const msg = await this.request((reqId) => ({ type: "orgMemberCertPull", reqId }), "orgMemberCertList");
+    const now = Math.floor(Date.now() / 1000);
+    const out: VerifiedOrgMember[] = [];
+    for (const e of msg.entries) {
+      try {
+        out.push(verifyOrgMemberCert(e.blob, orgRootPubSign, e.memberId, now));
+      } catch {
+        // 偽造/竄改/過期委任簽的條目在此被濾掉
+      }
+    }
+    return out;
   }
 
   /**

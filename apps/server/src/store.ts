@@ -110,6 +110,14 @@ CREATE TABLE IF NOT EXISTS org_bindings (
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS org_bindings_by_org ON org_bindings (org_id);
+CREATE TABLE IF NOT EXISTS org_members (
+  org_id TEXT NOT NULL,
+  member_id TEXT NOT NULL,
+  blob BLOB NOT NULL,
+  serial INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (org_id, member_id)
+);
 CREATE TABLE IF NOT EXISTS enrollment_tokens (
   token TEXT PRIMARY KEY,
   vault_id TEXT NOT NULL,
@@ -540,6 +548,48 @@ export class SyncStore {
   orgRootOf(orgId: string): Uint8Array | undefined {
     const row = this.db.prepare("SELECT root_pub_sign FROM org_bindings WHERE org_id = ? LIMIT 1").get(orgId) as { root_pub_sign: Buffer } | undefined;
     return row && new Uint8Array(row.root_pub_sign);
+  }
+
+  /**
+   * 寫入/更新一筆組織名冊條目(3b-1)。serial 須嚴格遞增才寫入,回傳是否寫入——
+   * 反回滾:擋惡意伺服器把某人的顯示名回放成舊值(改名的用意常常就是要蓋掉舊身分)。
+   */
+  putOrgMemberCert(orgId: string, memberId: string, blob: Uint8Array, serial: number): boolean {
+    const put = this.db.transaction((): boolean => {
+      const row = this.db.prepare("SELECT serial FROM org_members WHERE org_id = ? AND member_id = ?").get(orgId, memberId) as
+        | { serial: number }
+        | undefined;
+      if (row && serial <= row.serial) return false;
+      this.db
+        .prepare(
+          "INSERT INTO org_members (org_id, member_id, blob, serial) VALUES (?, ?, ?, ?) " +
+            "ON CONFLICT (org_id, member_id) DO UPDATE SET blob = excluded.blob, serial = excluded.serial, updated_at = unixepoch()",
+        )
+        .run(orgId, memberId, Buffer.from(blob), serial);
+      return true;
+    });
+    return put();
+  }
+
+  /** 某組織的全部名冊條目(成員逐筆對 orgRootPubSign 驗;伺服器只存放與中繼) */
+  listOrgMemberCerts(orgId: string): { memberId: string; blob: Uint8Array }[] {
+    const rows = this.db.prepare("SELECT member_id, blob FROM org_members WHERE org_id = ? ORDER BY member_id").all(orgId) as {
+      member_id: string;
+      blob: Buffer;
+    }[];
+    return rows.map((r) => ({ memberId: r.member_id, blob: new Uint8Array(r.blob) }));
+  }
+
+  /** 某組織底下的團隊總覽(管理平面:vault、當代 owner、成員數、憑證序號);不含任何金鑰 */
+  vaultsOfOrg(orgId: string): { vaultId: string; ownerMemberId: string; memberCount: number; serial: number }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT b.vault_id, b.owner_member_id, b.serial,
+                (SELECT COUNT(*) FROM members m WHERE m.vault_id = b.vault_id) AS member_count
+         FROM org_bindings b WHERE b.org_id = ? ORDER BY b.vault_id`,
+      )
+      .all(orgId) as { vault_id: string; owner_member_id: string; serial: number; member_count: number }[];
+    return rows.map((r) => ({ vaultId: r.vault_id, ownerMemberId: r.owner_member_id, memberCount: r.member_count, serial: r.serial }));
   }
 
   /** 團隊憑證 blob(隨 envelopeList 發還成員驗鏈);未綁組織回 undefined */

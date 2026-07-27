@@ -198,6 +198,9 @@ export interface CommentIdentity {
 export interface VerifiedMemberInfo {
   memberId: string;
   role: TeamRole;
+  /** 組織名冊背書的顯示名(3b-1);缺席 = 未綁組織或組織未替此人命名,UI 回退成員自選名 */
+  orgName?: string;
+  orgDepartment?: string;
 }
 
 export type SharePermission = "read" | "write";

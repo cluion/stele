@@ -202,6 +202,131 @@ export function verifyOrgTeamCert(
   };
 }
 
+/**
+ * 組織名冊條目(3b-1):組織為「memberId ↔ 顯示名」背書。
+ *
+ * 為何需要:協作游標與留言上的名字目前來自成員自選的 `displayName`(sync.json),
+ * 任何人都能自稱任何名字——名字是社交層最容易被冒用的東西,卻完全沒有驗證。
+ * 名冊讓組織對它背書:驗得過才顯示為組織名並標示來源,驗不過就回退成員自選名,絕不顯示偽造的名字。
+ *
+ * blob 格式:[版本 varuint][serial varuint][顯示名 varString][部門 varString][adminCert 長度前綴][簽發者簽章 64B]
+ * memberId 不進 blob:由驗證者自帶(從協定/目錄的鍵取得),挪用他人條目必然驗不過。
+ */
+
+const ORG_MEMBER_CERT_VERSION = 1;
+const ORG_MEMBER_DOMAIN = new TextEncoder().encode("stele-org-member-v1");
+/** 顯示名長度上限:名字會進側欄與游標標籤,過長會灌爆版面(且沒有正當用途) */
+const MAX_DISPLAY_NAME = 64;
+const MAX_DEPARTMENT = 64;
+
+export interface OrgMemberClaims {
+  memberId: string;
+  displayName: string;
+  department?: string;
+  /** 單調序號:名冊條目的反回滾水位,與團隊憑證各自獨立 */
+  serial: number;
+}
+
+export interface VerifiedOrgMember {
+  memberId: string;
+  displayName: string;
+  department?: string;
+  serial: number;
+  /** 簽發者(root 直簽即 root 自己),供稽核 */
+  issuerMemberId: string;
+}
+
+function orgMemberBytes(c: OrgMemberClaims): Uint8Array {
+  const enc = encoding.createEncoder();
+  encoding.writeVarUint8Array(enc, ORG_MEMBER_DOMAIN);
+  encoding.writeVarString(enc, c.memberId);
+  encoding.writeVarString(enc, c.displayName);
+  encoding.writeVarString(enc, c.department ?? "");
+  encoding.writeVarUint(enc, c.serial);
+  return encoding.toUint8Array(enc);
+}
+
+/** 簽發名冊條目;adminCert 省略 = org root 直簽,帶入 = 由該委任的 admin 簽 */
+export function signOrgMemberCert(
+  issuerSign: (message: Uint8Array) => Uint8Array,
+  claims: OrgMemberClaims,
+  adminCert: Uint8Array | undefined,
+): Uint8Array {
+  if (claims.displayName.length === 0 || claims.displayName.length > MAX_DISPLAY_NAME) {
+    throw new Error(`顯示名長度須為 1..${MAX_DISPLAY_NAME}`);
+  }
+  if ((claims.department ?? "").length > MAX_DEPARTMENT) throw new Error(`部門長度上限 ${MAX_DEPARTMENT}`);
+  const enc = encoding.createEncoder();
+  encoding.writeVarUint(enc, ORG_MEMBER_CERT_VERSION);
+  encoding.writeVarUint(enc, claims.serial);
+  encoding.writeVarString(enc, claims.displayName);
+  encoding.writeVarString(enc, claims.department ?? "");
+  encoding.writeVarUint8Array(enc, adminCert ?? new Uint8Array());
+  const head = encoding.toUint8Array(enc);
+  const sig = issuerSign(orgMemberBytes(claims));
+  const out = new Uint8Array(head.length + SIG_LEN);
+  out.set(head, 0);
+  out.set(sig, head.length);
+  return out;
+}
+
+/**
+ * 只取名冊條目的序號,不驗簽(供伺服器做單調把關用)。
+ * 伺服器本來就不該懂憑證真偽——真偽由成員端對組織根驗;它只需要序號來擋回放,
+ * 格式知識因此留在本模組,不外流到伺服器。格式不符回 undefined。
+ */
+export function orgMemberCertSerial(blob: Uint8Array): number | undefined {
+  try {
+    const dec = decoding.createDecoder(blob);
+    if (decoding.readVarUint(dec) !== ORG_MEMBER_CERT_VERSION) return undefined;
+    return decoding.readVarUint(dec);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 驗一筆名冊條目:確立簽發者(root 或未過期的委任 admin)後驗簽。
+ * memberId 由驗證者自帶(防挪用);偽簽、竄改、過期委任、截斷一律拋——呼叫端據此**濾掉**該筆,
+ * 回退成員自選名,絕不採信驗不過的名字。
+ */
+export function verifyOrgMemberCert(blob: Uint8Array, orgRootPubSign: Uint8Array, memberId: string, nowSec: number): VerifiedOrgMember {
+  const dec = decoding.createDecoder(blob);
+  let serial: number;
+  let displayName: string;
+  let department: string;
+  let adminCert: Uint8Array;
+  try {
+    const version = decoding.readVarUint(dec);
+    if (version !== ORG_MEMBER_CERT_VERSION) throw new Error(`未知的名冊條目版本:${version}`);
+    serial = decoding.readVarUint(dec);
+    displayName = decoding.readVarString(dec);
+    department = decoding.readVarString(dec);
+    adminCert = decoding.readVarUint8Array(dec);
+  } catch (err) {
+    throw err instanceof Error && err.message.startsWith("未知的名冊條目版本") ? err : new Error("名冊條目不完整");
+  }
+  const sig = blob.slice(dec.pos);
+  if (sig.length !== SIG_LEN) throw new Error("名冊條目不完整");
+  const issuer =
+    adminCert.length === 0
+      ? { pubSign: orgRootPubSign, memberId: memberIdFromPubSign(orgRootPubSign) }
+      : (() => {
+          const v = verifyOrgAdminCert(adminCert, orgRootPubSign, nowSec);
+          return { pubSign: v.adminPubSign, memberId: v.adminMemberId };
+        })();
+  if (!verifyEd(sig, orgMemberBytes({ memberId, displayName, department, serial }), issuer.pubSign)) {
+    throw new Error("名冊條目簽章驗證失敗");
+  }
+  return {
+    memberId,
+    displayName,
+    ...(department.length > 0 ? { department } : {}),
+    serial,
+    issuerMemberId: issuer.memberId,
+  };
+}
+
 /** 組織管理連線的 challenge 域:與 vault 的 stele-auth-v1 分開,擋「對某 vault 的證明被挪用為組織管理權」 */
 const ORG_AUTH_DOMAIN = new TextEncoder().encode("stele-org-auth-v1");
 

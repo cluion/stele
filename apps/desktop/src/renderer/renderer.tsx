@@ -112,7 +112,7 @@ function CommentsPanel({
   /** viewer 角色:讀得到討論串,但不給任何寫入入口 */
   readOnly: boolean;
   /** 已驗證成員目錄(memberId → 角色):作者是背書成員時標記已驗證徽章(P4 attribution);非團隊 vault 為空 */
-  directory: Map<string, "owner" | "editor" | "viewer">;
+  directory: Map<string, { role: "owner" | "editor" | "viewer"; orgName?: string }>;
   onAdd: (body: string) => void;
   onReply: (threadId: string, body: string) => void;
   onResolve: (threadId: string, resolved: boolean) => void;
@@ -138,14 +138,19 @@ function CommentsPanel({
 
   /** 作者是 owner 背書的當紀元成員 → 顯示已驗證徽章(含角色);否則不標記(舊 deviceId 作者、未知或已移除者) */
   const verified = (author: string) => {
-    const role = directory.get(author);
-    if (!role) return null;
+    const entry = directory.get(author);
+    if (!entry) return null;
     return (
       <span className="comment-verified" title={t("comments.verified.title")}>
-        ✓ {t(`team.role.${role}`)}
+        ✓ {t(`team.role.${entry.role}`)}
       </span>
     );
   };
+  /**
+   * 顯示名優先序(3b-1):組織名冊(可驗)> 留言記下的自選名。
+   * 自選名任何人都能亂填,組織名有組織簽章背書——兩者不同時,以可驗的為準。
+   */
+  const authorName = (author: string, fallback: string): string => directory.get(author)?.orgName ?? fallback;
 
   return (
     <aside className="comments-panel">
@@ -192,7 +197,7 @@ function CommentsPanel({
               )}
               <div className="comment-msg">
                 <span className="comment-author">
-                  {thread.name}
+                  {authorName(thread.author, thread.name)}
                   {verified(thread.author)}
                 </span>
                 <p>{thread.body}</p>
@@ -200,7 +205,7 @@ function CommentsPanel({
               {thread.replies.map((r) => (
                 <div key={r.id} className="comment-msg reply">
                   <span className="comment-author">
-                    {r.name}
+                    {authorName(r.author, r.name)}
                     {verified(r.author)}
                   </span>
                   <p>{r.body}</p>
@@ -283,7 +288,7 @@ function Editor({
   /** 留言需要啟用同步(伴生 doc 由 SyncManager 管理);未啟用時面板提示而非靜默失效 */
   const [commentsAvailable, setCommentsAvailable] = useState(true);
   /** 已驗證成員目錄(memberId → 角色):標記留言作者為 owner 背書成員(P4 attribution);非團隊 vault 為空 */
-  const [directory, setDirectory] = useState<Map<string, "owner" | "editor" | "viewer">>(new Map());
+  const [directory, setDirectory] = useState<Map<string, { role: "owner" | "editor" | "viewer"; orgName?: string }>>(new Map());
 
   const mutateComments = (fn: (doc: Y.Doc) => void): void => {
     if (readOnly) return; // viewer:留言也是 doc 寫入,伺服器會拒;UI 層一併擋
@@ -421,7 +426,7 @@ function Editor({
     const load = (): void =>
       void window.stele
         .teamDirectory()
-        .then((list) => setDirectory(new Map(list.map((m) => [m.memberId, m.role]))))
+        .then((list) => setDirectory(new Map(list.map((m) => [m.memberId, { role: m.role, ...(m.orgName ? { orgName: m.orgName } : {}) }]))))
         .catch(() => setDirectory(new Map()));
     load();
     return window.stele.onTeamChanged(load);

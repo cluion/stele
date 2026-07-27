@@ -11,6 +11,7 @@ import {
   verifyOrgAdminCert,
   verifyOrgTeamCert,
   orgIdFromRootPubSign,
+  orgMemberCertSerial,
   type ClientMessage,
   type ServerMessage,
   type MemberRole,
@@ -687,6 +688,16 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
     const handle = (vault: string, msg: Exclude<ClientMessage, { type: "auth" | "authId" | "authProof" | "shareAuth" | "authOrg" }>): void => {
       // 組織綁定/憑證換發(3a):走成員連線的這條是「團隊 owner 主動綁組織」;
       // 組織端撤換 owner 走 orgScope 連線(見分派),兩路共用同一套鏈驗證與反回滾
+      // 名冊拉取:任何已認證成員都可拉自己團隊所屬組織的名冊(推送仍限組織鏈)
+      if (msg.type === "orgMemberCertPull") {
+        const binding = opts.store.orgBinding(vault);
+        send({ type: "orgMemberCertList", reqId: msg.reqId, entries: binding ? opts.store.listOrgMemberCerts(binding.orgId) : [] });
+        return;
+      }
+      if (msg.type === "orgMemberCertPush" || msg.type === "orgVaultList" || msg.type === "orgMemberList") {
+        refuse("forbidden", "名冊與跨團隊總覽僅限組織管理連線");
+        return;
+      }
       if (msg.type === "orgCertPush") {
         if (scope !== undefined) {
           refuse("forbidden", "分享連線不得管理組織");
@@ -861,7 +872,35 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
           // 組織管理連線的能力上限:只有團隊憑證換發。doc 讀寫、成員管理、金鑰信封一律拒——
           // 治理模式下組織不持有 root,拿到內容也解不開,但仍在協議層明確擋住,不留曖昧
           if (msg.type === "orgCertPush") handleOrgCertPush(msg, { org: orgScope.orgId });
-          else refuse("forbidden", "組織管理連線僅可換發團隊憑證");
+          else if (msg.type === "orgMemberCertPush") {
+            // 名冊條目:序號須遞增(反回滾——改名的用意常常就是要蓋掉舊身分)
+            if (!validId(msg.memberId)) {
+              refuse("bad-message", "非法 member id");
+              return;
+            }
+            const serial = orgMemberCertSerial(msg.blob);
+            if (serial === undefined) {
+              refuse("bad-message", "名冊條目格式錯誤");
+              return;
+            }
+            if (!opts.store.putOrgMemberCert(orgScope.orgId, msg.memberId, msg.blob, serial)) {
+              refuse("stale-cert", "名冊條目序號須遞增");
+              return;
+            }
+            send({ type: "ok", reqId: msg.reqId });
+          } else if (msg.type === "orgVaultList") {
+            send({ type: "orgVaultCatalog", reqId: msg.reqId, vaults: opts.store.vaultsOfOrg(orgScope.orgId) });
+          } else if (msg.type === "orgMemberList") {
+            // 只列本組織已綁定的 vault:組織看不到別的組織,也看不到未綁定的個人/團隊 vault
+            const binding = opts.store.orgBinding(msg.vaultId);
+            if (!binding || binding.orgId !== orgScope.orgId) {
+              refuse("forbidden", "此 vault 不屬於本組織");
+              return;
+            }
+            send({ type: "memberCatalog", reqId: msg.reqId, members: opts.store.listMembers(msg.vaultId) });
+          } else if (msg.type === "orgMemberCertPull") {
+            send({ type: "orgMemberCertList", reqId: msg.reqId, entries: opts.store.listOrgMemberCerts(orgScope.orgId) });
+          } else refuse("forbidden", "組織管理連線僅可治理,不得存取內容");
         } else if (vaultId === undefined) refuse("unauthorized", "尚未認證");
         else handle(vaultId, msg);
       } catch (err) {
