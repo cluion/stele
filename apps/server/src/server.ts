@@ -432,11 +432,13 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
       try {
         verified = verifyOrgTeamCert(msg.cert, msg.orgRootPubSign, msg.vaultId, Math.floor(Date.now() / 1000));
       } catch (err) {
-        refuse("bad-cert", `團隊憑證無效:${err instanceof Error ? err.message : "未知錯誤"}`);
+        // 簽給別的團隊或別的組織時,簽章位元組對不上,錯誤會是籠統的「簽章驗證失敗」——補上最可能的成因
+        refuse("bad-cert", `團隊憑證無效(可能是簽給其他團隊或其他組織):${err instanceof Error ? err.message : "未知錯誤"}`);
         return;
       }
       if (binding && verified.serial <= binding.serial) {
-        refuse("stale-cert", "團隊憑證序號須遞增"); // 反回滾:擋重放舊憑證把 owner 指回離職者
+        // 帶上伺服器目前的序號:組織管理員據此知道下一張該用多少,不必猜
+        refuse("stale-cert", `團隊憑證序號須遞增(伺服器目前為 ${binding.serial})`); // 反回滾:擋重放舊憑證把 owner 指回離職者
         return;
       }
       // 憑證指向的 owner 必須是既有成員、且註冊公鑰與憑證一致:否則會產生沒人簽得動信封的幽靈 owner

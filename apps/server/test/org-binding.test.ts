@@ -271,6 +271,43 @@ describe("組織綁定與跨團隊撤換 owner(3a)", () => {
     expect(denied).toBe("forbidden");
   });
 
+  it("誤操作的訊息要能自救,且踩過之後救得回來", async () => {
+    const vaultId = "org-misstep";
+    const orgRoot = await deriveIdentity(generateSeed());
+    const { owner, member, root, admin } = await setupTeam(vaultId);
+
+    // 貼到簽給別的團隊的綁定碼:訊息要指出最可能的成因,而非只說「簽章驗證失敗」
+    const wrongVault = signOrgTeamCert(orgRoot.sign, { vaultId: "另一個團隊", ownerPubSign: owner.pubSign, serial: 1 }, undefined);
+    await expect(admin.bindOrg(orgRoot.pubSign, wrongVault)).rejects.toThrow(/簽給其他團隊或其他組織/);
+    admin.close(); // 伺服器拒絕時會關線;桌面每次操作開新連線,故重來即可
+
+    // 救回:貼正確的碼就綁定成功(踩過不會卡死)
+    const retry = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId, identity: owner, createSocket: wsSocket });
+    await retry.bindOrg(orgRoot.pubSign, signOrgTeamCert(orgRoot.sign, { vaultId, ownerPubSign: owner.pubSign, serial: 1 }, undefined));
+    retry.close();
+
+    // 撤換時忘了背書前任:連新 owner 自己都解不開金鑰——訊息必須直接說出補救動作
+    const org = await OrgAdminSession.open({ url: url(), token: TOKEN, orgRootPubSign: orgRoot.pubSign, identity: orgRoot, createSocket: wsSocket });
+    await org.assignOwner(vaultId, member.pubSign, 2);
+    await expect(bootstrap(vaultId, member, owner.pubSign, { root: orgRoot.pubSign })).rejects.toThrow(/組織未在團隊憑證中背書前任/);
+
+    // 序號沒遞增:訊息帶出伺服器目前的序號,管理員不必猜下一張要用多少
+    await expect(org.assignOwner(vaultId, member.pubSign, 2, owner.pubSign)).rejects.toThrow(/序號須遞增\(伺服器目前為 2\)/);
+    org.close();
+
+    // 救回:以更大的序號重新簽發並帶上前任 → 新 owner 解得開,接管後全隊恢復
+    const org2 = await OrgAdminSession.open({ url: url(), token: TOKEN, orgRootPubSign: orgRoot.pubSign, identity: orgRoot, createSocket: wsSocket });
+    await org2.assignOwner(vaultId, member.pubSign, 3, owner.pubSign);
+    org2.close();
+    const fixed = await bootstrap(vaultId, member, owner.pubSign, { root: orgRoot.pubSign });
+    expect(fixed.status === "ready" && fixed.orgOwner?.envelopeFromPrevOwner).toBe(true);
+    const newAdmin = await TeamAdminSession.open({ url: url(), token: TOKEN, vaultId, identity: member, createSocket: wsSocket });
+    await newAdmin.reissueAll(root, 0);
+    newAdmin.close();
+    const done = await bootstrap(vaultId, member, owner.pubSign, { root: orgRoot.pubSign });
+    expect(done.status === "ready" && done.orgOwner?.envelopeFromPrevOwner).toBe(false);
+  });
+
   it("未知組織不得認證(不讓人憑空宣稱組織身分)", async () => {
     const strangerRoot = await deriveIdentity(generateSeed());
     await expect(

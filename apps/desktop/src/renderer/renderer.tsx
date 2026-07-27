@@ -1183,6 +1183,17 @@ function SpaceAuditDialog({ spaces, onClose }: { spaces: SpaceInfo[]; onClose: (
  *  - 團隊 + 擁有者:產生邀請碼、成員清單(顯示指紋)核准/移除
  *  - 團隊 + 成員:顯示金鑰是否就緒(pending = 等擁有者核准)
  */
+/**
+ * IPC 錯誤的可讀尾巴:Electron 會把 main 端訊息包成
+ * 「Error invoking remote method 'x': Error: 真正的原因」。只取最後一段給使用者——
+ * 組織綁定/接管這類操作失敗時,「為什麼」比「失敗了」重要得多(貼錯綁定碼 vs 序號過舊 vs 非成員)。
+ */
+function detailOf(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const tail = raw.split(/Error:\s*/).pop()?.trim() ?? "";
+  return tail.length > 0 && tail !== raw ? `:${tail}` : raw ? `:${raw}` : "";
+}
+
 function TeamDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const [info, setInfo] = useState<TeamInfo | undefined>(undefined);
@@ -1227,7 +1238,7 @@ function TeamDialog({ onClose }: { onClose: () => void }) {
     setBusy(true);
     setError(null);
     void fn()
-      .catch(() => setError(t("team.error")))
+      .catch((err: unknown) => setError(t("team.error") + detailOf(err)))
       .finally(() => setBusy(false));
   };
 

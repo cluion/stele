@@ -56,6 +56,8 @@ body {
 .sidebar .sync-dot.offline { background: transparent; border: 1.5px solid var(--text-faint); }
 .sidebar .sync-dot.pending { background: #d9a441; animation: sync-pulse 1.6s ease-in-out infinite; }
 .sidebar .sync-dot.revoked { background: var(--err); }
+.sidebar .sync-dot.error { background: var(--err); opacity: 0.6; }
+.sidebar .sync-dot.org-error { background: var(--err); animation: sync-pulse 1.6s ease-in-out infinite; }
 .revoked-banner {
   margin: 0 0 var(--sp-2);
   padding: var(--sp-2) var(--sp-3);

@@ -130,8 +130,19 @@ export function bootstrapTeamKey(opts: TeamBootstrapOptions): Promise<TeamBootst
           try {
             return { key: await identity.unwrap(blob, ownerPubSign, context), fromPrev: false };
           } catch (err) {
-            if (!prevOwnerPubSign) throw err;
-            return { key: await identity.unwrap(blob, prevOwnerPubSign, context), fromPrev: true };
+            if (prevOwnerPubSign) {
+              try {
+                return { key: await identity.unwrap(blob, prevOwnerPubSign, context), fromPrev: true };
+              } catch {
+                throw new Error("團隊金鑰信封既非當代擁有者、也非組織背書的前任擁有者所簽,請組織確認團隊憑證");
+              }
+            }
+            // 最常見的踩法:組織撤換擁有者時忘了在憑證帶上前任公鑰,整隊(含新擁有者)都解不開金鑰。
+            // 這裡若只回「簽章驗證失敗」,現場沒人知道要去改什麼——訊息必須直接指出補救動作
+            if (orgOwner) {
+              throw new Error("團隊金鑰信封是前任擁有者簽的,但組織未在團隊憑證中背書前任;請組織以更大的序號重新簽發並帶上前任擁有者公鑰");
+            }
+            throw err;
           }
         };
         // context 用信封宣稱的 epoch:偽造 epoch 會使 HKDF info 不符 → GCM 驗不過而拒絕,不會靜默拿錯 root

@@ -229,6 +229,12 @@ function persistOrgOwner(root: string, ownerPubSign: Uint8Array, serial: number)
   }
 }
 
+/** bootstrap 失敗是否肇因於組織團隊憑證(缺席、序號回退、鏈驗不過)——決定要給哪種可自救的提示 */
+function isOrgCertFailure(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("團隊憑證") || msg.includes("序號回退") || msg.includes("組織委任");
+}
+
 /** 首次 enroll 後把已消耗的一次性邀請碼從 sync.json 移除 */
 function clearEnrollmentToken(root: string): void {
   const file = syncFile(root);
@@ -531,7 +537,9 @@ async function switchVault(dir: string): Promise<{ vault: string; files: string[
         }
       } catch (err) {
         console.error("團隊金鑰 bootstrap 失敗:", err);
-        broadcastSyncStatus("error");
+        // 組織憑證問題(缺席 fail-closed / 序號回退 / 鏈驗不過)自成一種狀態:
+        // 這類失敗不是網路壞掉,而是「這個團隊的組織歸屬對不上」,得給使用者能自救的訊息
+        broadcastSyncStatus(isOrgCertFailure(err) ? "org-error" : "error");
       }
     }
   } else {
