@@ -92,6 +92,26 @@ body {
   text-transform: uppercase;
   user-select: none;
 }
+/* 游標名簽章驗過(3b-3):頭像加一圈強調色描邊 + 右下角 ✓,與留言的已驗證徽章同一套語彙 */
+.presence-avatar.verified {
+  border-color: var(--accent);
+  position: relative;
+}
+.presence-avatar.verified::after {
+  content: "✓";
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 8px;
+  line-height: 11px;
+  text-align: center;
+  font-weight: 700;
+}
 
 /* 遠端協作者游標:一根彩色細線,hover 顯示名字 */
 .remote-caret {

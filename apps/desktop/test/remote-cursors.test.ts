@@ -23,11 +23,18 @@ describe("遠端游標編解碼", () => {
     expect(decodeCursor(doc, ytext, payload)).toEqual({ anchor: 9, head: 14 });
   });
 
-  it("participantCursor 從 state.cur 抽出可渲染游標", () => {
+  it("participantCursor 從 state.cur 抽出可渲染游標;未驗證身分不標記", () => {
     const { doc, ytext } = docWith("abcdef");
     const cur = encodeCursor(ytext, 1, 4);
     const p = { clientId: 42, name: "甲", color: "#0e7b93", state: { name: "甲", cur } };
-    expect(participantCursor(doc, ytext, p)).toEqual({ clientId: 42, name: "甲", color: "#0e7b93", anchor: 1, head: 4 });
+    expect(participantCursor(doc, ytext, p)).toEqual({ clientId: 42, name: "甲", color: "#0e7b93", anchor: 1, head: 4, verified: false });
+  });
+
+  it("組織名冊背書的名字優先於自選名,並帶出已驗證標記(3b-1 收尾)", () => {
+    const { doc, ytext } = docWith("abcdef");
+    const cur = encodeCursor(ytext, 1, 4);
+    const p = { clientId: 42, name: "自稱阿甲", color: "#0e7b93", state: { cur }, verified: true, orgName: "王小明" };
+    expect(participantCursor(doc, ytext, p)).toMatchObject({ name: "王小明", verified: true });
   });
 
   it("沒有 cur 欄位回 null", () => {

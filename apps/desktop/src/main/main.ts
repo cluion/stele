@@ -404,8 +404,14 @@ function attachSyncManager(next: VaultSession, settings: SyncSettings, keySource
       : undefined,
     onRevoked: teamRuntime ? () => handleRevoked(next) : undefined,
     onPresence: (rel, participants) => {
+      // 組織名冊(3b-1)只套在**驗過游標名簽章**的成員上:memberId 未經簽章證明就查名冊,
+      // 等於讓任何人自稱他人 memberId 就借到組織背書的名字——比自報名字更可信,危害更大
+      const named = participants.map((p) => {
+        const org = p.verified && p.memberId ? teamRuntime?.orgNames.get(p.memberId) : undefined;
+        return org ? { ...p, orgName: org.displayName, ...(org.department ? { orgDepartment: org.department } : {}) } : p;
+      });
       for (const w of windows) {
-        if (!w.isDestroyed()) w.webContents.send("presence:update", rel, participants);
+        if (!w.isDestroyed()) w.webContents.send("presence:update", rel, named);
       }
     },
     comments,

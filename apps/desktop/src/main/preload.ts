@@ -227,6 +227,13 @@ export interface Participant {
   name: string;
   color: string;
   state: Record<string, unknown>;
+  /** 游標名簽章(3b-1 收尾)驗過:name 出自這位擁有者背書的成員,不是自稱的 */
+  verified: boolean;
+  /** 簽章證明的成員 id;未驗證者恆 undefined */
+  memberId?: string;
+  /** 組織名冊(3b-1)背書的顯示名/部門;只有驗過身分的成員查得到 */
+  orgName?: string;
+  orgDepartment?: string;
 }
 
 const api: SteleApi = {

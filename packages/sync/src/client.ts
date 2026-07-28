@@ -12,9 +12,13 @@ import {
 import { identityCipher, type Cipher } from "./cipher.ts";
 import { identityChallengeBytes, type SyncIdentity } from "./identity.ts";
 import { signWrite, verifyWrite, type WriteKind } from "./update-signature.ts";
+import { signAwarenessIdentity, verifyAwarenessIdentity } from "./awareness-identity.ts";
 import { verifyMemberCredential, type VerifiedMember } from "./role-credential.ts";
 
-/** awareness 狀態:游標/選取/使用者資訊等,JSON 可序列化 */
+/**
+ * awareness 狀態:游標/選取/使用者資訊等,JSON 可序列化。
+ * 團隊 vault 額外帶 `memberId` 與 `sig`(游標名簽章,3b-1 收尾),收件端驗過才附上 `verified: true`。
+ */
 export type AwarenessState = Record<string, unknown>;
 
 /** 週期重播本地 awareness:讓新加入者看得到,並刷新對端的過期計時 */
@@ -109,6 +113,8 @@ export interface SyncClientOptions {
 interface AwarenessEntry {
   aw: awarenessProtocol.Awareness;
   onUpdate: (changes: { added: number[]; updated: number[]; removed: number[] }, origin: unknown) => void;
+  /** UI 給的原始在場狀態(未附簽章):輪換後 epoch 改變須以新紀元重簽,得留著原件 */
+  base: AwarenessState | undefined;
 }
 
 interface DocRuntime {
@@ -169,6 +175,8 @@ export class SyncClient {
   private dirWaiters: Array<() => void> = [];
   /** 強制簽章模式(P4 §7.3):true 時 unsigned 寫入一律拒;由 owner 簽章的 vault 政策驅動,可熱更新 */
   private requireSigned: boolean;
+  /** 游標名簽章快取(docId → 身分欄位指紋 + base64 簽章):游標每動一次不必重簽 */
+  private readonly awarenessSigs = new Map<string, { key: string; sig: string }>();
 
   constructor(private opts: SyncClientOptions) {
     this.cipher = opts.cipher ?? identityCipher;
@@ -309,11 +317,84 @@ export class SyncClient {
     });
   }
 
-  /** UI 設定本地 awareness(游標/選取/在線);null = 清除本地狀態 */
+  /** UI 設定本地 awareness(游標/選取/在線);null = 清除本地狀態。團隊 vault 會附上游標名簽章 */
   setLocalAwareness(docId: string, state: AwarenessState | null): void {
     void this.ensureAwareness(docId)
-      .then((entry) => entry?.aw.setLocalState(state))
+      .then((entry) => {
+        if (!entry) return;
+        entry.base = state ?? undefined;
+        entry.aw.setLocalState(state === null ? null : this.signLocalAwareness(docId, entry.aw.clientID, state));
+      })
       .catch((err: unknown) => console.error(`設定 awareness 失敗 ${docId}:`, err));
+  }
+
+  /**
+   * 為本地在場宣告補上游標名簽章(3b-1 收尾);個人 vault 或無身分時原樣回傳(= 未簽,收件端視為未驗證)。
+   * 簽章只綁身分欄位(memberId/name/color)與 doc/紀元/clientId,不綁游標位置——因此游標每動一次
+   * 不必重簽,身分欄位不變就重用快取。簽不出來(名字超長等)則退為未簽,不讓在場功能整個消失。
+   */
+  private signLocalAwareness(docId: string, clientId: number, state: AwarenessState): AwarenessState {
+    const id = this.opts.identity;
+    if (!id || !this.opts.ownerPubSign) return state;
+    const name = typeof state["name"] === "string" ? state["name"] : "";
+    const color = typeof state["color"] === "string" ? state["color"] : "";
+    if (name === "") return state;
+    const cacheKey = `${clientId}:${this.epoch}:${name}:${color}`;
+    const cached = this.awarenessSigs.get(docId);
+    if (cached?.key === cacheKey) return { ...state, memberId: id.memberId, sig: cached.sig };
+    try {
+      const bytes = signAwarenessIdentity(id.sign, { docId, epoch: this.epoch, clientId, memberId: id.memberId, name, color });
+      const sig = Buffer.from(bytes).toString("base64");
+      this.awarenessSigs.set(docId, { key: cacheKey, sig });
+      return { ...state, memberId: id.memberId, sig };
+    } catch (err) {
+      console.error(`游標名簽章失敗 ${docId}(以未驗證身分在場):`, err);
+      return state;
+    }
+  }
+
+  /**
+   * 驗每筆收到的在場宣告(3b-1 收尾),回傳給 UI 的版本標上 `verified`。
+   * 簽章有效 → verified: true,名字可信;
+   * 未簽(舊版用戶端)或作者不在目錄 → verified: false,且**抹掉 memberId**——未驗證的 memberId
+   * 若流到 UI,冒稱他人 memberId 就能借到組織名冊背書的名字,反而製造出更可信的假身分;
+   * 簽了卻驗不過 → 整筆丟棄(那是主動偽造,不是相容性問題)。
+   * 強制簽章模式下連未簽的也丟棄,與寫入路徑同一套收緊策略。個人 vault 不簽也不驗。
+   */
+  private attestAwareness(states: Map<number, AwarenessState>, docId: string): Map<number, AwarenessState> {
+    if (!this.opts.ownerPubSign) return states;
+    const out = new Map<number, AwarenessState>();
+    let unknownAuthor = false;
+    for (const [clientId, state] of states) {
+      const claimed = typeof state["memberId"] === "string" ? state["memberId"] : "";
+      const sig = typeof state["sig"] === "string" ? state["sig"] : "";
+      const unverified = (): void => {
+        if (this.requireSigned) return;
+        const rest = Object.fromEntries(Object.entries(state).filter(([k]) => k !== "memberId" && k !== "sig"));
+        out.set(clientId, { ...rest, verified: false });
+      };
+      if (claimed === "" || sig === "") {
+        unverified();
+        continue;
+      }
+      const member = this.memberDir.get(claimed);
+      if (!member || member.epoch !== this.epoch) {
+        unknownAuthor = !member; // 目錄可能過期(剛加入的成員):背景重拉,這輪先當未驗證
+        unverified();
+        continue;
+      }
+      const ok = verifyAwarenessIdentity(Buffer.from(sig, "base64"), member.pubSign, {
+        docId,
+        epoch: this.epoch,
+        clientId,
+        memberId: claimed,
+        name: typeof state["name"] === "string" ? state["name"] : "",
+        color: typeof state["color"] === "string" ? state["color"] : "",
+      });
+      if (ok) out.set(clientId, { ...state, verified: true });
+    }
+    if (unknownAuthor) void this.pullDirectory();
+    return out;
   }
 
   private connect(): void {
@@ -451,6 +532,7 @@ export class SyncClient {
     this.epoch = epoch;
     this.rotationPending = false;
     this.memberDir = new Map(); // 舊紀元目錄作廢,重拉當前紀元的成員憑證(P4)
+    this.resignAwareness(); // 游標名簽章綁紀元:不重簽,在場的人會在對端變成「未驗證」
     if (!this.online) return; // 離線:重連 authOk 的 epoch 已相符,走正常 reconcile
     await this.pullDirectory(); // 新紀元目錄先就緒再 repull,免得重加密內容被誤判無效作者
     const local = await this.opts.host.listDocIds();
@@ -766,12 +848,12 @@ export class SyncClient {
       { added, updated, removed }: { added: number[]; updated: number[]; removed: number[] },
       origin: unknown,
     ): void => {
-      this.opts.onAwareness?.(docId, new Map(aw.getStates() as Map<number, AwarenessState>));
+      this.opts.onAwareness?.(docId, this.attestAwareness(new Map(aw.getStates() as Map<number, AwarenessState>), docId));
       if (origin === "remote") return; // 遠端來的不回廣播,避免迴圈
       this.sendAwareness(docId, aw, [...added, ...updated, ...removed]);
     };
     aw.on("update", onUpdate);
-    const entry: AwarenessEntry = { aw, onUpdate };
+    const entry: AwarenessEntry = { aw, onUpdate, base: undefined };
     this.awareness.set(docId, entry);
     return entry;
   }
@@ -783,6 +865,15 @@ export class SyncClient {
       .encrypt(docId, update)
       .then((payload) => this.send({ type: "awareness", docId, payload }))
       .catch((err: unknown) => console.error(`awareness 廣播失敗 ${docId}:`, err));
+  }
+
+  /** 輪換後以新紀元重簽在場宣告:簽章綁 epoch,舊簽章在對端一律驗不過 */
+  private resignAwareness(): void {
+    this.awarenessSigs.clear();
+    for (const [docId, entry] of this.awareness) {
+      if (entry.base === undefined || entry.aw.getLocalState() === null) continue;
+      entry.aw.setLocalState(this.signLocalAwareness(docId, entry.aw.clientID, entry.base));
+    }
   }
 
   /** 週期重播本地非空 awareness:讓新加入者看到、刷新對端過期計時 */

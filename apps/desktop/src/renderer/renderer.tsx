@@ -552,6 +552,7 @@ function Editor({
         block: binding.blockIndexAt(c.head), // 用 binding 增量 blocks,免整份重 parse
         color: c.color,
         name: c.name,
+        verified: c.verified,
       }));
       view.dispatch(view.state.tr.setMeta(remoteCursorKey, blockCursors));
     }
@@ -1972,11 +1973,21 @@ function App() {
         <>
           {participants.length > 0 && (
             <div className="presence-bar">
-              {participants.map((p) => (
-                <span key={p.clientId} className="presence-avatar" style={{ background: p.color }} title={p.name}>
-                  {[...p.name][0] ?? "?"}
-                </span>
-              ))}
+              {participants.map((p) => {
+                // 顯示名優先組織名冊(可驗);tooltip 誠實說明這個名字憑什麼可信 —— 或不可信
+                const shown = p.orgName ?? p.name;
+                const titleKey = p.orgName ? "presence.orgVerified.title" : p.verified ? "presence.identityVerified.title" : "presence.unverified.title";
+                return (
+                  <span
+                    key={p.clientId}
+                    className={p.verified ? "presence-avatar verified" : "presence-avatar"}
+                    style={{ background: p.color }}
+                    title={t(titleKey, { name: shown })}
+                  >
+                    {[...shown][0] ?? "?"}
+                  </span>
+                );
+              })}
             </div>
           )}
           <Editor

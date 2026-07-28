@@ -13,6 +13,8 @@ export interface RemoteCursor {
   color: string;
   anchor: number;
   head: number;
+  /** 游標名簽章(3b-1 收尾)驗過:名字確實出自那位擁有者背書的成員 → 標籤加徽章 */
+  verified: boolean;
 }
 
 /** leading + trailing 節流:立刻送第一次,期間合併,最後一次保證送出(游標精確) */
@@ -70,16 +72,19 @@ export function decodeCursor(doc: Y.Doc, ytext: Y.Text, cur: CursorPayload): { a
   }
 }
 
-/** 從 onPresence 的 participant 抽出可渲染的遠端游標(有 cur 欄位者) */
+/**
+ * 從 onPresence 的 participant 抽出可渲染的遠端游標(有 cur 欄位者)。
+ * 顯示名優先序(3b-1 收尾):組織名冊背書的名字 > 成員自選名——前者有組織簽章可驗,後者只是自稱。
+ */
 export function participantCursor(
   doc: Y.Doc,
   ytext: Y.Text,
-  p: { clientId: number; name: string; color: string; state: Record<string, unknown> },
+  p: { clientId: number; name: string; color: string; state: Record<string, unknown>; verified?: boolean; orgName?: string },
 ): RemoteCursor | null {
   const cur = p.state["cur"];
   if (!cur || typeof cur !== "object") return null;
   const payload = cur as CursorPayload;
   if (typeof payload.a !== "string" || typeof payload.h !== "string") return null;
   const pos = decodeCursor(doc, ytext, payload);
-  return pos && { clientId: p.clientId, name: p.name, color: p.color, ...pos };
+  return pos && { clientId: p.clientId, name: p.orgName ?? p.name, color: p.color, verified: p.verified === true, ...pos };
 }

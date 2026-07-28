@@ -249,6 +249,50 @@ rotate keys; those require the root key, which stays with the team. (Optional
 escrow, where a vault deliberately wraps its root key to the organization, is
 designed but not implemented — see the roadmap in `plan/`.)
 
+### 2.10 Presence identity signatures (since 0.22)
+
+Live collaboration (cursors, selections, presence) travels over the same
+end-to-end-encrypted awareness channel, but its payload used to be **entirely
+self-asserted**: anyone holding the document key could broadcast any name they
+liked, and the name next to a remote cursor was unverifiable. Names are the
+easiest thing in a collaboration UI to impersonate, and they had no protection at
+all.
+
+Each presence claim is now signed by its author:
+
+```
+sign(memberSignKey,
+     "stele-awareness-v1" ‖ docId ‖ epoch ‖ clientId ‖ memberId ‖ name ‖ color)
+```
+
+Recipients look up the claimed `memberId` in the owner-signed member-cert
+directory (§2.8) and verify the signature against that trusted key. A verified
+claim is shown with the same ✓ badge used for comment authors; the display name
+prefers the organization directory entry (§2.9) over the member's self-chosen
+name, since only the former is endorsed by a signature.
+
+Binding `clientId` is what makes this more than decoration. Awareness is keyed by
+Yjs client id, so without it any member could copy someone else's signed claim
+verbatim into their own slot and appear as that person. `docId` prevents reuse
+across documents and `epoch` expires claims at key rotation, so a removed
+member's old claim cannot be replayed.
+
+Failure handling mirrors the write path: a claim that is **signed but fails
+verification** is dropped entirely (that is active forgery, not a compatibility
+gap), while an **unsigned** claim is still displayed but marked unverified and
+stripped of its `memberId` — otherwise merely *asserting* someone else's member
+id would borrow the organization's endorsement of their name, producing a more
+convincing fake than plain self-assertion. Forced-signing mode (§2.8) drops
+unsigned presence too. Personal vaults have no verifiable identity concept and
+are unaffected.
+
+Residual, deliberately accepted: the signature covers **identity, not cursor
+position**. Re-signing on every cursor move would be pointless overhead, so a
+legitimate member can still misreport which paragraph they are editing. That is
+not impersonation. Likewise, presence proves *"this name belongs to this member"*,
+not *"this member is online right now"* — a malicious server can withhold or
+briefly replay claims within an epoch.
+
 ---
 
 ## 3. Trust boundaries
@@ -265,6 +309,7 @@ are server-enforced (hold only if the server is honest).**
 | Authenticity of key distribution | Owner Ed25519 signature on every envelope |
 | Authenticity of role *assignment* | Owner-signed role credentials (§2.6) |
 | Authenticity of individual writes | Per-write author signatures + member-cert directory (§2.8) |
+| Authenticity of collaborator names in presence | Per-claim presence signatures verified against the same directory (§2.10) |
 | Forward secrecy on member removal | Key rotation + re-encryption (§2.7) |
 | Per-space confidentiality | Independent per-space key, wrapped only to the access list |
 | No cross-vault / cross-epoch key replay | Context binding in the envelope HKDF |

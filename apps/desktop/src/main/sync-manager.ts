@@ -59,6 +59,16 @@ export interface Participant {
   name: string;
   color: string;
   state: AwarenessState;
+  /**
+   * 游標名簽章(3b-1 收尾)驗過:name 確實出自這位 memberId 的成員,不是自稱的。
+   * 個人 vault 沒有可驗的身分概念,一律 false。
+   */
+  verified: boolean;
+  /** 簽章證明的成員 id;未驗證者一律 undefined(自稱的 memberId 不外流,免得借到組織名冊的背書) */
+  memberId?: string;
+  /** 組織名冊(3b-1)背書的顯示名;由 main 依 memberId 補上,只有驗過身分的成員查得到 */
+  orgName?: string;
+  orgDepartment?: string;
 }
 
 /** 由 ws(s) 同步網址推導檢視器的 http(s) 基底;分享頁與 WS 同一台伺服器同一埠 */
@@ -417,12 +427,16 @@ export class SyncManager implements SpaceSyncHooks, CommentSyncHooks {
     const participants: Participant[] = [];
     for (const [clientId, state] of states) {
       if (state["deviceId"] === this.self.deviceId) continue; // 排除自己
+      const memberId = typeof state["memberId"] === "string" ? state["memberId"] : undefined;
       participants.push({
         clientId,
         deviceId: typeof state["deviceId"] === "string" ? state["deviceId"] : "",
         name: typeof state["name"] === "string" ? state["name"] : "訪客",
         color: typeof state["color"] === "string" ? state["color"] : "#888",
         state,
+        // verified 與 memberId 由 SyncClient 驗過簽章才附上(見 attestAwareness);這裡只是轉述,不自行判定
+        verified: state["verified"] === true,
+        ...(memberId ? { memberId } : {}),
       });
     }
     this.onPresence(rel, participants);

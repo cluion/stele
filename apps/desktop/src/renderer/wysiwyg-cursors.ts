@@ -12,14 +12,16 @@ export interface BlockCursor {
   block: number;
   color: string;
   name: string;
+  /** 游標名簽章驗過(3b-1 收尾):標籤加 ✓,與留言的已驗證徽章同一套語彙 */
+  verified: boolean;
 }
 
 export const remoteCursorKey = new PluginKey<DecorationSet>("stele-remote-cursors");
 
-function labelDOM(color: string, name: string): HTMLElement {
+function labelDOM(color: string, name: string, verified: boolean): HTMLElement {
   const el = document.createElement("span");
   el.className = "remote-block-label";
-  el.textContent = name;
+  el.textContent = verified ? `✓ ${name}` : name;
   el.style.background = color;
   return el;
 }
@@ -41,7 +43,7 @@ function build(doc: PMNode, cursors: BlockCursor[]): DecorationSet {
     const to = from + doc.child(i).nodeSize;
     decos.push(
       Decoration.node(from, to, { class: "remote-block", style: `box-shadow: -3px 0 0 ${c.color}` }),
-      Decoration.widget(from + 1, () => labelDOM(c.color, c.name), {
+      Decoration.widget(from + 1, () => labelDOM(c.color, c.name, c.verified), {
         side: -1,
         key: `rc-${c.clientId}`,
         ignoreSelection: true,

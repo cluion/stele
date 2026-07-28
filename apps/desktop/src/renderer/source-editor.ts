@@ -18,17 +18,19 @@ class CaretWidget extends WidgetType {
   constructor(
     private readonly color: string,
     private readonly name: string,
+    /** 游標名簽章驗過(3b-1 收尾):標籤加 ✓ */
+    private readonly verified: boolean,
   ) {
     super();
   }
   eq(other: CaretWidget): boolean {
-    return other.color === this.color && other.name === this.name;
+    return other.color === this.color && other.name === this.name && other.verified === this.verified;
   }
   toDOM(): HTMLElement {
     const el = document.createElement("span");
     el.className = "remote-caret";
     el.style.borderColor = this.color;
-    el.setAttribute("data-name", this.name);
+    el.setAttribute("data-name", this.verified ? `✓ ${this.name}` : this.name);
     el.style.setProperty("--caret-color", this.color);
     return el;
   }
@@ -86,7 +88,7 @@ const remoteCursorField = StateField.define<DecorationSet>({
           );
         }
         const caretAt = Math.min(Math.max(0, c.head), len);
-        ranges.push(Decoration.widget({ widget: new CaretWidget(c.color, c.name), side: 1 }).range(caretAt));
+        ranges.push(Decoration.widget({ widget: new CaretWidget(c.color, c.name, c.verified), side: 1 }).range(caretAt));
       }
       next = Decoration.set(ranges, true); // 第二參數 sort=true,交給 RangeSet 排序
     }

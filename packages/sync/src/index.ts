@@ -91,6 +91,7 @@ export {
   type VerifiedOrgPolicy,
 } from "./org-credential.ts";
 export { signWrite, verifyWrite, type WriteKind, type WriteAuthFields } from "./update-signature.ts";
+export { signAwarenessIdentity, verifyAwarenessIdentity, type AwarenessIdentityClaims } from "./awareness-identity.ts";
 export { signVaultPolicy, verifyVaultPolicy, type VaultPolicyClaims, type VerifiedPolicy } from "./vault-policy.ts";
 export {
   readSpaces,

@@ -276,4 +276,19 @@ describe("SyncManager 桌面端對端", () => {
     a.manager.setActiveNote(undefined);
     await until(() => (b.presence.get("共讀.md")?.length ?? 0) === 0, "甲切走後乙在場清空");
   });
+
+  it("個人 vault 沒有可驗的身分:在場一律標為未驗證,memberId 不外流(3b-1 收尾)", async () => {
+    const vaultId = "v-在場未驗";
+    const cipherA = new VaultCipher(await deriveVaultKey("同密語", vaultId, 12));
+    const cipherB = new VaultCipher(await deriveVaultKey("同密語", vaultId, 12));
+    const a = makeDevice(vaultId, "devA", { "共讀.md": "# 共讀\n" }, cipherA);
+    const b = makeDevice(vaultId, "devB", {}, cipherB);
+    await until(() => content(b, "共讀.md") === "# 共讀\n", "乙物化共讀");
+
+    a.manager.setActiveNote("共讀.md");
+    await until(() => (b.presence.get("共讀.md")?.length ?? 0) === 1, "乙看到甲在場");
+    const seen = b.presence.get("共讀.md")![0]!;
+    expect(seen.verified).toBe(false);
+    expect(seen.memberId).toBeUndefined();
+  });
 });

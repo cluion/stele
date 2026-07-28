@@ -22,7 +22,7 @@ describe("WYSIWYG 塊級遠端游標", () => {
 
   it("setMeta 後對應段落產生 node 與 label decoration", () => {
     let state = stateFor(SOURCE);
-    const cursors: BlockCursor[] = [{ clientId: 7, block: 2, color: "#0e7b93", name: "甲" }];
+    const cursors: BlockCursor[] = [{ clientId: 7, block: 2, color: "#0e7b93", name: "甲", verified: true }];
     state = state.apply(state.tr.setMeta(remoteCursorKey, cursors));
     const set = remoteCursorKey.getState(state)!;
     // block 2 對應第 3 個頂層子節點,decoration 落在其範圍內
@@ -32,7 +32,7 @@ describe("WYSIWYG 塊級遠端游標", () => {
 
   it("超出範圍的 block index 被 clamp,不崩潰", () => {
     let state = stateFor(SOURCE);
-    state = state.apply(state.tr.setMeta(remoteCursorKey, [{ clientId: 1, block: 999, color: "#000", name: "X" }]));
+    state = state.apply(state.tr.setMeta(remoteCursorKey, [{ clientId: 1, block: 999, color: "#000", name: "X", verified: false }]));
     expect(remoteCursorKey.getState(state)!.find().length).toBe(2);
   });
 
