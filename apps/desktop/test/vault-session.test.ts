@@ -246,4 +246,22 @@ describe("改名與刪除", () => {
     expect(() => readFileSync(path.join(dir, "a.md"))).toThrow();
     expect(session.list().files).not.toContain("a.md");
   });
+
+  it("`.stele` 底下的檔案不是筆記:版本歷史用 .md 存,不可出現在筆記清單", async () => {
+    const dir = makeVault();
+    // 時光機把版本快照存成純 Markdown(使用者自己翻也讀得懂),正因如此掃描必須排除隱藏目錄——
+    // 否則歷史版本會出現在側欄與搜尋,還會被配 docId 上傳到同步伺服器
+    mkdirSync(path.join(dir, ".stele", "history", "5f8e0000-0000-4000-8000-00000000aaaa"), { recursive: true });
+    writeFileSync(path.join(dir, ".stele", "history", "5f8e0000-0000-4000-8000-00000000aaaa", "20260728T153045Z.md"), "# 舊版\n");
+    mkdirSync(path.join(dir, ".git"), { recursive: true });
+    writeFileSync(path.join(dir, ".git", "COMMIT_EDITMSG.md"), "not a note\n");
+
+    const session = new VaultSession(dir, noop);
+    const files = session.list().files;
+    expect(files).toContain("a.md");
+    expect(files.some((f) => f.includes(".stele"))).toBe(false);
+    expect(files.some((f) => f.includes(".git"))).toBe(false);
+    await session.destroy();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });

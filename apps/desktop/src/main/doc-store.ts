@@ -7,6 +7,12 @@ import path from "node:path";
 export interface DocPersistence {
   load(): Uint8Array | undefined;
   save(state: Uint8Array): Promise<void>;
+  /**
+   * 內容鏡像落盤後記一個版本快照(時光機)。走這個介面而非讓 DocHost 認識 HistoryStore:
+   * docId 的對照在 VaultSession 手上,DocHost 只知道自己的 rel。
+   * force = 關檔/改名等收尾時機,要捕捉最後狀態,否則短暫的編輯 session 完全不會留下歷史。
+   */
+  recordVersion?(text: string, force?: boolean): void;
 }
 
 /**

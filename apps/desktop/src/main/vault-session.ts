@@ -7,6 +7,7 @@ import path from "node:path";
 import { extractWikilinks, resolveWikilink, rewriteWikilinks, type WikilinkRef } from "@stele/editor-core";
 import { SearchIndex } from "./search-index.ts";
 import { DocStore, type DocPersistence } from "./doc-store.ts";
+import { HistoryStore } from "./history-store.ts";
 
 const FLUSH_DEBOUNCE_MS = 120;
 
@@ -130,6 +131,8 @@ class DocHost {
       try {
         await writeFile(tmp, content);
         await rename(tmp, this.file);
+        // 版本快照跟著鏡像走:落盤成功才記,失敗的內容不該進歷史
+        this.persistence.recordVersion?.(content);
       } catch (err) {
         console.error(`鏡像寫回失敗 ${this.rel}:`, err);
       }
@@ -156,9 +159,29 @@ class DocHost {
   }
 
   private absorbContent(onDisk: string): void {
+    this.applyTextDiff(onDisk, "external-file");
+    this.lastMirrored = onDisk;
+  }
+
+  /** 筆記目前全文;CRDT 是真相,不讀磁碟 */
+  text(): string {
+    return this.ytext.toString();
+  }
+
+  /**
+   * 還原成指定內容(時光機)。走 CRDT 的最小差異而非整份重寫:
+   * 協作者收到的是一串小改動,游標不會全部跳掉;origin 非 external-file,
+   * 因此 onDocUpdate 會照常標記待鏡像並排程寫回磁碟。
+   */
+  restoreContent(text: string): void {
+    this.applyTextDiff(text, "restore");
+  }
+
+  /** 以最小差異把 ytext 收斂到 next;origin 決定後續是否要鏡像寫回 */
+  private applyTextDiff(next: string, origin: string): void {
     this.ydoc.transact(() => {
       let pos = 0;
-      for (const [kind, text] of diff(this.ytext.toString(), onDisk)) {
+      for (const [kind, text] of diff(this.ytext.toString(), next)) {
         if (kind === diff.EQUAL) pos += text.length;
         else if (kind === diff.DELETE) this.ytext.delete(pos, text.length);
         else {
@@ -166,8 +189,7 @@ class DocHost {
           pos += text.length;
         }
       }
-    }, "external-file");
-    this.lastMirrored = onDisk;
+    }, origin);
   }
 
   /** keepDoc:改名換宿主時保留 Y.Doc 實例,同步層的引用不失效 */
@@ -180,6 +202,8 @@ class DocHost {
     // 已觸發但 I/O 未完成的 flush 也要等完,否則 rename/delete 後舊路徑會被復活
     await this.flushInFlight;
     if (this.dirtyMirror || this.dirtyState) await this.flush();
+    // 收尾強制留一版:節流窗內的最後編輯否則永遠不會有歷史(開五分鐘就關掉的那種 session)
+    this.persistence.recordVersion?.(this.ytext.toString(), true);
     await this.watcher.close();
     this.ydoc.off("update", this.onDocUpdate);
     if (!keepDoc) this.ydoc.destroy();
@@ -250,9 +274,19 @@ class LinkIndex {
   }
 }
 
+/**
+ * 掃描與監看一律略過隱藏目錄。`.stele` 是 vault 自己的資料——版本歷史(時光機)就存成 `.md`,
+ * 不排除的話它們會被當成筆記出現在側欄、搜尋、關聯圖,還會被配 docId 上傳到同步伺服器。
+ * `.git`、`.obsidian` 等同理:隱藏目錄不是使用者的筆記。
+ */
+export function isHiddenRel(rel: string): boolean {
+  return rel.split(/[\\/]/).some((seg) => seg.startsWith("."));
+}
+
 function listMarkdown(dir: string, prefix = ""): string[] {
   const out: string[] = [];
   for (const name of readdirSync(dir).sort()) {
+    if (name.startsWith(".")) continue;
     const full = path.join(dir, name);
     if (statSync(full).isDirectory()) out.push(...listMarkdown(full, prefix + name + "/"));
     else if (name.endsWith(".md")) out.push(prefix + name);
@@ -270,6 +304,8 @@ export class VaultSession {
   private readonly index: LinkIndex;
   private readonly searchIndex = new SearchIndex();
   private readonly docStore: DocStore;
+  /** 筆記版本歷史(時光機);純本地,不需要同步也能用 */
+  readonly history: HistoryStore;
   private readonly watcher: FSWatcher;
   private readonly fileListeners = new Set<(event: VaultFileEvent) => void>();
 
@@ -279,6 +315,7 @@ export class VaultSession {
     if (!statSync(this.root).isDirectory()) throw new Error(`不是資料夾:${dir}`);
 
     this.docStore = new DocStore(this.root);
+    this.history = new HistoryStore(this.root);
     this.index = new LinkIndex(this.root);
     for (const rel of listMarkdown(this.root)) this.refreshFile(rel);
 
@@ -289,6 +326,7 @@ export class VaultSession {
     this.watcher.on("all", (event, file) => {
       if (!file.endsWith(".md")) return;
       const rel = path.relative(this.root, file);
+      if (isHiddenRel(rel)) return; // .stele/history 的版本快照也是 .md,不可當成筆記事件
       if (event === "unlink") {
         // 外部刪除不清 CRDT 狀態:git 切分支會暫時 unlink,檔案回來時歷史才接得上
         this.index.removeFile(rel);
@@ -390,7 +428,24 @@ export class VaultSession {
     return {
       load: () => this.docStore.load(rel),
       save: (state) => this.docStore.save(rel, state),
+      recordVersion: (text, force) => {
+        try {
+          this.history.record(this.docStore.idFor(rel), text, Date.now(), force);
+        } catch (err) {
+          console.error(`版本快照失敗 ${rel}:`, err); // 歷史是附加功能,絕不擋編輯流程
+        }
+      },
     };
+  }
+
+  /** 筆記目前全文(CRDT 為準);還原前用來把現況先存成一版 */
+  readNote(rel: string): string {
+    return this.ensureHost(rel).text();
+  }
+
+  /** 還原成歷史版本的內容;協作者與編輯器都會收到 */
+  restoreNote(rel: string, text: string): void {
+    this.ensureHost(rel).restoreContent(text);
   }
 
   /** 同步用 doc id 介面:id 穩定跟著筆記走 */

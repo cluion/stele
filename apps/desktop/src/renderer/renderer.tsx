@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useTranslation } from "react-i18next";
 import * as Y from "yjs";
+import diff from "fast-diff";
 import type { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import {
@@ -31,6 +32,7 @@ import type {
   Participant,
   ShareEntry,
   SharePermission,
+  VersionEntry,
   CommentIdentity,
   SpacesOverview,
   SpaceInfo,
@@ -253,6 +255,7 @@ function Editor({
   readOnly,
   onNavigate,
   onToggleMode,
+  onOpenHistory,
 }: {
   rel: string;
   mode: EditorMode;
@@ -262,6 +265,7 @@ function Editor({
   readOnly: boolean;
   onNavigate: (target: string) => void;
   onToggleMode: () => void;
+  onOpenHistory: () => void;
 }) {
   const { t } = useTranslation();
   const paneRef = useRef<HTMLDivElement>(null);
@@ -629,6 +633,9 @@ function Editor({
               })}
             </span>
           )}
+          <button className="mode-toggle" title={t("history.open")} aria-label={t("history.open")} onClick={onOpenHistory}>
+            🕘
+          </button>
           <button
             className={commentsOpen ? "mode-toggle active" : "mode-toggle"}
             title={t("comments.title")}
@@ -935,6 +942,127 @@ function Welcome({ onChoose, onOpenShare }: { onChoose: () => void; onOpenShare:
 }
 
 /** 唯讀分享對話框:建立連結、複製、撤銷。可編輯分享後端已備但無消費端,故此處只做唯讀 */
+/**
+ * 筆記版本回溯(時光機)。版本來自本地 `.stele/history/`,不需要同步或團隊。
+ * 左側選版本、右側看它與**目前內容**的差異,確認後才還原——還原本身也會先把現況存成一版。
+ */
+function HistoryDialog({ rel, onClose }: { rel: string; onClose: () => void }) {
+  const { t } = useTranslation();
+  const name = rel.replace(/\.md$/, "");
+  const [versions, setVersions] = useState<VersionEntry[]>([]);
+  const [picked, setPicked] = useState<number | null>(null);
+  const [oldText, setOldText] = useState<string | null>(null);
+  const [current, setCurrent] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    void Promise.all([window.stele.historyList(rel), window.stele.historyCurrent(rel)]).then(([list, now]) => {
+      if (!live) return;
+      setVersions(list);
+      setPicked(list[0]?.ts ?? null);
+      setCurrent(now);
+    });
+    return () => {
+      live = false;
+    };
+  }, [rel]);
+
+  // 選定版本 → 取它的全文,同時取目前全文來比對
+  useEffect(() => {
+    if (picked === null) return;
+    let live = true;
+    void window.stele.historyRead(rel, picked).then((text) => {
+      if (live) setOldText(text);
+    });
+    return () => {
+      live = false;
+    };
+  }, [rel, picked]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const restore = (): void => {
+    if (picked === null) return;
+    setBusy(true);
+    setFailed(null);
+    void window.stele
+      .historyRestore(rel, picked)
+      .then(() => onClose())
+      .catch((e: unknown) => setFailed(e instanceof Error ? e.message : String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  const when = (ts: number): string => new Date(ts).toLocaleString();
+
+  return (
+    <div className="switcher-backdrop" onClick={onClose}>
+      <div className="switcher history" onClick={(e) => e.stopPropagation()}>
+        <h2>{t("history.title", { name })}</h2>
+        {versions.length === 0 ? (
+          <p className="placeholder">{t("history.empty")}</p>
+        ) : (
+          <div className="history-body">
+            <ul className="history-list">
+              {versions.map((v) => (
+                <li key={v.ts}>
+                  <button
+                    className={v.ts === picked ? "selected" : ""}
+                    onClick={() => {
+                      setPicked(v.ts);
+                      setOldText(null); // 先清空,免得新版本載入前還顯示上一版的差異
+                    }}
+                  >
+                    <span className="history-when">{when(v.ts)}</span>
+                    <span className="history-size">{Math.max(1, Math.round(v.bytes / 1024))} KB</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <div className="history-diff">
+              {oldText === null ? (
+                <p className="placeholder">{t("history.loading")}</p>
+              ) : (
+                <DiffView from={oldText} to={current} />
+              )}
+            </div>
+          </div>
+        )}
+        {failed && <p className="err">{failed}</p>}
+        <div className="history-actions">
+          <p className="placeholder">{t("history.hint")}</p>
+          <button className="primary" disabled={busy || picked === null} onClick={restore}>
+            {busy ? t("history.restoring") : t("history.restore")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 字元級差異;綠 = 這一版有而現在沒有的,紅 = 現在才加上去的 */
+function DiffView({ from, to }: { from: string; to: string }) {
+  const { t } = useTranslation();
+  const parts = diff(from, to);
+  if (parts.every((p) => p[0] === 0)) return <p className="placeholder">{t("history.same")}</p>;
+  return (
+    <pre className="diff">
+      {parts.map((p, i) => (
+        <span key={i} className={p[0] === -1 ? "del" : p[0] === 1 ? "ins" : ""}>
+          {p[1]}
+        </span>
+      ))}
+    </pre>
+  );
+}
+
 function ShareDialog({ rel, onClose }: { rel: string; onClose: () => void }) {
   const { t } = useTranslation();
   const name = rel.replace(/\.md$/, "");
@@ -1621,6 +1749,7 @@ function App() {
   // "off" = 這個 vault 沒設定同步,指示燈隱藏
   const [syncState, setSyncState] = useState("off");
   // 各筆記的在場協作者(不含自己);以 rel 為 key,切換筆記只是讀不同 key
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [presenceByRel, setPresenceByRel] = useState<Record<string, Participant[]>>({});
   // 消費分享連結:null = 未開共享;貼上連結對話框開關
   const [shared, setShared] = useState<SharedState | null>(null);
@@ -2002,6 +2131,7 @@ function App() {
             participants={participants}
             readOnly={teamReadOnly}
             onNavigate={navigate}
+            onOpenHistory={() => setHistoryOpen(true)}
             onToggleMode={() =>
               setModes((m) => {
                 const next = new Map(m);
@@ -2129,6 +2259,7 @@ function App() {
         />
       )}
       {shareRel && <ShareDialog rel={shareRel} onClose={() => setShareRel(null)} />}
+      {historyOpen && active && <HistoryDialog rel={active} onClose={() => setHistoryOpen(false)} />}
       {spacePick && (
         <div className="switcher-backdrop" onClick={() => setSpacePick(null)}>
           <div className="switcher space-picker" onClick={(e) => e.stopPropagation()}>

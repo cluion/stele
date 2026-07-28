@@ -774,3 +774,25 @@ body {
 .team-member-actions button { font-size: var(--fs-sm); padding: var(--sp-1) var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); }
 .team-member-actions button:hover { border-color: var(--accent); color: var(--accent); }
 .team-member-actions button.danger:hover { border-color: var(--err); color: var(--err); }
+
+/* 版本歷史(時光機):左側版本清單、右側與目前內容的差異 */
+.switcher.history { max-width: 56rem; text-align: left; padding: var(--sp-4); max-height: 82vh; display: flex; flex-direction: column; }
+.switcher.history h2 { font-size: var(--fs-lg); margin: 0 0 var(--sp-3); }
+.history-body { display: flex; gap: var(--sp-3); min-height: 0; flex: 1; }
+.history-list { list-style: none; margin: 0; padding: 0; width: 14rem; flex: 0 0 auto; overflow-y: auto; border-right: 1px solid var(--border); padding-right: var(--sp-2); }
+.history-list li { margin-bottom: 2px; }
+/* 時間與大小分兩行:一行擠不下「2026/7/28 下午11:43:11」+「1 KB」,會黏成一團看不懂。
+   選擇器要壓過 `.switcher li button { display: block }`(特異性 0,1,2),故帶上 .switcher.history */
+.switcher.history .history-list button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; padding: var(--sp-1) var(--sp-2); border-radius: var(--radius-sm); color: var(--text); font: inherit; text-align: left; }
+.switcher.history .history-list button:hover { background: var(--surface); }
+.switcher.history .history-list button.selected { background: var(--accent-subtle); color: var(--accent); }
+.history-when { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; font-size: var(--fs-sm); }
+.history-size { color: var(--text-faint); font-size: var(--fs-xs, 0.75rem); }
+.history-diff { flex: 1; min-width: 0; overflow-y: auto; }
+.history-diff .diff { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-sm); line-height: 1.6; }
+/* 綠 = 這一版有而現在沒有的;紅 = 後來才加上去的 */
+.diff .del { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.diff .ins { background: color-mix(in srgb, var(--err) 18%, transparent); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--err) 55%, transparent); }
+.history-actions { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: 1px solid var(--border); }
+.history-actions .placeholder { margin: 0; font-size: var(--fs-sm); }
+.history-actions button.primary { white-space: nowrap; flex: 0 0 auto; width: auto; padding: var(--sp-2) var(--sp-4); }

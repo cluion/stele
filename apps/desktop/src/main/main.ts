@@ -1119,6 +1119,45 @@ ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {
 
 ipcMain.handle("vault:graph", () => requireSession().graph());
 
+/**
+ * 筆記版本歷史(時光機)。純本地功能:不需要同步、不需要團隊,離線也能用。
+ * 版本是 `.stele/history/<docId>/` 底下的純 Markdown 檔,使用者自己翻也讀得懂。
+ */
+ipcMain.handle("history:list", (_e, rel: unknown) => {
+  if (typeof rel !== "string") throw new Error("非法參數");
+  const session = requireSession();
+  const docId = session.peekDocId(rel);
+  return docId ? session.history.list(docId) : [];
+});
+
+/** 目前全文(CRDT 為準),供歷史面板與選定版本做差異比對 */
+ipcMain.handle("history:current", (_e, rel: unknown) => {
+  if (typeof rel !== "string") throw new Error("非法參數");
+  return requireSession().readNote(rel);
+});
+
+ipcMain.handle("history:read", (_e, rel: unknown, ts: unknown) => {
+  if (typeof rel !== "string" || typeof ts !== "number") throw new Error("非法參數");
+  const session = requireSession();
+  const docId = session.peekDocId(rel);
+  return (docId && session.history.read(docId, ts)) ?? null;
+});
+
+/**
+ * 還原某一版:把該版內容寫回筆記(走 CRDT,所以協作者也會同步收到)。
+ * **還原前先把現況存成一個版本**——否則「按錯還原」會是不可逆的資料遺失。
+ */
+ipcMain.handle("history:restore", (_e, rel: unknown, ts: unknown) => {
+  if (typeof rel !== "string" || typeof ts !== "number") throw new Error("非法參數");
+  const session = requireSession();
+  const docId = session.peekDocId(rel);
+  const text = docId ? session.history.read(docId, ts) : undefined;
+  if (docId === undefined || text === undefined) throw new Error("找不到這個版本");
+  session.history.record(docId, session.readNote(rel), Date.now(), true);
+  session.restoreNote(rel, text);
+  return { ok: true };
+});
+
 ipcMain.handle("vault:search", (_e, query: unknown) => requireSession().search(query));
 
 ipcMain.handle("vault:daily", () => {

@@ -80,6 +80,17 @@ export interface SteleApi {
   moveNoteToSpace(rel: string, spaceId: string): Promise<void>;
   /** 複製筆記到空間:目標得一篇全新筆記(原筆記不動),回傳副本 rel */
   copyNoteToSpace(rel: string, spaceId: string): Promise<string>;
+  /**
+   * 筆記版本歷史(時光機)。純本地:不需同步、不需團隊,離線可用。
+   * 版本是 `.stele/history/` 底下的純 Markdown 檔,使用者自己翻也讀得懂。
+   */
+  historyList(rel: string): Promise<VersionEntry[]>;
+  /** 讀某一版全文;不存在回 null */
+  historyRead(rel: string, ts: number): Promise<string | null>;
+  /** 筆記目前全文,供與歷史版本比對 */
+  historyCurrent(rel: string): Promise<string>;
+  /** 還原某一版(還原前會自動把現況先存成一版,按錯救得回來) */
+  historyRestore(rel: string, ts: number): Promise<{ ok: boolean }>;
   /** 空間變更稽核紀錄 */
   spaceAudit(): Promise<SpaceAuditItem[]>;
   /** 空間或歸屬有變(本地或遠端);回傳退訂函式 */
@@ -177,6 +188,13 @@ export interface SpacesOverview {
   spaces: SpaceInfo[];
   /** 筆記歸屬:rel → spaceId(僅非預設空間的筆記;其餘視為預設空間) */
   assignments: Record<string, string>;
+}
+
+/** 一筆歷史版本 */
+export interface VersionEntry {
+  /** unix 毫秒 */
+  ts: number;
+  bytes: number;
 }
 
 export interface SpaceAuditItem {
@@ -316,6 +334,10 @@ const api: SteleApi = {
   moveNoteToSpace: (rel, spaceId) => ipcRenderer.invoke("spaces:move", rel, spaceId),
   copyNoteToSpace: (rel, spaceId) => ipcRenderer.invoke("spaces:copy", rel, spaceId),
   spaceAudit: () => ipcRenderer.invoke("spaces:audit"),
+  historyList: (rel) => ipcRenderer.invoke("history:list", rel),
+  historyRead: (rel, ts) => ipcRenderer.invoke("history:read", rel, ts),
+  historyCurrent: (rel) => ipcRenderer.invoke("history:current", rel),
+  historyRestore: (rel, ts) => ipcRenderer.invoke("history:restore", rel, ts),
   onSpacesChanged: (cb) => {
     const handler = () => cb();
     ipcRenderer.on("spaces:changed", handler);
