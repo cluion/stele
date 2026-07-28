@@ -26,6 +26,7 @@ import { remoteCursorPlugin, remoteCursorKey, type BlockCursor } from "./wysiwyg
 import { commentMarkPlugin, commentMarkKey, type CommentBlock } from "./comment-marks.ts";
 import { QueryNodeView, QUERY_LANG } from "./query-view.ts";
 import { GraphView } from "./graph-view.tsx";
+import { CanvasView } from "./canvas-view.tsx";
 import type {
   SteleApi,
   BacklinkItem,
@@ -43,6 +44,12 @@ import type {
 } from "../main/preload.ts";
 
 type EditorMode = "wysiwyg" | "source";
+
+/** 顯示用檔名:兩種副檔名都剝掉 */
+const displayName = (rel: string): string => rel.replace(/\.(md|canvas)$/, "");
+const isCanvas = (rel: string): boolean => rel.endsWith(".canvas");
+/** wikilink 目標:白板保留副檔名(解析器靠它分辨),Markdown 依慣例省略 */
+const linkTarget = (rel: string): string => (isCanvas(rel) ? rel : rel.replace(/\.md$/, ""));
 
 declare global {
   interface Window {
@@ -358,7 +365,7 @@ function Editor({
     const view = viewRef.current;
     const open = suggestRef.current.open;
     if (!view || !open) return;
-    const node = view.state.schema.nodes["wikilink"]!.create({ target: file.replace(/\.md$/, "") });
+    const node = view.state.schema.nodes["wikilink"]!.create({ target: linkTarget(file) });
     view.dispatch(view.state.tr.replaceRangeWith(open.from, view.state.selection.from, node));
     setSuggest(null);
     view.focus();
@@ -472,7 +479,7 @@ function Editor({
               ? new QueryNodeView(node, {
                   run: (src) => window.stele.runQuery(src),
                   // 走 ref:EditorView 只建立一次,直接捕捉 onNavigate 會釘死第一版
-                  open: (path) => navigateRef.current(path.replace(/\.md$/, "")),
+                  open: (path) => navigateRef.current(linkTarget(path)),
                   labels: () => ({
                     running: tRef.current("query.running"),
                     empty: tRef.current("query.empty"),
@@ -693,7 +700,7 @@ function Editor({
                   pickSuggest(f);
                 }}
               >
-                {f.replace(/\.md$/, "")}
+                {displayName(f)}
               </button>
             </li>
           ))}
@@ -749,8 +756,12 @@ function Backlinks({ rel, onOpen }: { rel: string; onOpen: (rel: string) => void
         {items.map((item, i) => (
           <li key={`${item.file}-${i}`}>
             <button onClick={() => onOpen(item.file)}>
-              <span className="file">{item.file.replace(/\.md$/, "")}</span>
-              <span className="context">{item.line}</span>
+              <span className="file">
+                {isCanvas(item.file) && <span className="canvas-badge">◲</span>}
+                {displayName(item.file)}
+              </span>
+              {/* 白板沒有「所在行」可顯示,改標明它是一張白板上的節點 */}
+              <span className="context">{isCanvas(item.file) ? t("backlinks.onCanvas") : item.line}</span>
             </button>
           </li>
         ))}
@@ -796,7 +807,7 @@ function QuickSwitcher({
 
   const norm = trimmed.toLowerCase();
   const hasExact = files.some((f) => {
-    const noExt = f.replace(/\.md$/, "").toLowerCase();
+    const noExt = displayName(f).toLowerCase();
     return noExt === norm || noExt.slice(noExt.lastIndexOf("/") + 1) === norm;
   });
   const items: SwitcherItem[] = [
@@ -862,7 +873,7 @@ function QuickSwitcher({
                 onClick={() => pick(item)}
               >
                 {item.kind === "file"
-                  ? item.rel.replace(/\.md$/, "")
+                  ? displayName(item.rel)
                   : t("switcher.create", { name: item.name })}
               </button>
             </li>
@@ -941,7 +952,7 @@ function SearchModal({ onPick, onClose }: { onPick: (rel: string) => void; onClo
                   onClose();
                 }}
               >
-                <span className="file">{hit.file.replace(/\.md$/, "")}</span>
+                <span className="file">{displayName(hit.file)}</span>
                 <span className="context">{hit.line}</span>
               </button>
             </li>
@@ -974,7 +985,7 @@ function Welcome({ onChoose, onOpenShare }: { onChoose: () => void; onOpenShare:
  */
 function HistoryDialog({ rel, onClose }: { rel: string; onClose: () => void }) {
   const { t } = useTranslation();
-  const name = rel.replace(/\.md$/, "");
+  const name = displayName(rel);
   const [versions, setVersions] = useState<VersionEntry[]>([]);
   const [picked, setPicked] = useState<number | null>(null);
   const [oldText, setOldText] = useState<string | null>(null);
@@ -1091,7 +1102,7 @@ function DiffView({ from, to }: { from: string; to: string }) {
 
 function ShareDialog({ rel, onClose }: { rel: string; onClose: () => void }) {
   const { t } = useTranslation();
-  const name = rel.replace(/\.md$/, "");
+  const name = displayName(rel);
   const [shares, setShares] = useState<ShareEntry[]>([]);
   const [link, setLink] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -2002,17 +2013,26 @@ function App() {
       .catch((err: unknown) => console.error("複製到空間失敗:", err));
   };
   const renderNote = (f: string) => (
-    <button key={f} data-rel={f} className={f === active ? "active" : ""} onClick={() => activate(f)}>
-      {f.replace(/\.md$/, "")}
+    <button
+      key={f}
+      data-rel={f}
+      className={[f === active ? "active" : "", isCanvas(f) ? "canvas-item" : ""].filter(Boolean).join(" ")}
+      onClick={() => activate(f)}
+      // 拖到白板上即成為一個 file 節點;白板自己也可以被放上另一張白板
+      draggable
+      onDragStart={(e) => e.dataTransfer.setData("text/stele-note", f)}
+    >
+      {isCanvas(f) && <span className="canvas-badge">◲</span>}
+      {displayName(f)}
     </button>
   );
 
-  /** 未命名、未命名 2、未命名 3… 找到第一個沒被用掉的 */
-  const newUntitled = (folder: string) => {
-    const base = t("contextmenu.untitled");
+  /** 未命名、未命名 2、未命名 3… 找到第一個沒被用掉的;副檔名決定建的是筆記還是白板 */
+  const newUntitled = (folder: string, ext: ".md" | ".canvas" = ".md") => {
+    const base = t(ext === ".canvas" ? "contextmenu.untitledCanvas" : "contextmenu.untitled");
     let name = `${folder}${base}`;
-    for (let n = 2; files.includes(`${name}.md`); n++) name = `${folder}${base} ${n}`;
-    void createAndOpen(name).catch((err: unknown) => console.error("新增筆記失敗:", err));
+    for (let n = 2; files.includes(`${name}${ext}`); n++) name = `${folder}${base} ${n}`;
+    void createAndOpen(`${name}${ext}`).catch((err: unknown) => console.error("新增失敗:", err));
     setMenu(null);
   };
 
@@ -2147,6 +2167,11 @@ function App() {
             setGraphOpen(false);
           }}
         />
+      ) : active && isCanvas(active) ? (
+        <>
+          <CanvasView key={`${vaultInfo.root}:${active}`} rel={active} files={files} readOnly={teamReadOnly} onNavigate={navigate} />
+          <Backlinks rel={active} onOpen={activate} />
+        </>
       ) : active ? (
         <>
           <Editor
@@ -2175,11 +2200,12 @@ function App() {
         <div className="menu-backdrop" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null); }}>
           <div className="context-menu" style={{ left: menu.x, top: menu.y }}>
             <button onClick={() => newUntitled(menu.folder)}>{t("contextmenu.newNote")}</button>
+            <button onClick={() => newUntitled(menu.folder, ".canvas")}>{t("contextmenu.newCanvas")}</button>
             {menu.rel && (
               <>
                 <button
                   onClick={() => {
-                    setRenaming({ rel: menu.rel!, value: menu.rel!.replace(/\.md$/, "") });
+                    setRenaming({ rel: menu.rel!, value: displayName(menu.rel!) });
                     setMenu(null);
                   }}
                 >
@@ -2218,7 +2244,7 @@ function App() {
                   onClick={() => {
                     const rel = menu.rel!;
                     setMenu(null);
-                    if (!window.confirm(t("delete.confirm", { name: rel.replace(/\.md$/, "") }))) return;
+                    if (!window.confirm(t("delete.confirm", { name: displayName(rel) }))) return;
                     void window.stele
                       .deleteNote(rel)
                       .then(async () => {
@@ -2291,7 +2317,7 @@ function App() {
           <div className="switcher space-picker" onClick={(e) => e.stopPropagation()}>
             <h2>
               {t(spacePick.action === "move" ? "space.pickMove" : "space.pickCopy", {
-                name: spacePick.rel.replace(/\.md$/, "").split("/").pop(),
+                name: displayName(spacePick.rel).split("/").pop(),
               })}
             </h2>
             {spaces

@@ -25,6 +25,7 @@ Stele is a local-first, end-to-end-encrypted, self-hostable knowledge base. Your
 - Backlinks panel and graph view
 - Daily notes with templates, CJK full-text search, quick switcher (Cmd/Ctrl+P)
 - **Query views**: a ` ```stele-query ` block turns your notes into a queryable database — list or table, filtered by tag, folder and frontmatter fields
+- **Canvas**: arrange text, notes, links and groups on an infinite canvas and connect them; saved as open-format [JSON Canvas](https://jsoncanvas.org) `.canvas`, interoperable with Obsidian
 - **Version history**: snapshots are kept automatically, diffed character by character, and restorable; every version is a plain Markdown file you can browse in your file manager
 - Quartz Day / Ember Night dual themes — dark is a native design, not an inversion
 - Multi-device end-to-end encrypted sync, self-hosted server in one `docker run`

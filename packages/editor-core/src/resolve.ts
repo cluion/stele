@@ -3,11 +3,15 @@
  * 規則:剝除 #錨點 → 完整相對路徑精確符合 → basename 不分大小寫符合取路徑最短者
  */
 
-/** 兩種解析共用的正規化,避免規則在兩處各自漂移 */
+/**
+ * 兩種解析共用的正規化,避免規則在兩處各自漂移。
+ * `.canvas` 與 `.md` 同列:白板是 vault 的一等公民,`[[架構圖.canvas]]` 該連得過去,
+ * 而白板自己的 file 節點存的就是帶副檔名的完整路徑。
+ */
 function normalize(rawTarget: string): string | undefined {
   const target = rawTarget.split("#")[0]!.trim();
   if (target.length === 0) return undefined;
-  return target.endsWith(".md") ? target : `${target}.md`;
+  return target.endsWith(".md") || target.endsWith(".canvas") ? target : `${target}.md`;
 }
 
 const basenameOf = (f: string): string => f.slice(f.lastIndexOf("/") + 1).toLowerCase();

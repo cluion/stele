@@ -825,3 +825,244 @@ body {
 .query-result table { border-collapse: collapse; width: 100%; font-size: var(--fs-sm); }
 .query-result th, .query-result td { border-bottom: 1px solid var(--border); padding: var(--sp-1) var(--sp-2); text-align: left; vertical-align: top; }
 .query-result th { color: var(--text-muted); font-weight: 600; white-space: nowrap; }
+
+/* ── 白板(JSON Canvas)────────────────────────────────
+   節點是 DOM 而非 2D canvas:文字要能選取、能編輯、能被輔助技術讀到。
+   世界層只有一個 transform,縮放/平移不需要重算任何節點的位置。 */
+.canvas {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: var(--bg);
+  /* 網格跟著世界層縮放不划算(要重畫 backgroundSize),固定格線已足夠給出「無限平面」的感覺 */
+  background-image: radial-gradient(var(--border) 1px, transparent 1px);
+  background-size: 24px 24px;
+  touch-action: none;
+  user-select: none;
+}
+.canvas-world { position: absolute; inset: 0; transform-origin: 0 0; }
+
+/* SVG 只當畫布用,尺寸給 1px 並讓內容溢出顯示:邊直接以世界座標作圖 */
+.canvas-edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+.canvas-edge { color: var(--border-strong); pointer-events: auto; }
+.canvas-edge-line { fill: none; stroke: currentColor; stroke-width: 2; }
+.canvas-edge-hit { fill: none; stroke: transparent; stroke-width: 14; pointer-events: stroke; cursor: pointer; }
+.canvas-edge-arrow { fill: currentColor; }
+.canvas-edge.selected { color: var(--accent); }
+.canvas-edge.selected .canvas-edge-line { stroke-width: 3; }
+.canvas-edge-label {
+  fill: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 4px;
+}
+.canvas-edge-pending { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 6 4; }
+
+.canvas-node {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+  font-size: var(--fs-ui);
+  color: var(--text);
+  cursor: grab;
+}
+.canvas-node.colored { border-color: var(--canvas-node-color); }
+.canvas-node.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--selection), var(--shadow-2); }
+.canvas-node.editing { cursor: text; }
+.canvas-node-body { flex: 1; padding: var(--sp-3); overflow: auto; line-height: var(--lh-ui); user-select: text; }
+.canvas-node-empty { color: var(--text-faint); margin: 0; }
+.canvas-node-title {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.canvas-node-title:hover { color: var(--accent); }
+.canvas-node-subpath { color: var(--text-muted); font-weight: 400; font-size: var(--fs-xs); }
+.canvas-node-preview { color: var(--text-muted); font-size: var(--fs-sm); }
+.canvas-node-missing { color: var(--warn); margin: 0; }
+.canvas-node-url { color: var(--text-muted); font-size: var(--fs-sm); word-break: break-all; }
+.canvas-node-input {
+  flex: 1;
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--sp-3);
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  line-height: var(--lh-ui);
+}
+
+/* 群組:框住一片區域,但中間必須「透明」,否則裡面的節點就再也點不到 */
+.canvas-node-group {
+  background: color-mix(in srgb, var(--canvas-node-color, var(--text-faint)) 8%, transparent);
+  border-style: dashed;
+  box-shadow: none;
+  pointer-events: none;
+}
+.canvas-node-group > .canvas-group-label,
+.canvas-node-group > .canvas-port,
+.canvas-node-group > .canvas-grip { pointer-events: auto; }
+.canvas-group-label {
+  padding: var(--sp-2) var(--sp-3);
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: grab;
+}
+.canvas-node-group.editing > .canvas-node-input { pointer-events: auto; }
+
+/* 連線把手:滑過節點才浮現,平時不干擾閱讀 */
+.canvas-port {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border: 2px solid var(--surface);
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+  cursor: crosshair;
+}
+.canvas-node:hover .canvas-port, .canvas-node.selected .canvas-port { opacity: 1; }
+.canvas-port-top { left: 50%; top: -7px; transform: translateX(-50%); }
+.canvas-port-bottom { left: 50%; bottom: -7px; transform: translateX(-50%); }
+.canvas-port-left { top: 50%; left: -7px; transform: translateY(-50%); }
+.canvas-port-right { top: 50%; right: -7px; transform: translateY(-50%); }
+
+.canvas-grip {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  border-radius: 2px;
+}
+.canvas-grip-nw { left: -6px; top: -6px; cursor: nwse-resize; }
+.canvas-grip-ne { right: -6px; top: -6px; cursor: nesw-resize; }
+.canvas-grip-sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
+.canvas-grip-se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+
+.canvas-marquee { position: absolute; border: 1px solid var(--accent); background: var(--selection); pointer-events: none; }
+
+.canvas-toolbar {
+  position: absolute;
+  z-index: var(--z-sticky);
+  top: var(--sp-3);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  max-width: calc(100% - var(--sp-6));
+  flex-wrap: wrap;
+}
+.canvas-toolbar button {
+  padding: var(--sp-1) var(--sp-3);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.canvas-toolbar button:hover:not(:disabled) { background: var(--surface-2); }
+.canvas-toolbar button:disabled { opacity: 0.4; cursor: default; }
+.canvas-toolbar button.danger:hover:not(:disabled) { color: var(--err); }
+.canvas-toolbar-sep { width: 1px; height: 18px; background: var(--border); margin: 0 var(--sp-1); }
+.canvas-swatches { display: flex; gap: 3px; align-items: center; }
+.canvas-swatch {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+}
+.canvas-swatch-none { background: var(--surface); position: relative; overflow: hidden; }
+.canvas-swatch-none::after {
+  content: "";
+  position: absolute;
+  left: -2px;
+  top: 7px;
+  width: 20px;
+  height: 1px;
+  background: var(--err);
+  transform: rotate(-45deg);
+}
+.canvas-zoom { color: var(--text-muted); font-size: var(--fs-xs); padding: 0 var(--sp-2); min-width: 3.5em; text-align: center; }
+
+.canvas-broken {
+  position: absolute;
+  z-index: var(--z-sticky);
+  left: var(--sp-4);
+  right: var(--sp-4);
+  bottom: var(--sp-6);
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--warn);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--warn);
+  font-size: var(--fs-sm);
+}
+.canvas-hint {
+  position: absolute;
+  bottom: var(--sp-3);
+  left: 0;
+  right: 0;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  pointer-events: none;
+  margin: 0;
+}
+
+/* 節點內的輕量 Markdown */
+.canvas-md-p, .canvas-md-h { margin: 0 0 var(--sp-2); }
+.canvas-md-h1, .canvas-md-h2 { font-size: var(--fs-lg); font-weight: 700; }
+.canvas-md-h3, .canvas-md-h4 { font-size: var(--fs-ui); font-weight: 700; }
+.canvas-md-h5, .canvas-md-h6 { font-size: var(--fs-sm); font-weight: 700; color: var(--text-muted); }
+.canvas-md-list { margin: 0 0 var(--sp-2); padding-left: 1.25em; }
+.canvas-md-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* 側欄的白板項目 */
+.sidebar button.canvas-item { display: flex; gap: var(--sp-2); align-items: center; }
+.canvas-badge { color: var(--text-faint); font-size: var(--fs-xs); }

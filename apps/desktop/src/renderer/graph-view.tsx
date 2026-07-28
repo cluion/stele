@@ -69,13 +69,17 @@ export function GraphView({ active, onOpen }: { active: string | undefined; onOp
       ctx.textAlign = "center";
       for (let i = 0; i < layout.length; i++) {
         const n = layout[i]!;
-        const isActive = data.nodes[i] === activeRef.current;
+        const rel = data.nodes[i]!;
+        const isActive = rel === activeRef.current;
         const isHover = i === hover;
+        const r = isHover ? NODE_RADIUS + 2 : NODE_RADIUS;
         ctx.beginPath();
-        ctx.arc(n.x, n.y, isHover ? NODE_RADIUS + 2 : NODE_RADIUS, 0, Math.PI * 2);
+        // 白板畫方形、筆記畫圓:兩者都在圖上,一眼要能分辨這個節點打開後是什麼
+        if (rel.endsWith(".canvas")) ctx.rect(n.x - r, n.y - r, r * 2, r * 2);
+        else ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
         ctx.fillStyle = isActive || isHover ? accent : muted;
         ctx.fill();
-        const label = data.nodes[i]!.replace(/\.md$/, "").split("/").pop()!;
+        const label = rel.replace(/\.(md|canvas)$/, "").split("/").pop()!;
         ctx.fillStyle = isActive || isHover ? text : muted;
         ctx.fillText(label, n.x, n.y + NODE_RADIUS + 14);
       }

@@ -63,6 +63,119 @@ describe("VaultSession", () => {
   });
 });
 
+/**
+ * 白板(JSON Canvas)走的是與筆記同一條管線:同一份 docId、同一套 CRDT 持久化、同一個同步通道。
+ * 差別只在副檔名與內容格式——這是刻意的,否則同步、時光機、空間全都要為白板再實作一次。
+ */
+describe("白板(.canvas)", () => {
+  const canvasWith = (file: string): string =>
+    JSON.stringify({
+      nodes: [
+        { id: "n1", type: "text", x: 0, y: 0, width: 260, height: 120, text: "白板上的想法" },
+        { id: "n2", type: "file", x: 400, y: 0, width: 300, height: 200, file },
+      ],
+      edges: [{ id: "e1", fromNode: "n1", toNode: "n2" }],
+    });
+
+  it("白板檔出現在筆記清單裡(側欄要看得到)", () => {
+    const dir = makeVault();
+    writeFileSync(path.join(dir, "圖.canvas"), canvasWith("a.md"));
+    const session = new VaultSession(dir, noop);
+    expect(session.list().files).toEqual(["a.md", "圖.canvas"]);
+  });
+
+  it("create 依副檔名決定新檔內容:白板生出合規的空 JSON Canvas", () => {
+    const dir = makeVault();
+    const session = new VaultSession(dir, noop);
+    expect(session.create("研究/新白板.canvas")).toBe("研究/新白板.canvas");
+    const raw = JSON.parse(readFileSync(path.join(dir, "研究/新白板.canvas"), "utf8")) as unknown;
+    expect(raw).toEqual({ nodes: [], edges: [] });
+  });
+
+  it("白板與筆記共用 CRDT 管線:openDoc 拿得到內容,寫回會鏡像落盤", async () => {
+    const dir = makeVault();
+    writeFileSync(path.join(dir, "圖.canvas"), canvasWith("a.md"));
+    const session = new VaultSession(dir, noop);
+    const replica = new Y.Doc();
+    Y.applyUpdate(replica, session.openDoc("圖.canvas"));
+    expect(replica.getText("md").toString()).toContain("白板上的想法");
+    replica.getText("md").insert(0, " ");
+    session.pushUpdate("圖.canvas", Y.encodeStateAsUpdate(replica));
+    await session.destroy();
+    expect(readFileSync(path.join(dir, "圖.canvas"), "utf8").startsWith(" ")).toBe(true);
+  });
+
+  it("改名白板沿用原副檔名,不會變成 .md", async () => {
+    const dir = makeVault();
+    writeFileSync(path.join(dir, "圖.canvas"), canvasWith("a.md"));
+    const session = new VaultSession(dir, noop);
+    expect(await session.rename("圖.canvas", "架構圖")).toBe("架構圖.canvas");
+    await session.destroy();
+  });
+
+  it("筆記改名時,白板裡指向它的 file 節點跟著改寫", async () => {
+    const dir = makeVault();
+    writeFileSync(path.join(dir, "圖.canvas"), canvasWith("a.md"));
+    const session = new VaultSession(dir, noop);
+    await session.rename("a.md", "資料夾/新A");
+    const raw = JSON.parse(readFileSync(path.join(dir, "圖.canvas"), "utf8")) as { nodes: Array<{ file?: string }> };
+    expect(raw.nodes[1]!.file).toBe("資料夾/新A.md");
+    await session.destroy();
+  });
+
+  it("白板的 file 節點算一條連結:反向連結面板列得出「被哪張白板引用」", () => {
+    const dir = makeVault();
+    writeFileSync(path.join(dir, "圖.canvas"), canvasWith("a.md"));
+    const session = new VaultSession(dir, noop);
+    expect(session.backlinks("a.md").map((b) => b.file)).toContain("圖.canvas");
+  });
+
+  it("關聯圖含白板節點與白板→筆記的邊", () => {
+    const dir = makeVault();
+    writeFileSync(path.join(dir, "圖.canvas"), canvasWith("a.md"));
+    const session = new VaultSession(dir, noop);
+    const { nodes, edges } = session.graph();
+    const from = nodes.indexOf("圖.canvas");
+    const to = nodes.indexOf("a.md");
+    expect(from).toBeGreaterThanOrEqual(0);
+    expect(edges).toContainEqual([from, to]);
+  });
+
+  it("白板上的文字進得了全文搜尋(不然白板寫的東西等於消失)", () => {
+    const dir = makeVault();
+    writeFileSync(path.join(dir, "圖.canvas"), canvasWith("a.md"));
+    const session = new VaultSession(dir, noop);
+    expect(session.search("白板上的想法").map((r) => r.file)).toEqual(["圖.canvas"]);
+  });
+
+  it("壞掉的白板不擋索引重建:其餘檔案照常", () => {
+    const dir = makeVault();
+    writeFileSync(path.join(dir, "壞.canvas"), "{這不是 JSON");
+    const session = new VaultSession(dir, noop);
+    expect(session.list().files).toContain("壞.canvas");
+    expect(session.backlinks("a.md")).toEqual([]);
+  });
+
+  it("白板不是查詢視圖的頁面:查詢只跑 Markdown 筆記", () => {
+    const dir = makeVault();
+    writeFileSync(path.join(dir, "圖.canvas"), canvasWith("a.md"));
+    const session = new VaultSession(dir, noop);
+    const result = session.runQuery("LIST");
+    expect("error" in result).toBe(false);
+    if ("error" in result) return;
+    expect(result.rows.map((r) => r.path)).toEqual(["a.md"]);
+  });
+
+  it("路徑檢核只放行 .md 與 .canvas,其餘副檔名照樣拒絕", () => {
+    const dir = makeVault();
+    const session = new VaultSession(dir, noop);
+    const ydoc = new Y.Doc();
+    expect(() => session.openDoc("a.txt")).toThrow(/非法路徑/);
+    expect(() => session.adoptRemoteDoc("壞.exe", "12345678-1234-1234-1234-123456789abc", ydoc)).toThrow(/非法路徑/);
+    expect(session.adoptRemoteDoc("遠端.canvas", "12345678-1234-1234-1234-123456789abc", ydoc)).toBe("遠端.canvas");
+  });
+});
+
 describe("每日筆記", () => {
   it("無模板時以預設內容建立,並回傳日記路徑", () => {
     const dir = makeVault();

@@ -12,6 +12,11 @@ import {
   pageMetadata,
   parseQuery,
   runQuery,
+  canvasFileLinks,
+  canvasText,
+  rewriteCanvasFiles,
+  serializeCanvas,
+  emptyCanvas,
   type WikilinkRef,
   type PageMetadata,
   type QueryResult,
@@ -245,7 +250,7 @@ class LinkIndex {
   }
 
   rebuild(): void {
-    this.files = listMarkdown(this.root);
+    this.files = listNotes(this.root);
     this.outgoing.clear();
     this.meta.clear();
     this.resolver = undefined;
@@ -260,14 +265,24 @@ class LinkIndex {
   updateFile(rel: string, content?: string): void {
     try {
       const source = content ?? readFileSync(path.join(this.root, rel), "utf8");
-      this.outgoing.set(rel, extractWikilinks(source));
-      let mtime = 0;
-      try {
-        mtime = statSync(path.join(this.root, rel)).mtimeMs;
-      } catch {
-        // 檔案剛被刪掉:mtime 留 0,查詢仍可用其他欄位
+      if (isCanvasRel(rel)) {
+        // 白板的「連結」是 file 節點指向的路徑,已是完整相對路徑;line 留空,面板顯示檔名即可。
+        // 白板不進查詢視圖的頁面清單——那套模型是 frontmatter 與標籤,白板兩者都沒有。
+        this.outgoing.set(
+          rel,
+          canvasFileLinks(source).map((target) => ({ target, embed: true, line: "" })),
+        );
+        this.meta.delete(rel);
+      } else {
+        this.outgoing.set(rel, extractWikilinks(source));
+        let mtime = 0;
+        try {
+          mtime = statSync(path.join(this.root, rel)).mtimeMs;
+        } catch {
+          // 檔案剛被刪掉:mtime 留 0,查詢仍可用其他欄位
+        }
+        this.meta.set(rel, pageMetadata(rel, source, mtime));
       }
-      this.meta.set(rel, pageMetadata(rel, source, mtime));
     } catch {
       this.outgoing.delete(rel);
       this.meta.delete(rel);
@@ -330,13 +345,26 @@ export function isHiddenRel(rel: string): boolean {
   return rel.split(/[\\/]/).some((seg) => seg.startsWith("."));
 }
 
-function listMarkdown(dir: string, prefix = ""): string[] {
+/**
+ * vault 認得的兩種檔案:Markdown 筆記與 JSON Canvas 白板。白板刻意走同一條管線
+ * ——同一份 docId、同一套 CRDT 持久化、同一個同步通道、同一份版本歷史——
+ * 否則同步、時光機、空間、分享每一項都要為白板再實作一次。
+ */
+const NOTE_EXTENSIONS = [".md", ".canvas"] as const;
+
+export const isNoteRel = (rel: string): boolean => NOTE_EXTENSIONS.some((ext) => rel.endsWith(ext));
+export const isCanvasRel = (rel: string): boolean => rel.endsWith(".canvas");
+/** 剝掉已知副檔名;沒有的話原樣返回 */
+const stripExt = (rel: string): string => (isCanvasRel(rel) ? rel.slice(0, -".canvas".length) : rel.replace(/\.md$/, ""));
+const extOf = (rel: string): string => (isCanvasRel(rel) ? ".canvas" : ".md");
+
+function listNotes(dir: string, prefix = ""): string[] {
   const out: string[] = [];
   for (const name of readdirSync(dir).sort()) {
     if (name.startsWith(".")) continue;
     const full = path.join(dir, name);
-    if (statSync(full).isDirectory()) out.push(...listMarkdown(full, prefix + name + "/"));
-    else if (name.endsWith(".md")) out.push(prefix + name);
+    if (statSync(full).isDirectory()) out.push(...listNotes(full, prefix + name + "/"));
+    else if (isNoteRel(name)) out.push(prefix + name);
   }
   return out;
 }
@@ -364,14 +392,14 @@ export class VaultSession {
     this.docStore = new DocStore(this.root);
     this.history = new HistoryStore(this.root);
     this.index = new LinkIndex(this.root);
-    for (const rel of listMarkdown(this.root)) this.refreshFile(rel);
+    for (const rel of listNotes(this.root)) this.refreshFile(rel);
 
     this.watcher = chokidar.watch(this.root, {
       ignoreInitial: true,
       awaitWriteFinish: WATCH_STABILITY,
     });
     this.watcher.on("all", (event, file) => {
-      if (!file.endsWith(".md")) return;
+      if (!isNoteRel(file)) return;
       const rel = path.relative(this.root, file);
       if (isHiddenRel(rel)) return; // .stele/history 的版本快照也是 .md,不可當成筆記事件
       if (event === "unlink") {
@@ -404,7 +432,7 @@ export class VaultSession {
   }
 
   list(): { vault: string; root: string; files: string[] } {
-    return { vault: path.basename(this.root), root: this.root, files: listMarkdown(this.root) };
+    return { vault: path.basename(this.root), root: this.root, files: listNotes(this.root) };
   }
 
   backlinks(rel: string): Array<{ file: string; line: string }> {
@@ -422,7 +450,9 @@ export class VaultSession {
     return this.searchIndex.search(query).map(({ file }) => {
       let line = "";
       try {
-        const lines = readFileSync(path.join(this.root, file), "utf8").split("\n");
+        const raw = readFileSync(path.join(this.root, file), "utf8");
+        // 白板的上下文取自節點文字,不是 JSON 原文——沒人想在搜尋結果看到 `"width": 260,`
+        const lines = (isCanvasRel(file) ? canvasText(raw) : raw).split("\n");
         line =
           lines.find((l) => l.toLowerCase().includes(needle)) ??
           lines.find((l) => l.trim() !== "" && !l.startsWith("---")) ??
@@ -448,7 +478,8 @@ export class VaultSession {
       return;
     }
     this.index.updateFile(rel, content);
-    this.searchIndex.update(rel, content);
+    // 白板餵給搜尋的是節點文字而非整份 JSON:否則搜「text」會命中每一張白板的欄位名
+    this.searchIndex.update(rel, isCanvasRel(rel) ? canvasText(content) : content);
   }
 
   openDoc(rel: unknown): Uint8Array {
@@ -520,7 +551,7 @@ export class VaultSession {
 
   /** 全 vault 檔案的 doc id,沒有的當場配發;同步啟動時的全量對帳用 */
   allDocIds(): string[] {
-    return listMarkdown(this.root).map((rel) => this.docStore.idFor(rel));
+    return listNotes(this.root).map((rel) => this.docStore.idFor(rel));
   }
 
   /** 物化遠端新筆記:以同步來的 id 與 Y.Doc 建檔並開 host;回傳實際落地路徑 */
@@ -559,12 +590,13 @@ export class VaultSession {
     return newRel;
   }
 
-  /** 路徑被別的檔案占用時退讓:「a.md」→「a (衝突).md」 */
+  /** 路徑被別的檔案占用時退讓:「a.md」→「a (衝突).md」;副檔名沿用原檔 */
   private freeVariant(rel: string): string {
     if (!existsSync(path.resolve(this.root, rel))) return rel;
-    const base = rel.replace(/\.md$/, "");
+    const base = stripExt(rel);
+    const ext = extOf(rel);
     for (let i = 1; ; i++) {
-      const candidate = i === 1 ? `${base} (衝突).md` : `${base} (衝突 ${i}).md`;
+      const candidate = i === 1 ? `${base} (衝突)${ext}` : `${base} (衝突 ${i})${ext}`;
       if (!existsSync(path.resolve(this.root, candidate))) return candidate;
     }
   }
@@ -582,11 +614,12 @@ export class VaultSession {
     ) {
       throw new Error(`非法路徑:${String(rel)}`);
     }
-    const withExt = rel.endsWith(".md") ? rel : `${rel}.md`;
+    const withExt = isNoteRel(rel) ? rel : `${rel}.md`;
     const abs = this.resolveNewFile(withExt);
     mkdirSync(path.dirname(abs), { recursive: true });
     if (!existsSync(abs)) {
-      writeFileSync(abs, `# ${path.basename(withExt, ".md")}\n`);
+      // 白板的初始內容是合規的空 JSON Canvas:空檔案雖然也解析得動,但別的工具未必寬容
+      writeFileSync(abs, isCanvasRel(withExt) ? serializeCanvas(emptyCanvas()) : `# ${path.basename(withExt, ".md")}\n`);
       this.emitFile({ kind: "add", rel: withExt });
     }
     return withExt;
@@ -604,7 +637,8 @@ export class VaultSession {
     ) {
       throw new Error(`非法路徑:${next}`);
     }
-    const newRel = next.endsWith(".md") ? next : `${next}.md`;
+    // 沒寫副檔名就沿用原檔的:改名一張白板不該把它變成 Markdown
+    const newRel = isNoteRel(next) ? next : `${next}${extOf(oldRelRaw)}`;
     if (newRel === oldRelRaw) return newRel;
     const newAbs = this.resolveNewFile(newRel);
     if (existsSync(newAbs)) throw new Error(`已存在同名筆記:${newRel}`);
@@ -622,17 +656,20 @@ export class VaultSession {
     this.docStore.rename(oldRelRaw, newRel);
     if (kept) this.ensureHost(newRel, kept); // 同一 Y.Doc 續掛新路徑,同步引用不失效
 
-    const newBase = newRel.replace(/\.md$/, "");
+    // wikilink 慣例上不寫 .md;白板則是實打實的路徑,副檔名不能省
+    const newBase = isCanvasRel(newRel) ? newRel : newRel.replace(/\.md$/, "");
     const shouldRename = (target: string): string | null => {
       const [base, ...anchor] = target.split("#");
       if (resolveWikilink(oldFiles, base!.trim()) !== oldRelRaw) return null;
       return [newBase, ...anchor].join("#");
     };
+    /** 白板的 file 節點存完整相對路徑;仍走 resolveWikilink 比對,大小寫與路徑寫法的差異一併吸收 */
+    const shouldRenameFile = (file: string): string | null => (resolveWikilink(oldFiles, file) === oldRelRaw ? newRel : null);
     for (const rel of oldFiles) {
       if (rel === oldRelRaw) continue;
       try {
         const source = readFileSync(path.join(this.root, rel), "utf8");
-        const rewritten = rewriteWikilinks(source, shouldRename);
+        const rewritten = isCanvasRel(rel) ? rewriteCanvasFiles(source, shouldRenameFile) : rewriteWikilinks(source, shouldRename);
         if (rewritten !== source) writeFileSync(path.join(this.root, rel), rewritten);
         // 開啟中的文件會經 fsWatch 吸收這次改寫,不需特別處理
       } catch (err) {
@@ -716,7 +753,7 @@ export class VaultSession {
     if (
       rel.length === 0 ||
       path.isAbsolute(rel) ||
-      !rel.endsWith(".md") ||
+      !isNoteRel(rel) ||
       rel.split("/").some((seg) => seg.trim() === "" || seg === "." || seg === "..")
     ) {
       throw new Error(`非法路徑:${rel}`);
@@ -732,7 +769,7 @@ export class VaultSession {
 
   /** 驗證 renderer 傳來的相對路徑,回傳 vault 內的真實絕對路徑;絕對路徑、遍歷、symlink 逃逸一律拒絕 */
   private resolveFile(rel: string): string {
-    if (rel.length === 0 || path.isAbsolute(rel) || !rel.endsWith(".md")) {
+    if (rel.length === 0 || path.isAbsolute(rel) || !isNoteRel(rel)) {
       throw new Error(`非法路徑:${rel}`);
     }
     let real: string;

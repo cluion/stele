@@ -1126,6 +1126,36 @@ ipcMain.handle("vault:query", (_e, source: unknown) => {
 });
 
 /**
+ * 白板 file 節點的預覽內容。讀不到(路徑不存在、指向圖片等非筆記)回 null 而非拋——
+ * 白板上放一個還沒建立的筆記是正常用法,不該讓整張白板的渲染失敗。
+ */
+ipcMain.handle("vault:noteText", (_e, rel: unknown) => {
+  if (typeof rel !== "string") throw new Error("非法參數");
+  try {
+    return requireSession().readNote(rel);
+  } catch {
+    return null;
+  }
+});
+
+/**
+ * 在系統瀏覽器開啟白板連結節點。**只放行 http/https**:
+ * `file:`、`smb:` 與自訂 protocol 交給 shell 等於把任意本機程式的啟動權交給
+ * 任何能寫進這個 vault 的人(同步管線上的協作者也算)。
+ */
+ipcMain.handle("shell:openExternal", async (_e, url: unknown) => {
+  if (typeof url !== "string") throw new Error("非法參數");
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("非法連結");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("非法連結");
+  await shell.openExternal(parsed.toString());
+});
+
+/**
  * 筆記版本歷史(時光機)。純本地功能:不需要同步、不需要團隊,離線也能用。
  * 版本是 `.stele/history/<docId>/` 底下的純 Markdown 檔,使用者自己翻也讀得懂。
  */
@@ -1217,7 +1247,7 @@ void app.whenReady().then(async () => {
     try {
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     // 先清掉前次失敗可能殘留的測試檔,確保每輪獨立
-    for (const junk of ["未命名.md", "未命名 2.md", "煙霧改名.md", "煙霧測試新檔.md", "Obsidian.md"]) {
+    for (const junk of ["未命名.md", "未命名 2.md", "煙霧改名.md", "煙霧測試新檔.md", "Obsidian.md", "未命名白板.canvas"]) {
       rmSync(path.join(FIXTURES_VAULT, junk), { force: true });
     }
     rmSync(path.join(FIXTURES_VAULT, ".stele"), { recursive: true, force: true });
@@ -1603,6 +1633,128 @@ void app.whenReady().then(async () => {
     }
     const searchOk = searchHit && searchOpened;
 
+    /**
+     * 白板(JSON Canvas):右鍵新增 → 畫布掛載 → 加一個文字節點並打字 → 放一篇筆記上去。
+     * 驗到最後看的是**磁碟上的檔案**:白板的價值在於它是一份任何工具都讀得懂的 `.canvas`,
+     * 只驗 DOM 等於沒驗到重點。
+     */
+    let canvasOk = false;
+    {
+      const canvasFile = path.join(FIXTURES_VAULT, "未命名白板.canvas");
+      rmSync(canvasFile, { force: true });
+      await contextMenuOn("靈感箱.md");
+      await sleep(200);
+      await win.webContents.executeJavaScript(
+        `[...document.querySelectorAll(".context-menu button")].find((b) => b.textContent === "新增白板")?.click()`,
+      );
+      let mountedCanvas = false;
+      for (let waited = 0; waited < 5000 && !mountedCanvas; waited += 200) {
+        await sleep(200);
+        mountedCanvas = await win.webContents.executeJavaScript(`!!document.querySelector(".canvas .canvas-world")`);
+      }
+
+      // ＋文字:建立節點後直接進入編輯,打字後失焦提交
+      await win.webContents.executeJavaScript(
+        `[...document.querySelectorAll(".canvas-toolbar button")].find((b) => b.textContent === "＋文字")?.click()`,
+      );
+      await sleep(300);
+      // blur() 只在元素確實持有焦點時才發事件;補一記 focusout(React 的 onBlur 聽的就是它)保險
+      await win.webContents.executeJavaScript(`(() => {
+        const input = document.querySelector(".canvas-node-input");
+        if (!input) return false;
+        input.focus();
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+        setter.call(input, "煙霧白板節點");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.blur();
+        input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+        return true;
+      })()`);
+
+      // ＋筆記:從清單挑一篇放上白板,白板因此成為該筆記的反向連結來源
+      await sleep(400);
+      await win.webContents.executeJavaScript(
+        `[...document.querySelectorAll(".canvas-toolbar button")].find((b) => b.textContent === "＋筆記")?.click()`,
+      );
+      await sleep(300);
+      await win.webContents.executeJavaScript(typeInSwitcher("靈感"));
+      await sleep(300);
+      await win.webContents.executeJavaScript(`document.querySelector(".switcher .switcher-item")?.click()`);
+
+      // 落盤走 120ms debounce,輪詢到檔案內容成形為止
+      let onDisk = false;
+      for (let waited = 0; waited < 6000 && !onDisk; waited += 200) {
+        await sleep(200);
+        try {
+          const raw = JSON.parse(readFileSync(canvasFile, "utf8")) as { nodes?: Array<{ type?: string; text?: string; file?: string }> };
+          const nodes = raw.nodes ?? [];
+          onDisk =
+            nodes.some((n) => n.type === "text" && n.text === "煙霧白板節點") && nodes.some((n) => n.type === "file" && (n.file ?? "").includes("靈感箱"));
+        } catch {
+          // 還沒寫出來或正在寫:下一輪再看
+        }
+      }
+      /**
+       * 拖曳與連線:白板最核心的兩個手勢,只驗純函式等於沒驗到「事件真的接上了沒」。
+       * 手勢的 window 監聽是在 gesture 進 state 之後才掛上的,因此每一步之間都要讓 React 先渲染完。
+       */
+      const readCanvas = (): { nodes: Array<{ type?: string; x?: number }>; edges: unknown[] } => {
+        try {
+          return JSON.parse(readFileSync(canvasFile, "utf8")) as { nodes: Array<{ type?: string; x?: number }>; edges: unknown[] };
+        } catch {
+          return { nodes: [], edges: [] };
+        }
+      };
+      const beforeDrag = readCanvas().nodes.find((n) => n.type === "text")?.x;
+      const pointer = (kind: string, on: string, dx = 0, dy = 0) => `(() => {
+        const el = document.querySelector(${JSON.stringify(on)});
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const x = r.left + r.width / 2 + ${dx};
+        const y = r.top + r.height / 2 + ${dy};
+        const init = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, buttons: 1, pointerId: 1, isPrimary: true };
+        (${JSON.stringify(kind)} === "pointerdown" ? el : window).dispatchEvent(new PointerEvent(${JSON.stringify(kind)}, init));
+        return true;
+      })()`;
+
+      await win.webContents.executeJavaScript(pointer("pointerdown", ".canvas-node-text"));
+      await sleep(150);
+      await win.webContents.executeJavaScript(pointer("pointermove", ".canvas-node-text", 140, 90));
+      await sleep(150);
+      await win.webContents.executeJavaScript(pointer("pointerup", ".canvas-node-text", 140, 90));
+      let dragged = false;
+      for (let waited = 0; waited < 5000 && !dragged; waited += 200) {
+        await sleep(200);
+        dragged = readCanvas().nodes.find((n) => n.type === "text")?.x !== beforeDrag;
+      }
+
+      // 從文字節點右側的接點拖到筆記節點:放開時成一條邊
+      await win.webContents.executeJavaScript(pointer("pointerdown", ".canvas-node-text .canvas-port-right"));
+      await sleep(150);
+      await win.webContents.executeJavaScript(pointer("pointermove", ".canvas-node-file"));
+      await sleep(150);
+      await win.webContents.executeJavaScript(pointer("pointerup", ".canvas-node-file"));
+      let connected = false;
+      for (let waited = 0; waited < 5000 && !connected; waited += 200) {
+        await sleep(200);
+        connected = readCanvas().edges.length === 1;
+      }
+
+      // 連結索引跟著 watcher 走(awaitWriteFinish 有穩定期),不會在寫檔那一刻就更新
+      let linked = false;
+      for (let waited = 0; waited < 5000 && !linked; waited += 200) {
+        await sleep(200);
+        linked = requireSession()
+          .backlinks("靈感箱.md")
+          .some((b) => b.file === "未命名白板.canvas");
+      }
+      canvasOk = mountedCanvas && onDisk && dragged && connected && linked;
+      if (!canvasOk) {
+        console.error(`SMOKE 白板診斷: mounted=${mountedCanvas} onDisk=${onDisk} dragged=${dragged} connected=${connected} linked=${linked}`);
+      }
+      rmSync(canvasFile, { force: true });
+    }
+
     // 換 vault:切到臨時 vault 驗證索引與反向連結,再切回 fixtures 確認 session 生滅正常
     const tmpVault = path.join(app.getPath("temp"), "stele-smoke-vault");
     rmSync(tmpVault, { recursive: true, force: true });
@@ -1646,10 +1798,11 @@ void app.whenReady().then(async () => {
     console.log(shareUiOk ? "SMOKE ✅ 分享對話框開啟建立與關閉" : "SMOKE ❌ 分享 UI 失敗");
     console.log(consumeUiOk ? "SMOKE ✅ 貼上分享連結對話框開啟與錯誤處理" : "SMOKE ❌ 消費分享 UI 失敗");
     console.log(commentsUiOk ? "SMOKE ✅ 留言面板開啟與關閉" : "SMOKE ❌ 留言面板失敗");
+    console.log(canvasOk ? "SMOKE ✅ 白板建立、編輯、拖曳與連線寫成合規 .canvas 並進索引" : "SMOKE ❌ 白板失敗");
     console.log(vaultSwitched ? "SMOKE ✅ 換 vault session 生滅正常" : "SMOKE ❌ 換 vault 失敗");
     console.log(persistedOk ? "SMOKE ✅ CRDT 狀態持久化到 .stele" : "SMOKE ❌ CRDT 狀態未落盤");
     app.exit(
-      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && dailyOk && searchOk && autocompleteOk && contextCreated && renameOk && deleteOk && shareUiOk && consumeUiOk && commentsUiOk && vaultSwitched && persistedOk
+      mounted && mirrored && navigated && createdOk && backlinked && switcherTyped && switched && switcherCreated && sourceMode && graphOk && dailyOk && searchOk && autocompleteOk && contextCreated && renameOk && deleteOk && shareUiOk && consumeUiOk && commentsUiOk && canvasOk && vaultSwitched && persistedOk
         ? 0
         : 1,
     );

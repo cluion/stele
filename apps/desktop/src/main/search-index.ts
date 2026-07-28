@@ -40,7 +40,7 @@ export class SearchIndex {
 
   update(rel: string, content: string): void {
     if (this.present.has(rel)) this.mini.discard(rel);
-    const base = rel.slice(rel.lastIndexOf("/") + 1).replace(/\.md$/, "");
+    const base = rel.slice(rel.lastIndexOf("/") + 1).replace(/\.(md|canvas)$/, "");
     const h1 = /^#{1,6}\s+(.+)$/m.exec(content)?.[1] ?? "";
     this.mini.add({ id: rel, title: `${base} ${h1}`.trim(), content });
     this.present.add(rel);

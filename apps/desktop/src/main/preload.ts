@@ -85,6 +85,10 @@ export interface SteleApi {
    * 回 { error } 表示語法有問題(要顯示給使用者),回結果表示查詢成功(空結果是正常的)。
    */
   runQuery(source: string): Promise<QueryOutcome>;
+  /** 白板 file 節點的預覽內容;路徑不存在或不是筆記時回 null */
+  noteText(rel: string): Promise<string | null>;
+  /** 白板連結節點:在系統瀏覽器開啟。主行程只放行 http/https */
+  openExternal(url: string): Promise<void>;
   /**
    * 筆記版本歷史(時光機)。純本地:不需同步、不需團隊,離線可用。
    * 版本是 `.stele/history/` 底下的純 Markdown 檔,使用者自己翻也讀得懂。
@@ -349,6 +353,8 @@ const api: SteleApi = {
   copyNoteToSpace: (rel, spaceId) => ipcRenderer.invoke("spaces:copy", rel, spaceId),
   spaceAudit: () => ipcRenderer.invoke("spaces:audit"),
   runQuery: (source) => ipcRenderer.invoke("vault:query", source),
+  noteText: (rel) => ipcRenderer.invoke("vault:noteText", rel),
+  openExternal: (url) => ipcRenderer.invoke("shell:openExternal", url),
   historyList: (rel) => ipcRenderer.invoke("history:list", rel),
   historyRead: (rel, ts) => ipcRenderer.invoke("history:read", rel, ts),
   historyCurrent: (rel) => ipcRenderer.invoke("history:current", rel),

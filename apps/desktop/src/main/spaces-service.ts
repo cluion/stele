@@ -34,10 +34,16 @@ export interface SpaceSyncHooks {
   trackNewDoc(docId: string): void;
 }
 
-/** 複製筆記的目標路徑:「a/b.md」→「a/b (副本).md」(進一步撞名由 VaultSession freeVariant 退讓) */
+/**
+ * 複製筆記的目標路徑:「a/b.md」→「a/b (副本).md」(進一步撞名由 VaultSession freeVariant 退讓)。
+ * 副檔名沿用原檔——白板的副本仍須是白板。
+ */
 function copyPathFor(rel: string): string {
   const dir = path.dirname(rel);
-  const name = `${path.basename(rel).replace(/\.md$/, "")} (副本).md`;
+  const ext = rel.endsWith(".canvas") ? ".canvas" : ".md";
+  const file = path.basename(rel);
+  const base = file.endsWith(ext) ? file.slice(0, -ext.length) : file;
+  const name = `${base} (副本)${ext}`;
   return dir === "." ? name : `${dir}/${name}`;
 }
 
