@@ -4,7 +4,7 @@ import chokidar, { type FSWatcher } from "chokidar";
 import { readFileSync, readdirSync, statSync, realpathSync, mkdirSync, existsSync, writeFileSync, renameSync } from "node:fs";
 import { writeFile, rename } from "node:fs/promises";
 import path from "node:path";
-import { extractWikilinks, resolveWikilink, rewriteWikilinks, type WikilinkRef } from "@stele/editor-core";
+import { extractWikilinks, resolveWikilink, createWikilinkResolver, rewriteWikilinks, type WikilinkRef } from "@stele/editor-core";
 import { SearchIndex } from "./search-index.ts";
 import { DocStore, type DocPersistence } from "./doc-store.ts";
 import { HistoryStore } from "./history-store.ts";
@@ -214,12 +214,24 @@ class DocHost {
 class LinkIndex {
   files: string[] = [];
   private outgoing = new Map<string, WikilinkRef[]>();
+  /**
+   * 預建索引的解析器,懶建、files 一變就作廢。
+   * 反向連結與關聯圖都要對全庫每一個 wikilink 解析一次,逐次線性搜尋是 O(檔案數 × 連結數)
+   * ——1000 篇的 vault 實測 183 ms,而 backlinks 掛在每次開啟筆記的路徑上。
+   */
+  private resolver: ((rawTarget: string) => string | undefined) | undefined;
 
   constructor(private readonly root: string) {}
+
+  private resolve(target: string): string | undefined {
+    this.resolver ??= createWikilinkResolver(this.files);
+    return this.resolver(target);
+  }
 
   rebuild(): void {
     this.files = listMarkdown(this.root);
     this.outgoing.clear();
+    this.resolver = undefined;
     for (const rel of this.files) this.updateFile(rel);
   }
 
@@ -230,12 +242,16 @@ class LinkIndex {
     } catch {
       this.outgoing.delete(rel);
     }
-    if (!this.files.includes(rel)) this.files = [...this.files, rel].sort();
+    if (!this.files.includes(rel)) {
+      this.files = [...this.files, rel].sort();
+      this.resolver = undefined; // 檔案清單變了,索引作廢
+    }
   }
 
   removeFile(rel: string): void {
     this.outgoing.delete(rel);
     this.files = this.files.filter((f) => f !== rel);
+    this.resolver = undefined;
   }
 
   backlinks(rel: string): Array<{ file: string; line: string }> {
@@ -243,7 +259,7 @@ class LinkIndex {
     for (const [source, refs] of this.outgoing) {
       if (source === rel) continue;
       for (const ref of refs) {
-        if (resolveWikilink(this.files, ref.target) === rel) result.push({ file: source, line: ref.line });
+        if (this.resolve(ref.target) === rel) result.push({ file: source, line: ref.line });
       }
     }
     return result;
@@ -259,7 +275,7 @@ class LinkIndex {
       const si = indexOf.get(source);
       if (si === undefined) continue;
       for (const ref of refs) {
-        const target = resolveWikilink(nodes, ref.target);
+        const target = this.resolve(ref.target);
         if (!target) continue;
         const ti = indexOf.get(target);
         if (ti === undefined || ti === si) continue;

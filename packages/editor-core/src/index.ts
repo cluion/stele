@@ -1,7 +1,7 @@
 export { splitBlocks, findBlocksInRange, type Block } from "./blocks.ts";
 export { applyBlockEdit, applyBlockEdits, applyRangeEdit, type BlockEdit } from "./apply.ts";
 export { SteleBinding } from "./binding.ts";
-export { resolveWikilink } from "./resolve.ts";
+export { resolveWikilink, createWikilinkResolver } from "./resolve.ts";
 export { fuzzyScore, rankFiles } from "./fuzzy.ts";
 export { extractWikilinks, rewriteWikilinks, type WikilinkRef } from "./links.ts";
 export { steleSchema } from "./schema.ts";
