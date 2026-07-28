@@ -134,6 +134,20 @@ CREATE TABLE IF NOT EXISTS enrollment_tokens (
   used INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
+CREATE TABLE IF NOT EXISTS admin_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  vault_id TEXT NOT NULL,
+  -- 事件發生**當下**所屬組織的快照,而非查詢時 join org_bindings:vault 改綁後,
+  -- 新組織不該看到它在前一個組織旗下時期的管理史(反之亦然)
+  org_id TEXT NOT NULL DEFAULT '',
+  ts INTEGER NOT NULL DEFAULT (unixepoch()),
+  kind TEXT NOT NULL,
+  actor TEXT NOT NULL DEFAULT '',
+  target TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS admin_events_by_org ON admin_events (org_id, id DESC);
+CREATE INDEX IF NOT EXISTS admin_events_by_vault ON admin_events (vault_id, id DESC);
 `;
 
 /** 對既有 DB 補欄:2c 的 role、2c-2 的 epoch;欄已存在時 ALTER 失敗即忽略(冪等遷移) */
@@ -187,6 +201,37 @@ export interface MemberRecord {
   /** 是否已持有任一金鑰信封(2c-2):false = 待 owner 核准;輪換只重包已核准者 */
   approved: boolean;
 }
+
+/**
+ * 管理事件種類(3b-3):**只有伺服器看得見的管理平面動作**。
+ * 內容操作(誰開了哪篇筆記、空間稽核)在 vault-meta 是密文,組織解不開,因此永遠不會出現在這裡。
+ */
+export type AdminEventKind =
+  | "member-enrolled"
+  | "member-approved"
+  | "member-removed"
+  | "role-changed"
+  | "key-rotated"
+  | "owner-claimed"
+  | "owner-transferred"
+  | "org-bound"
+  | "org-policy-set"
+  | "org-revoked";
+
+/** 一筆管理事件;actor/target 是 memberId(組織發起時 actor 為 orgId) */
+export interface AdminEvent {
+  id: number;
+  vaultId: string;
+  ts: number;
+  kind: AdminEventKind;
+  actor: string;
+  target: string;
+  /** 種類相關的補充:role 值、epoch 等 */
+  detail: string;
+}
+
+/** 每個 vault 的管理事件保留上限:管理日誌是附帶功能,不該無界成長吃掉磁碟 */
+export const ADMIN_EVENT_LIMIT = 500;
 
 /** 某 vault 與組織的綁定(3a);全是公開可驗資料,伺服器不因此持有任何內容金鑰 */
 export interface OrgBinding {
@@ -651,6 +696,49 @@ export class SyncStore {
   pendingRotation(vaultId: string): boolean {
     const row = this.db.prepare("SELECT pending_rotation FROM org_bindings WHERE vault_id = ?").get(vaultId) as { pending_rotation: number } | undefined;
     return row?.pending_rotation === 1;
+  }
+
+  /**
+   * 記一筆管理事件(3b-3)。歸屬取**當下**的組織綁定並存成快照——查詢時才 join 的話,
+   * vault 改綁會讓歷史事件跟著換東家(新組織讀到舊組織時期的管理史)。未綁組織則歸屬空字串,
+   * 事件仍落地供本機稽核,但任何組織都拉不到。
+   *
+   * 這是**伺服器自己的紀錄,不是密碼學證據**:惡意伺服器能捏造、刪改自己的日誌。
+   * 它的用途是誠實伺服器下的營運稽核,不能拿來當不可否認性的依據。
+   */
+  recordAdminEvent(vaultId: string, kind: AdminEventKind, actor: string, target = "", detail = ""): void {
+    const orgId = this.orgBinding(vaultId)?.orgId ?? "";
+    this.db
+      .prepare("INSERT INTO admin_events (vault_id, org_id, kind, actor, target, detail) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(vaultId, orgId, kind, actor, target, detail);
+    // 保留上限:超出的最舊事件即時修剪,免得管理日誌無界成長
+    this.db
+      .prepare("DELETE FROM admin_events WHERE vault_id = ? AND id NOT IN (SELECT id FROM admin_events WHERE vault_id = ? ORDER BY id DESC LIMIT ?)")
+      .run(vaultId, vaultId, ADMIN_EVENT_LIMIT);
+  }
+
+  /**
+   * 拉某組織的管理事件(新到舊)。orgId 空字串一律回空——孤兒事件(未綁組織時期)不得被任何連線撈出。
+   * vaultId 給定時再過濾,但仍受組織範圍約束:拿 A 組織的連線指定 B 組織的 vault 撈不到東西。
+   */
+  adminEvents(orgId: string, vaultId?: string, limit = 200): AdminEvent[] {
+    if (orgId === "") return [];
+    const capped = Math.min(Math.max(0, Math.trunc(limit)), ADMIN_EVENT_LIMIT);
+    if (capped === 0) return [];
+    const rows = (
+      vaultId === undefined
+        ? this.db.prepare("SELECT * FROM admin_events WHERE org_id = ? ORDER BY id DESC LIMIT ?").all(orgId, capped)
+        : this.db.prepare("SELECT * FROM admin_events WHERE org_id = ? AND vault_id = ? ORDER BY id DESC LIMIT ?").all(orgId, vaultId, capped)
+    ) as Array<{ id: number; vault_id: string; ts: number; kind: string; actor: string; target: string; detail: string }>;
+    return rows.map((r) => ({
+      id: r.id,
+      vaultId: r.vault_id,
+      ts: r.ts,
+      kind: r.kind as AdminEventKind,
+      actor: r.actor,
+      target: r.target,
+      detail: r.detail,
+    }));
   }
 
   /** 團隊憑證 blob(隨 envelopeList 發還成員驗鏈);未綁組織回 undefined */

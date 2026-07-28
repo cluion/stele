@@ -31,6 +31,7 @@ import {
  *   pnpm org vaults <根金鑰檔> <url> <token>                    列出本組織的團隊(擁有者、成員數、憑證序號)
  *   pnpm org revoke <根金鑰檔> <url> <token> <memberId>          離職一次全撤:從本組織所有團隊移除並踢線
  *   pnpm org policy <根金鑰檔> <url> <token> <on|off> <serial>   組織級強制簽章(與團隊政策取較嚴者)
+ *   pnpm org events <根金鑰檔> <url> <token> [vaultId] [筆數]     管理事件彙整(伺服器紀錄,非密碼學證據)
  */
 
 const b64 = (b: Uint8Array): string => Buffer.from(b).toString("base64");
@@ -47,6 +48,20 @@ function encodeBundle(orgRootPubSign: Uint8Array, cert: Uint8Array): string {
 }
 
 const createSocket = (url: string): SocketLike => new WebSocket(url) as unknown as SocketLike;
+
+/** 管理事件的人話標籤;未知種類原樣顯示(舊版 CLI 讀到新伺服器的事件不該變成空白) */
+const EVENT_LABEL: Record<string, string> = {
+  "member-enrolled": "成員加入",
+  "member-approved": "核准成員",
+  "member-removed": "移除成員",
+  "role-changed": "改角色",
+  "key-rotated": "金鑰輪換",
+  "owner-claimed": "認領擁有者",
+  "owner-transferred": "組織撤換擁有者",
+  "org-bound": "綁定組織",
+  "org-policy-set": "組織政策",
+  "org-revoked": "組織一次全撤",
+};
 
 async function main(argv: string[]): Promise<void> {
   const [cmd, ...args] = argv;
@@ -161,8 +176,30 @@ async function main(argv: string[]): Promise<void> {
       }
       break;
     }
+    case "events": {
+      const [file, url, token, vaultId, limit] = args;
+      if (!file || !url || !token) throw new Error("用法:events <根金鑰檔> <url> <token> [vaultId] [筆數]");
+      const root = await loadRoot(file);
+      const session = await OrgAdminSession.open({ url, token, orgRootPubSign: root.pubSign, identity: root, createSocket });
+      try {
+        const events = await session.events(vaultId, limit ? Number(limit) : undefined);
+        if (events.length === 0) console.log("沒有管理事件");
+        for (const e of events) {
+          const when = new Date(e.ts * 1000).toISOString().replace("T", " ").slice(0, 19);
+          const who = e.actor ? `${e.actor.slice(0, 12)}…` : "-";
+          const whom = e.target ? `${e.target.slice(0, 12)}…` : "";
+          console.log(`${when}\t${e.vaultId}\t${EVENT_LABEL[e.kind] ?? e.kind}\t${who}${whom ? ` → ${whom}` : ""}${e.detail ? `\t(${e.detail})` : ""}`);
+        }
+        // 兩個邊界都必須說,否則管理員會把這份清單當成它不是的東西
+        console.log("\n範圍:只涵蓋伺服器看得見的管理動作。**內容操作看不到**——誰讀寫了哪篇筆記都在密文裡。");
+        console.log("性質:這是伺服器自己的紀錄,不是密碼學證據;能竄改伺服器的人也能竄改這份日誌。");
+      } finally {
+        session.close();
+      }
+      break;
+    }
     default:
-      console.error("指令:init / admin-cert / bundle / assign / name / vaults / revoke / policy(詳見 org-tool.ts 檔頭)");
+      console.error("指令:init / admin-cert / bundle / assign / name / vaults / revoke / policy / events(詳見 org-tool.ts 檔頭)");
       process.exitCode = 1;
   }
 }

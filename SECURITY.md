@@ -327,6 +327,9 @@ bypass them.** They are defense-in-depth, not end-to-end guarantees:
   end-to-end, not only at the server. In forced-signing mode this holds for every
   write; during the transitional window it holds for every *signed* write.
 - **Kicking active connections** on removal or demotion.
+- **Admin event log (since 0.23).** The server records management-plane actions
+  and serves them to organization connections. Useful under an honest server;
+  not evidence, and content operations never appear in it (§4.7).
 - **DoS protections**: payload size caps, id validation, one-time invite tokens,
   rate-relevant limits.
 - **Membership list.** The server knows who is in a vault (this is metadata it
@@ -426,6 +429,32 @@ fully compromised endpoint.
 Even as a blind relay, the server observes: vault membership, opaque document
 ids, update sizes, and sync timing. It does not see plaintext, file names, or
 folder structure. Traffic-analysis resistance is out of scope.
+
+### 4.7 Admin event log is server-attested, not cryptographic (since 0.23)
+
+Organizations can pull a log of administrative events across their teams — who
+joined, who was approved, role changes, key rotations, certificate reissues,
+organization-level actions. Two limits are inherent and stated wherever the log
+is surfaced:
+
+- **It is the server's own record, not evidence.** Entries are neither signed by
+  the actor nor chained; a compromised server can fabricate, omit or rewrite
+  them. It is an operations tool under an honest server, not a basis for
+  non-repudiation. Making it evidential would require actor-signed, hash-chained
+  entries — deliberately not attempted here rather than half-done.
+- **It covers the management plane only.** Content operations are invisible by
+  construction: who read or edited which note lives in ciphertext the
+  organization cannot decrypt, and the space audit trail sits inside
+  `vault-meta`. An organization reading this log learns *how the team is
+  administered*, never *what the team wrote*.
+
+Scoping: each event stores the organization it belonged to **at the moment it
+happened**, rather than resolving the vault's current binding at query time. A
+vault that later moves between organizations therefore does not carry its
+history to the new one, and the previous organization does not gain visibility
+into events after it lost the vault. Events recorded while a vault was unbound
+belong to no organization and are unreachable. Per-vault retention is capped, so
+the log is a recent window rather than a complete history.
 
 ---
 

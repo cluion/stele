@@ -325,6 +325,8 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         refuse("member-conflict", "此成員公鑰與註冊紀錄不符");
         return;
       }
+      // 只記**首次**入表:既有成員每次重連都會走 enrollMember,逐次記錄會把管理日誌灌成連線日誌
+      if (!existing) opts.store.recordAdminEvent(p.vaultId, "member-enrolled", p.memberId, "", role);
       vaultId = p.vaultId;
       memberId = p.memberId;
       memberRole = role;
@@ -454,7 +456,14 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         refuse("no-member", "無法轉移擁有者");
         return;
       }
-      opts.store.putOrgBinding(msg.vaultId, orgIdFromRootPubSign(msg.orgRootPubSign), msg.orgRootPubSign, msg.cert, verified.serial, verified.ownerMemberId);
+      const orgIdNow = orgIdFromRootPubSign(msg.orgRootPubSign);
+      opts.store.putOrgBinding(msg.vaultId, orgIdNow, msg.orgRootPubSign, msg.cert, verified.serial, verified.ownerMemberId);
+      // 綁定後才記:recordAdminEvent 取當下綁定當歸屬,先記的話首次綁定會落成孤兒事件(組織拉不到)
+      if (prevOwner === undefined || prevOwner === verified.ownerMemberId) {
+        opts.store.recordAdminEvent(msg.vaultId, "org-bound", orgIdNow, verified.ownerMemberId, String(verified.serial));
+      } else {
+        opts.store.recordAdminEvent(msg.vaultId, "owner-transferred", orgIdNow, verified.ownerMemberId, prevOwner);
+      }
       // 角色已變的兩位:踢掉活躍連線,重連後以新角色生效(同 memberSetRole 的作法)
       if (prevOwner !== undefined && prevOwner !== verified.ownerMemberId) {
         // 全體斷線:前後任的角色變了,其餘成員的信任錨也變了(新 owner 即將重簽全部憑證)
@@ -555,7 +564,10 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         case "claimOwner": {
           // TOFU:首位認領者釘選為 owner + 升 owner 角色;已有 owner 則回既有(不覆蓋)
           const ownerNow = opts.store.claimOwner(vault, self);
-          if (ownerNow === self) memberRole = "owner"; // 更新本連線快取,免創建者自身停在 viewer
+          if (ownerNow === self) {
+            memberRole = "owner"; // 更新本連線快取,免創建者自身停在 viewer
+            opts.store.recordAdminEvent(vault, "owner-claimed", self);
+          }
           send({ type: "ok", reqId: msg.reqId });
           break;
         }
@@ -582,7 +594,11 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
             refuse("bad-message", "非法 id");
             return;
           }
+          // 核准 = **首次**取得金鑰信封;輪換的重包與自己給自己的 self-envelope 都不算,
+          // 否則一次輪換就會替每位成員各記一筆,真正的管理動作被例行換鑰淹沒(走查實測)
+          const firstEnvelope = msg.memberId !== self && opts.store.getMember(vault, msg.memberId)?.approved === false;
           opts.store.putEnvelope(vault, msg.keyId, msg.memberId, msg.epoch, msg.blob);
+          if (firstEnvelope) opts.store.recordAdminEvent(vault, "member-approved", self, msg.memberId);
           send({ type: "ok", reqId: msg.reqId });
           break;
         }
@@ -633,6 +649,7 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
           // 刪 member 列 + 其信封,並**踢掉其活躍連線**(2c):被移除者重連落回新成員分支,舊碼已消耗 → 被拒。
           // root 未輪換留 2c-2,故被移除者的離線舊快取仍能解舊內容(密碼層前向保密另切)。
           opts.store.removeMember(vault, msg.memberId);
+          opts.store.recordAdminEvent(vault, "member-removed", self, msg.memberId);
           kickMember(vault, msg.memberId, "removed", "已被移出此團隊 vault");
           send({ type: "ok", reqId: msg.reqId });
           break;
@@ -651,6 +668,7 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
             refuse("no-member", "查無此成員");
             return;
           }
+          opts.store.recordAdminEvent(vault, "role-changed", self, msg.memberId, msg.role);
           // 踢掉對方活躍連線:其快取角色已過期(降級尤其危險),重連後以新角色生效
           kickMember(vault, msg.memberId, "role-changed", "你的角色已變更,請重新連線");
           send({ type: "ok", reqId: msg.reqId });
@@ -665,6 +683,7 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
             return;
           }
           opts.store.setPendingRotation(vault, false); // 組織要求的輪換已完成
+          opts.store.recordAdminEvent(vault, "key-rotated", self, "", String(msg.epoch));
           const rotated = encodeServerMessage({ type: "keyRotated", epoch: msg.epoch });
           for (const peer of vaults.get(vault) ?? []) {
             if (peer.readyState !== WebSocket.OPEN) continue;
@@ -706,7 +725,9 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         msg.type === "orgVaultList" ||
         msg.type === "orgMemberList" ||
         msg.type === "orgRevoke" ||
-        msg.type === "orgPolicyPush"
+        msg.type === "orgPolicyPush" ||
+        // 管理事件(3b-3)只給組織連線:它橫跨組織全部團隊,不是單一團隊成員該看得到的範圍
+        msg.type === "orgEventPull"
       ) {
         refuse("forbidden", "組織治理動作僅限組織管理連線");
         return;
@@ -932,6 +953,7 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
               opts.store.removeMember(v.vaultId, msg.memberId);
               // 移除只切斷伺服器層存取;被撤者手上的舊 root 要靠輪換才作廢,故標記催促擁有者
               opts.store.setPendingRotation(v.vaultId, true);
+              opts.store.recordAdminEvent(v.vaultId, "org-revoked", orgScope.orgId, msg.memberId);
               kickMember(v.vaultId, msg.memberId, "removed", "已被組織移出此團隊");
               // 推送給留任者:不推的話,在線的擁有者要等重開 app 才知道該輪換(走查實測)
               const notice = encodeServerMessage({ type: "orgNotice", rotationRequested: true });
@@ -951,9 +973,16 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
               refuse("stale-cert", "組織政策序號須遞增");
               return;
             }
+            for (const v of opts.store.vaultsOfOrg(orgScope.orgId)) {
+              opts.store.recordAdminEvent(v.vaultId, "org-policy-set", orgScope.orgId, "", fields.requireSignedWrites ? "require-signed" : "off");
+            }
             send({ type: "ok", reqId: msg.reqId });
           } else if (msg.type === "orgMemberCertPull") {
             send({ type: "orgMemberCertList", reqId: msg.reqId, entries: opts.store.listOrgMemberCerts(orgScope.orgId) });
+          } else if (msg.type === "orgEventPull") {
+            // vaultId 空字串 = 全組織;給定時 store 仍以組織範圍把關(拿本組織連線撈他組織的 vault 一律空)
+            const events = opts.store.adminEvents(orgScope.orgId, msg.vaultId === "" ? undefined : msg.vaultId, msg.limit);
+            send({ type: "orgEventList", reqId: msg.reqId, events });
           } else refuse("forbidden", "組織管理連線僅可治理,不得存取內容");
         } else if (vaultId === undefined) refuse("unauthorized", "尚未認證");
         else handle(vaultId, msg);

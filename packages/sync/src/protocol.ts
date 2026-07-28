@@ -94,6 +94,8 @@ export type ClientMessage =
   | { type: "orgRevoke"; reqId: number; memberId: string }
   // 組織政策(3b-2,組織連線限定):與團隊政策取較嚴者下發
   | { type: "orgPolicyPush"; reqId: number; requireSigned: boolean; blob: Uint8Array }
+  // 管理事件彙整(3b-3,組織連線限定):拉本組織的管理平面事件。vaultId 空字串 = 全組織
+  | { type: "orgEventPull"; reqId: number; vaultId: string; limit: number }
   // doc 寫入帶 client epoch(2c-2 寫入柵欄):team vault 上伺服器拒 epoch≠當前,
   // 防止輪換窗口內舊 root 密文污染共享日誌;個人 vault/share 連線恆送 0(不套柵欄)。
   // authorMemberId + sig(P4 第二階段):作者對此寫入的簽章,收件端查目錄驗;個人/未簽 vault 送空字串 + 空陣列
@@ -170,6 +172,11 @@ export type ServerMessage =
   // 一次全撤的結果:removed = 已移除的團隊;skippedOwner = 因對方是該團隊擁有者而略過的團隊
   // (移除擁有者會讓團隊無人能簽發憑證與信封;組織應先指派新擁有者再撤)
   | { type: "orgRevokeResult"; reqId: number; removed: string[]; skippedOwner: string[] }
+  /**
+   * 管理事件彙整回覆(3b-3):**伺服器自己的紀錄,不是密碼學證據**——惡意伺服器可捏造或刪改。
+   * 且只涵蓋伺服器看得見的管理動作;內容操作在密文裡,永遠不會出現在這份清單。
+   */
+  | { type: "orgEventList"; reqId: number; events: { id: number; vaultId: string; ts: number; kind: string; actor: string; target: string; detail: string }[] }
   // 組織管理連線認證成功(3a):此連線只能治理(推團隊憑證),doc 內容一律拒——管理平面與金鑰平面分離
   | { type: "orgAuthOk"; orgId: string }
   /**
@@ -212,6 +219,7 @@ const CLIENT_TAG = {
   orgMemberList: 29,
   orgRevoke: 30,
   orgPolicyPush: 31,
+  orgEventPull: 32,
 } as const;
 const SERVER_TAG = {
   authOk: 0,
@@ -236,6 +244,7 @@ const SERVER_TAG = {
   orgVaultCatalog: 19,
   orgRevokeResult: 20,
   orgNotice: 21,
+  orgEventList: 22,
 } as const;
 
 const PERM_TAG: Record<SharePermission, number> = { read: 0, write: 1 };
@@ -344,6 +353,11 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
       encoding.writeVarUint(enc, msg.reqId);
       encoding.writeVarUint(enc, msg.requireSigned ? 1 : 0);
       encoding.writeVarUint8Array(enc, msg.blob);
+      break;
+    case "orgEventPull":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarString(enc, msg.vaultId);
+      encoding.writeVarUint(enc, msg.limit);
       break;
     case "authOrg":
       encoding.writeVarString(enc, msg.token);
@@ -491,6 +505,13 @@ export function decodeClientMessage(data: Uint8Array): ClientMessage {
         reqId: decoding.readVarUint(dec),
         requireSigned: decoding.readVarUint(dec) === 1,
         blob: readPayload(dec),
+      };
+    case CLIENT_TAG.orgEventPull:
+      return {
+        type: "orgEventPull",
+        reqId: decoding.readVarUint(dec),
+        vaultId: decoding.readVarString(dec),
+        limit: decoding.readVarUint(dec),
       };
     case CLIENT_TAG.authOrg:
       return {
@@ -685,6 +706,19 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
       encoding.writeVarUint(enc, msg.certs.length);
       for (const c of msg.certs) encoding.writeVarUint8Array(enc, c);
       break;
+    case "orgEventList":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarUint(enc, msg.events.length);
+      for (const e of msg.events) {
+        encoding.writeVarUint(enc, e.id);
+        encoding.writeVarString(enc, e.vaultId);
+        encoding.writeVarUint(enc, e.ts);
+        encoding.writeVarString(enc, e.kind);
+        encoding.writeVarString(enc, e.actor);
+        encoding.writeVarString(enc, e.target);
+        encoding.writeVarString(enc, e.detail);
+      }
+      break;
   }
   return encoding.toUint8Array(enc);
 }
@@ -839,6 +873,23 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
         });
       }
       return { type: "orgVaultCatalog", reqId, vaults };
+    }
+    case SERVER_TAG.orgEventList: {
+      const reqId = decoding.readVarUint(dec);
+      const count = decoding.readVarUint(dec);
+      const events: { id: number; vaultId: string; ts: number; kind: string; actor: string; target: string; detail: string }[] = [];
+      for (let i = 0; i < count; i++) {
+        events.push({
+          id: decoding.readVarUint(dec),
+          vaultId: decoding.readVarString(dec),
+          ts: decoding.readVarUint(dec),
+          kind: decoding.readVarString(dec),
+          actor: decoding.readVarString(dec),
+          target: decoding.readVarString(dec),
+          detail: decoding.readVarString(dec),
+        });
+      }
+      return { type: "orgEventList", reqId, events };
     }
     case SERVER_TAG.memberCertList: {
       const reqId = decoding.readVarUint(dec);

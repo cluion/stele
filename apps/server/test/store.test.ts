@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { SyncStore } from "../src/store.ts";
+import { SyncStore, ADMIN_EVENT_LIMIT } from "../src/store.ts";
 
 const bytes = (...v: number[]) => new Uint8Array(v);
 
@@ -270,5 +270,71 @@ describe("SyncStore", () => {
     store.claimOwner("v1", "m-old");
     expect(store.transferOwner("v1", "nobody")).toBe(false);
     expect(store.ownerOf("v1")).toBe("m-old");
+  });
+
+  // ── 管理事件彙整(3b-3)────────────────────────────────
+  // 這是**伺服器自己的紀錄**,不是密碼學證據;測的是歸屬與隔離,不是不可否認性
+
+  it("管理事件依組織歸屬記錄,新到舊排序", () => {
+    const store = makeStore();
+    store.putOrgBinding("v1", "org-a", bytes(9), bytes(1), 1, "owner-1");
+    store.recordAdminEvent("v1", "member-enrolled", "owner-1", "m-2");
+    store.recordAdminEvent("v1", "role-changed", "owner-1", "m-2", "editor");
+    const events = store.adminEvents("org-a");
+    expect(events.map((e) => e.kind)).toEqual(["role-changed", "member-enrolled"]);
+    expect(events[0]).toMatchObject({ vaultId: "v1", actor: "owner-1", target: "m-2", detail: "editor" });
+    expect(events[0]!.ts).toBeGreaterThan(0);
+  });
+
+  it("事件歸屬是**發生當下**的組織快照:vault 改綁後,新組織看不到舊組織時期的事件", () => {
+    const store = makeStore();
+    store.putOrgBinding("v1", "org-a", bytes(9), bytes(1), 1, "owner-1");
+    store.recordAdminEvent("v1", "member-removed", "owner-1", "m-2");
+    // 同一個 vault 改綁到另一個組織
+    store.putOrgBinding("v1", "org-b", bytes(8), bytes(2), 2, "owner-1");
+    store.recordAdminEvent("v1", "key-rotated", "owner-1");
+
+    expect(store.adminEvents("org-a").map((e) => e.kind)).toEqual(["member-removed"]);
+    expect(store.adminEvents("org-b").map((e) => e.kind)).toEqual(["key-rotated"]);
+  });
+
+  it("未綁組織的 vault:事件仍落地但不歸任何組織,拉不到", () => {
+    const store = makeStore();
+    store.recordAdminEvent("v-solo", "key-rotated", "owner-1");
+    expect(store.adminEvents("org-a")).toHaveLength(0);
+    expect(store.adminEvents("")).toHaveLength(0); // 空 orgId 不得當萬用字元把孤兒事件撈出來
+  });
+
+  it("可依 vault 過濾,且只在本組織範圍內", () => {
+    const store = makeStore();
+    store.putOrgBinding("v1", "org-a", bytes(9), bytes(1), 1, "o1");
+    store.putOrgBinding("v2", "org-a", bytes(9), bytes(1), 1, "o2");
+    store.putOrgBinding("v3", "org-b", bytes(8), bytes(1), 1, "o3");
+    store.recordAdminEvent("v1", "key-rotated", "o1");
+    store.recordAdminEvent("v2", "key-rotated", "o2");
+    store.recordAdminEvent("v3", "key-rotated", "o3");
+
+    expect(store.adminEvents("org-a").map((e) => e.vaultId).sort()).toEqual(["v1", "v2"]);
+    expect(store.adminEvents("org-a", "v2").map((e) => e.vaultId)).toEqual(["v2"]);
+    // 跨組織借道:拿 org-a 的連線指定他組織的 vault,一律撈不到
+    expect(store.adminEvents("org-a", "v3")).toHaveLength(0);
+  });
+
+  it("每個 vault 的事件有保留上限,不無界成長", () => {
+    const store = makeStore();
+    store.putOrgBinding("v1", "org-a", bytes(9), bytes(1), 1, "o1");
+    for (let i = 0; i < ADMIN_EVENT_LIMIT + 25; i++) store.recordAdminEvent("v1", "key-rotated", "o1", "", String(i));
+    const events = store.adminEvents("org-a", "v1", ADMIN_EVENT_LIMIT + 100);
+    expect(events).toHaveLength(ADMIN_EVENT_LIMIT);
+    expect(events[0]!.detail).toBe(String(ADMIN_EVENT_LIMIT + 24)); // 保留的是最新的那些
+  });
+
+  it("limit 夾在上限內,呼叫端要不到無限筆", () => {
+    const store = makeStore();
+    store.putOrgBinding("v1", "org-a", bytes(9), bytes(1), 1, "o1");
+    for (let i = 0; i < 30; i++) store.recordAdminEvent("v1", "key-rotated", "o1");
+    expect(store.adminEvents("org-a", undefined, 10)).toHaveLength(10);
+    expect(store.adminEvents("org-a", undefined, 0)).toHaveLength(0);
+    expect(store.adminEvents("org-a", undefined, -5)).toHaveLength(0); // 負數不得繞過成無限
   });
 });

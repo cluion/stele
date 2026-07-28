@@ -68,6 +68,8 @@ const clientCases: ClientMessage[] = [
   { type: "orgMemberList", reqId: 26, vaultId: "team-v" },
   { type: "orgRevoke", reqId: 31, memberId: "c".repeat(64) },
   { type: "orgPolicyPush", reqId: 32, requireSigned: true, blob: new Uint8Array(70).fill(3) },
+  { type: "orgEventPull", reqId: 35, vaultId: "", limit: 100 },
+  { type: "orgEventPull", reqId: 36, vaultId: "team-v", limit: 0 },
 ];
 
 const serverCases: ServerMessage[] = [
@@ -151,6 +153,15 @@ const serverCases: ServerMessage[] = [
     vaults: [
       { vaultId: "t1", ownerMemberId: "a".repeat(64), memberCount: 3, serial: 2 },
       { vaultId: "t2", ownerMemberId: "b".repeat(64), memberCount: 1, serial: 0 },
+    ],
+  },
+  { type: "orgEventList", reqId: 37, events: [] },
+  {
+    type: "orgEventList",
+    reqId: 38,
+    events: [
+      { id: 2, vaultId: "t1", ts: 1769000000, kind: "role-changed", actor: "a".repeat(64), target: "b".repeat(64), detail: "editor" },
+      { id: 1, vaultId: "t1", ts: 1768999999, kind: "key-rotated", actor: "a".repeat(64), target: "", detail: "" },
     ],
   },
 ];

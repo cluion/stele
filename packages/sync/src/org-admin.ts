@@ -27,6 +27,18 @@ export interface OrgAdminOptions {
   createSocket: (url: string) => SocketLike;
 }
 
+/** 一筆管理事件(3b-3);actor/target 為 memberId,組織發起時 actor 為 orgId */
+export interface AdminEventInfo {
+  id: number;
+  vaultId: string;
+  /** unix 秒;伺服器時鐘 */
+  ts: number;
+  kind: string;
+  actor: string;
+  target: string;
+  detail: string;
+}
+
 interface Pending {
   resolve: (msg: ServerMessage) => void;
   reject: (err: unknown) => void;
@@ -155,6 +167,18 @@ export class OrgAdminSession {
   async setRequireSignedWrites(enabled: boolean, serial: number): Promise<void> {
     const blob = signOrgPolicy(this.identity.sign, { requireSignedWrites: enabled, serial }, this.adminCert.length > 0 ? this.adminCert : undefined);
     await this.request((reqId) => ({ type: "orgPolicyPush", reqId, requireSigned: enabled, blob }), "ok");
+  }
+
+  /**
+   * 管理事件彙整(3b-3):拉本組織的管理平面事件,新到舊。vaultId 省略 = 全組織。
+   *
+   * **這是伺服器自己的紀錄,不是密碼學證據**——惡意伺服器能捏造、刪改自己的日誌,它的用途是
+   * 誠實伺服器下的營運稽核。範圍也僅止於伺服器看得見的管理動作:誰加入、被移除、改角色、
+   * 憑證換發、輪換、組織治理。**內容操作看不到**(誰讀了哪篇筆記、空間稽核都在密文裡)。
+   */
+  async events(vaultId?: string, limit = 200): Promise<AdminEventInfo[]> {
+    const msg = await this.request((reqId) => ({ type: "orgEventPull", reqId, vaultId: vaultId ?? "", limit }), "orgEventList");
+    return msg.events;
   }
 
   close(): void {
