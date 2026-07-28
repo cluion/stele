@@ -606,6 +606,29 @@ function Editor({
     <>
       <div className="editor-pane" ref={paneRef}>
         <div className="mode-toggle-wrap">
+          {participants.length > 0 && (
+            <span className="presence-bar">
+              {participants.map((p) => {
+                // 顯示名優先組織名冊(可驗);tooltip 誠實說明這個名字憑什麼可信 —— 或不可信
+                const shown = p.orgName ?? p.name;
+                const titleKey = p.orgName
+                  ? "presence.orgVerified.title"
+                  : p.verified
+                    ? "presence.identityVerified.title"
+                    : "presence.unverified.title";
+                return (
+                  <span
+                    key={p.clientId}
+                    className={p.verified ? "presence-avatar verified" : "presence-avatar"}
+                    style={{ background: p.color }}
+                    title={t(titleKey, { name: shown })}
+                  >
+                    {[...shown][0] ?? "?"}
+                  </span>
+                );
+              })}
+            </span>
+          )}
           <button
             className={commentsOpen ? "mode-toggle active" : "mode-toggle"}
             title={t("comments.title")}
@@ -1971,25 +1994,6 @@ function App() {
         />
       ) : active ? (
         <>
-          {participants.length > 0 && (
-            <div className="presence-bar">
-              {participants.map((p) => {
-                // 顯示名優先組織名冊(可驗);tooltip 誠實說明這個名字憑什麼可信 —— 或不可信
-                const shown = p.orgName ?? p.name;
-                const titleKey = p.orgName ? "presence.orgVerified.title" : p.verified ? "presence.identityVerified.title" : "presence.unverified.title";
-                return (
-                  <span
-                    key={p.clientId}
-                    className={p.verified ? "presence-avatar verified" : "presence-avatar"}
-                    style={{ background: p.color }}
-                    title={t(titleKey, { name: shown })}
-                  >
-                    {[...shown][0] ?? "?"}
-                  </span>
-                );
-              })}
-            </div>
-          )}
           <Editor
             key={`${vaultInfo.root}:${active}`}
             rel={active}

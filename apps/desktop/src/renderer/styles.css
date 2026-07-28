@@ -20,10 +20,13 @@ body {
   padding: var(--sp-3);
   overflow-y: auto;
 }
+/* 按鈕已累積到七八個(搜尋/每日/關聯圖/分享/切 vault/團隊/空間…),窄側欄放不下時換行,
+   不要橫向溢出。單行放得下時外觀不變 */
 .vault-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   margin: var(--sp-2) var(--sp-2) var(--sp-3);
 }
 .sidebar h1 {
@@ -35,6 +38,8 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* flex item 預設 min-width:auto 會拒絕縮到內容寬以下,上面的 ellipsis 因此永遠不生效 */
+  min-width: 0;
 }
 .sidebar .vault-switch {
   flex-shrink: 0;
@@ -68,14 +73,14 @@ body {
   font-size: var(--fs-sm);
 }
 
-/* 協作在場:編輯區右上的頭像列 */
+/* 協作在場:頭像列。與模式切換鈕同住 .mode-toggle-wrap 這個 sticky/height:0 的容器,
+   因此隨捲動固定在**編輯區**右上。先前用 absolute 定位卻沒有 relative 祖先,
+   結果錨到 viewport,頭像壓在右側反向連結面板上(走查截圖才看得出來)。 */
 .presence-bar {
-  position: absolute;
-  top: var(--sp-2);
-  right: var(--sp-3);
-  display: flex;
+  display: inline-flex;
+  vertical-align: middle;
   gap: calc(var(--sp-1) * -1);
-  z-index: 5;
+  margin-right: var(--sp-2);
 }
 .presence-avatar {
   width: 24px;
