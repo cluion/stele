@@ -70,6 +70,8 @@ const clientCases: ClientMessage[] = [
   { type: "orgPolicyPush", reqId: 32, requireSigned: true, blob: new Uint8Array(70).fill(3) },
   { type: "orgEventPull", reqId: 35, vaultId: "", limit: 100 },
   { type: "orgEventPull", reqId: 36, vaultId: "team-v", limit: 0 },
+  { type: "orgEnrollCreate", reqId: 39, vaultIds: [], role: "viewer", ttlSec: 3600 },
+  { type: "orgEnrollCreate", reqId: 40, vaultIds: ["t1", "t2", "t3"], role: "editor", ttlSec: 86400 },
 ];
 
 const serverCases: ServerMessage[] = [
@@ -153,6 +155,15 @@ const serverCases: ServerMessage[] = [
     vaults: [
       { vaultId: "t1", ownerMemberId: "a".repeat(64), memberCount: 3, serial: 2 },
       { vaultId: "t2", ownerMemberId: "b".repeat(64), memberCount: 1, serial: 0 },
+    ],
+  },
+  { type: "orgEnrollTokens", reqId: 41, entries: [] },
+  {
+    type: "orgEnrollTokens",
+    reqId: 42,
+    entries: [
+      { vaultId: "t1", token: "tok-1", ownerPubSign: new Uint8Array(32).fill(7) },
+      { vaultId: "t2", token: "tok-2", ownerPubSign: new Uint8Array(32).fill(9) },
     ],
   },
   { type: "orgEventList", reqId: 37, events: [] },

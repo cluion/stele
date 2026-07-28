@@ -727,7 +727,9 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
         msg.type === "orgRevoke" ||
         msg.type === "orgPolicyPush" ||
         // 管理事件(3b-3)只給組織連線:它橫跨組織全部團隊,不是單一團隊成員該看得到的範圍
-        msg.type === "orgEventPull"
+        msg.type === "orgEventPull" ||
+        // 批次產碼(3b-4)跨團隊,同樣只給組織連線
+        msg.type === "orgEnrollCreate"
       ) {
         refuse("forbidden", "組織治理動作僅限組織管理連線");
         return;
@@ -979,6 +981,37 @@ export function startServer(opts: { port: number; token: string; store: SyncStor
             send({ type: "ok", reqId: msg.reqId });
           } else if (msg.type === "orgMemberCertPull") {
             send({ type: "orgMemberCertList", reqId: msg.reqId, entries: opts.store.listOrgMemberCerts(orgScope.orgId) });
+          } else if (msg.type === "orgEnrollCreate") {
+            /**
+             * 一次入職(3b-4):為本組織的多個團隊各產一張一次性邀請碼。
+             * **這不是「組織可以加人」**:碼只讓對方 enroll 成待核准成員,金鑰信封仍要各團隊擁有者
+             * 親自包(需要 root,組織沒有)。組織買到的是「不必逐一去拜託每位擁有者產碼」,
+             * 不是繞過核准——後者在密碼學上就做不到。
+             */
+            const owned = opts.store.vaultsOfOrg(orgScope.orgId);
+            const wanted = msg.vaultIds.length === 0 ? owned.map((v) => v.vaultId) : msg.vaultIds;
+            const allowed = new Set(owned.map((v) => v.vaultId));
+            const unknown = wanted.filter((v) => !allowed.has(v));
+            if (unknown.length > 0) {
+              // 不逐一回報哪些不屬於本組織:那等於讓組織拿它去探測他組織的 vault 是否存在
+              refuse("forbidden", "指定的團隊不屬於本組織");
+              return;
+            }
+            // 組織不得用邀請碼發 owner 角色(owner 由 claimOwner/組織憑證釘選),與團隊產碼同一條規則
+            const role: MemberRole = msg.role === "editor" ? "editor" : "viewer";
+            const ttl = Math.min(Math.max(msg.ttlSec, ENROLL_TTL_MIN), ENROLL_TTL_MAX);
+            const expiresAt = Math.floor(Date.now() / 1000) + ttl;
+            const entries: { vaultId: string; token: string; ownerPubSign: Uint8Array }[] = [];
+            for (const vaultId of wanted) {
+              const ownerId = opts.store.ownerOf(vaultId);
+              const owner = ownerId ? opts.store.getMember(vaultId, ownerId) : undefined;
+              if (!owner) continue; // 無擁有者的團隊產碼沒有意義(沒人能核准),靜默略過
+              const token = randomBytes(24).toString("base64url");
+              opts.store.createEnrollmentToken(token, vaultId, role, expiresAt);
+              opts.store.recordAdminEvent(vaultId, "enroll-batch-created", orgScope.orgId, "", role);
+              entries.push({ vaultId, token, ownerPubSign: owner.pubSign });
+            }
+            send({ type: "orgEnrollTokens", reqId: msg.reqId, entries });
           } else if (msg.type === "orgEventPull") {
             // vaultId 空字串 = 全組織;給定時 store 仍以組織範圍把關(拿本組織連線撈他組織的 vault 一律空)
             const events = opts.store.adminEvents(orgScope.orgId, msg.vaultId === "" ? undefined : msg.vaultId, msg.limit);

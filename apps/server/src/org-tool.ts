@@ -10,6 +10,7 @@ import {
   signOrgAdminCert,
   signOrgTeamCert,
   OrgAdminSession,
+  encodeInvite,
   type SocketLike,
   type SyncIdentity,
 } from "@stele/sync";
@@ -32,7 +33,12 @@ import {
  *   pnpm org revoke <根金鑰檔> <url> <token> <memberId>          離職一次全撤:從本組織所有團隊移除並踢線
  *   pnpm org policy <根金鑰檔> <url> <token> <on|off> <serial>   組織級強制簽章(與團隊政策取較嚴者)
  *   pnpm org events <根金鑰檔> <url> <token> [vaultId] [筆數]     管理事件彙整(伺服器紀錄,非密碼學證據)
+ *   pnpm org invite <根金鑰檔> <url> <token> <editor|viewer> [天數] [vaultId,...]
+ *                                                             一次入職:為多個團隊批次產邀請碼
+ *   pnpm org pending <根金鑰檔> <url> <token>                    跨團隊待核准佇列(誰卡在哪個團隊)
  */
+
+import { ADMIN_EVENT_LABEL } from "./admin-events.ts";
 
 const b64 = (b: Uint8Array): string => Buffer.from(b).toString("base64");
 const fromB64 = (s: string): Uint8Array => new Uint8Array(Buffer.from(s, "base64"));
@@ -49,19 +55,6 @@ function encodeBundle(orgRootPubSign: Uint8Array, cert: Uint8Array): string {
 
 const createSocket = (url: string): SocketLike => new WebSocket(url) as unknown as SocketLike;
 
-/** 管理事件的人話標籤;未知種類原樣顯示(舊版 CLI 讀到新伺服器的事件不該變成空白) */
-const EVENT_LABEL: Record<string, string> = {
-  "member-enrolled": "成員加入",
-  "member-approved": "核准成員",
-  "member-removed": "移除成員",
-  "role-changed": "改角色",
-  "key-rotated": "金鑰輪換",
-  "owner-claimed": "認領擁有者",
-  "owner-transferred": "組織撤換擁有者",
-  "org-bound": "綁定組織",
-  "org-policy-set": "組織政策",
-  "org-revoked": "組織一次全撤",
-};
 
 async function main(argv: string[]): Promise<void> {
   const [cmd, ...args] = argv;
@@ -188,7 +181,7 @@ async function main(argv: string[]): Promise<void> {
           const when = new Date(e.ts * 1000).toISOString().replace("T", " ").slice(0, 19);
           const who = e.actor ? `${e.actor.slice(0, 12)}…` : "-";
           const whom = e.target ? `${e.target.slice(0, 12)}…` : "";
-          console.log(`${when}\t${e.vaultId}\t${EVENT_LABEL[e.kind] ?? e.kind}\t${who}${whom ? ` → ${whom}` : ""}${e.detail ? `\t(${e.detail})` : ""}`);
+          console.log(`${when}\t${e.vaultId}\t${ADMIN_EVENT_LABEL[e.kind as keyof typeof ADMIN_EVENT_LABEL] ?? e.kind}\t${who}${whom ? ` → ${whom}` : ""}${e.detail ? `\t(${e.detail})` : ""}`);
         }
         // 兩個邊界都必須說,否則管理員會把這份清單當成它不是的東西
         console.log("\n範圍:只涵蓋伺服器看得見的管理動作。**內容操作看不到**——誰讀寫了哪篇筆記都在密文裡。");
@@ -198,8 +191,67 @@ async function main(argv: string[]): Promise<void> {
       }
       break;
     }
+    case "invite": {
+      const [file, url, token, role, days, vaultList] = args;
+      if (!file || !url || !token || (role !== "editor" && role !== "viewer")) {
+        throw new Error("用法:invite <根金鑰檔> <url> <token> <editor|viewer> [天數] [vaultId,...]");
+      }
+      const root = await loadRoot(file);
+      const ttlSec = Math.round((days ? Number(days) : 1) * 24 * 60 * 60);
+      const session = await OrgAdminSession.open({ url, token, orgRootPubSign: root.pubSign, identity: root, createSocket });
+      try {
+        const vaultIds = vaultList ? vaultList.split(",").map((v) => v.trim()).filter(Boolean) : undefined;
+        const entries = await session.createEnrollTokens(vaultIds, role, ttlSec);
+        if (entries.length === 0) {
+          console.log("沒有產出任何邀請碼(本組織沒有團隊,或指定的團隊都還沒有擁有者)");
+          break;
+        }
+        for (const e of entries) {
+          const invite = encodeInvite({
+            url,
+            token,
+            vaultId: e.vaultId,
+            ownerPubSign: b64(e.ownerPubSign),
+            enrollToken: e.token,
+            role,
+            orgRootPubSign: b64(root.pubSign),
+          });
+          console.log(`\n團隊 ${e.vaultId}(角色 ${role}):`);
+          console.log(invite);
+        }
+        console.log(`\n共 ${entries.length} 張,有效期 ${days ? Number(days) : 1} 天。請新人在 app 內逐一貼上加入。`);
+        // 這是本功能最容易被誤解的地方,寧可每次都講
+        console.log("注意:產碼**不等於加入**。對方貼上後只會進入各團隊的待核准佇列,");
+        console.log("      真正的核准要各團隊擁有者親自做(核准 = 把 root 金鑰包給他,組織沒有 root)。");
+        console.log("      用 `pnpm org pending` 追蹤還有誰卡在哪個團隊。");
+      } finally {
+        session.close();
+      }
+      break;
+    }
+    case "pending": {
+      const [file, url, token] = args;
+      if (!file || !url || !token) throw new Error("用法:pending <根金鑰檔> <url> <token>");
+      const root = await loadRoot(file);
+      const session = await OrgAdminSession.open({ url, token, orgRootPubSign: root.pubSign, identity: root, createSocket });
+      try {
+        const vaults = await session.vaults();
+        let total = 0;
+        for (const v of vaults) {
+          const waiting = (await session.members(v.vaultId)).filter((m) => !m.approved);
+          if (waiting.length === 0) continue;
+          total += waiting.length;
+          console.log(`${v.vaultId}\t擁有者 ${v.ownerMemberId.slice(0, 12)}…\t待核准 ${waiting.length}`);
+          for (const m of waiting) console.log(`  └ ${m.memberId.slice(0, 16)}…\t${m.role}`);
+        }
+        console.log(total === 0 ? "沒有待核准的成員" : `\n共 ${total} 位待核准;請通知各團隊擁有者在 app 內核對指紋後核准。`);
+      } finally {
+        session.close();
+      }
+      break;
+    }
     default:
-      console.error("指令:init / admin-cert / bundle / assign / name / vaults / revoke / policy / events(詳見 org-tool.ts 檔頭)");
+      console.error("指令:init / admin-cert / bundle / assign / name / vaults / revoke / policy / events / invite / pending(詳見 org-tool.ts 檔頭)");
       process.exitCode = 1;
   }
 }

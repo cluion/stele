@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import type { SharePermission, ShareInfo, KeyEnvelope, MemberRole } from "@stele/sync";
+import type { AdminEventKind } from "./admin-events.ts";
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
@@ -201,22 +202,6 @@ export interface MemberRecord {
   /** 是否已持有任一金鑰信封(2c-2):false = 待 owner 核准;輪換只重包已核准者 */
   approved: boolean;
 }
-
-/**
- * 管理事件種類(3b-3):**只有伺服器看得見的管理平面動作**。
- * 內容操作(誰開了哪篇筆記、空間稽核)在 vault-meta 是密文,組織解不開,因此永遠不會出現在這裡。
- */
-export type AdminEventKind =
-  | "member-enrolled"
-  | "member-approved"
-  | "member-removed"
-  | "role-changed"
-  | "key-rotated"
-  | "owner-claimed"
-  | "owner-transferred"
-  | "org-bound"
-  | "org-policy-set"
-  | "org-revoked";
 
 /** 一筆管理事件;actor/target 是 memberId(組織發起時 actor 為 orgId) */
 export interface AdminEvent {

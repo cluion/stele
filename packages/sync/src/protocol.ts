@@ -96,6 +96,12 @@ export type ClientMessage =
   | { type: "orgPolicyPush"; reqId: number; requireSigned: boolean; blob: Uint8Array }
   // 管理事件彙整(3b-3,組織連線限定):拉本組織的管理平面事件。vaultId 空字串 = 全組織
   | { type: "orgEventPull"; reqId: number; vaultId: string; limit: number }
+  /**
+   * 一次入職批次產碼(3b-4,組織連線限定):為本組織指定的多個團隊各產一張一次性邀請碼。
+   * vaultIds 空 = 本組織全部團隊。**產碼不等於加人**:碼只讓對方進入待核准佇列,
+   * 真正的核准要各團隊擁有者包 root 信封——組織沒有 root,做不到也不假裝做得到。
+   */
+  | { type: "orgEnrollCreate"; reqId: number; vaultIds: string[]; role: MemberRole; ttlSec: number }
   // doc 寫入帶 client epoch(2c-2 寫入柵欄):team vault 上伺服器拒 epoch≠當前,
   // 防止輪換窗口內舊 root 密文污染共享日誌;個人 vault/share 連線恆送 0(不套柵欄)。
   // authorMemberId + sig(P4 第二階段):作者對此寫入的簽章,收件端查目錄驗;個人/未簽 vault 送空字串 + 空陣列
@@ -177,6 +183,11 @@ export type ServerMessage =
    * 且只涵蓋伺服器看得見的管理動作;內容操作在密文裡,永遠不會出現在這份清單。
    */
   | { type: "orgEventList"; reqId: number; events: { id: number; vaultId: string; ts: number; kind: string; actor: string; target: string; detail: string }[] }
+  /**
+   * 批次產碼回覆(3b-4):每個團隊一張碼,附該團隊當代擁有者公鑰——被邀者用它當信任錨驗金鑰信封。
+   * 組織端據此組出各團隊的邀請 bundle 交給新人。
+   */
+  | { type: "orgEnrollTokens"; reqId: number; entries: { vaultId: string; token: string; ownerPubSign: Uint8Array }[] }
   // 組織管理連線認證成功(3a):此連線只能治理(推團隊憑證),doc 內容一律拒——管理平面與金鑰平面分離
   | { type: "orgAuthOk"; orgId: string }
   /**
@@ -220,6 +231,7 @@ const CLIENT_TAG = {
   orgRevoke: 30,
   orgPolicyPush: 31,
   orgEventPull: 32,
+  orgEnrollCreate: 33,
 } as const;
 const SERVER_TAG = {
   authOk: 0,
@@ -245,6 +257,7 @@ const SERVER_TAG = {
   orgRevokeResult: 20,
   orgNotice: 21,
   orgEventList: 22,
+  orgEnrollTokens: 23,
 } as const;
 
 const PERM_TAG: Record<SharePermission, number> = { read: 0, write: 1 };
@@ -358,6 +371,13 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array {
       encoding.writeVarUint(enc, msg.reqId);
       encoding.writeVarString(enc, msg.vaultId);
       encoding.writeVarUint(enc, msg.limit);
+      break;
+    case "orgEnrollCreate":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarUint(enc, ROLE_TAG[msg.role]);
+      encoding.writeVarUint(enc, msg.ttlSec);
+      encoding.writeVarUint(enc, msg.vaultIds.length);
+      for (const v of msg.vaultIds) encoding.writeVarString(enc, v);
       break;
     case "authOrg":
       encoding.writeVarString(enc, msg.token);
@@ -513,6 +533,15 @@ export function decodeClientMessage(data: Uint8Array): ClientMessage {
         vaultId: decoding.readVarString(dec),
         limit: decoding.readVarUint(dec),
       };
+    case CLIENT_TAG.orgEnrollCreate: {
+      const reqId = decoding.readVarUint(dec);
+      const role = roleFromTag(decoding.readVarUint(dec));
+      const ttlSec = decoding.readVarUint(dec);
+      const count = decoding.readVarUint(dec);
+      const vaultIds: string[] = [];
+      for (let i = 0; i < count; i++) vaultIds.push(decoding.readVarString(dec));
+      return { type: "orgEnrollCreate", reqId, vaultIds, role, ttlSec };
+    }
     case CLIENT_TAG.authOrg:
       return {
         type: "authOrg",
@@ -706,6 +735,15 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array {
       encoding.writeVarUint(enc, msg.certs.length);
       for (const c of msg.certs) encoding.writeVarUint8Array(enc, c);
       break;
+    case "orgEnrollTokens":
+      encoding.writeVarUint(enc, msg.reqId);
+      encoding.writeVarUint(enc, msg.entries.length);
+      for (const e of msg.entries) {
+        encoding.writeVarString(enc, e.vaultId);
+        encoding.writeVarString(enc, e.token);
+        encoding.writeVarUint8Array(enc, e.ownerPubSign);
+      }
+      break;
     case "orgEventList":
       encoding.writeVarUint(enc, msg.reqId);
       encoding.writeVarUint(enc, msg.events.length);
@@ -873,6 +911,19 @@ export function decodeServerMessage(data: Uint8Array): ServerMessage {
         });
       }
       return { type: "orgVaultCatalog", reqId, vaults };
+    }
+    case SERVER_TAG.orgEnrollTokens: {
+      const reqId = decoding.readVarUint(dec);
+      const count = decoding.readVarUint(dec);
+      const entries: { vaultId: string; token: string; ownerPubSign: Uint8Array }[] = [];
+      for (let i = 0; i < count; i++) {
+        entries.push({
+          vaultId: decoding.readVarString(dec),
+          token: decoding.readVarString(dec),
+          ownerPubSign: decoding.readVarUint8Array(dec),
+        });
+      }
+      return { type: "orgEnrollTokens", reqId, entries };
     }
     case SERVER_TAG.orgEventList: {
       const reqId = decoding.readVarUint(dec);

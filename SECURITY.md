@@ -430,7 +430,26 @@ Even as a blind relay, the server observes: vault membership, opaque document
 ids, update sizes, and sync timing. It does not see plaintext, file names, or
 folder structure. Traffic-analysis resistance is out of scope.
 
-### 4.7 Admin event log is server-attested, not cryptographic (since 0.23)
+### 4.7 Batch enrollment grants nothing (since 0.24)
+
+An organization can mint one-time enrollment codes for its teams in bulk, so
+onboarding no longer means chasing every team owner individually. The boundary is
+cryptographic, not a policy choice: a code only lets its holder *enroll* into a
+team's pending queue. Actually admitting them means wrapping the team root key to
+their public key, which requires the root — and under governance-first the
+organization does not have it. So batch enrollment shortens the administrative
+half of onboarding and leaves the key half exactly where it was, with each team's
+owner. The CLI states this on every run rather than letting "invite" imply
+"added".
+
+What this does widen: an organization can create pending members across its
+teams, i.e. generate approval noise for owners. That is bounded by the existing
+single-use, TTL-capped code mechanism, and is strictly less than what an
+organization can already do (it can replace owners outright). Codes cannot carry
+the `owner` role — that is pinned by `claimOwner` and the organization
+certificate, and a code claiming otherwise is coerced down to `viewer`.
+
+### 4.8 Admin event log is server-attested, not cryptographic (since 0.23)
 
 Organizations can pull a log of administrative events across their teams — who
 joined, who was approved, role changes, key rotations, certificate reissues,

@@ -1,4 +1,4 @@
-import { encodeClientMessage, decodeServerMessage, type ClientMessage, type ServerMessage, type MemberInfo } from "./protocol.ts";
+import { encodeClientMessage, decodeServerMessage, type ClientMessage, type ServerMessage, type MemberInfo, type MemberRole } from "./protocol.ts";
 import type { SocketLike } from "./client.ts";
 import type { SyncIdentity } from "./identity.ts";
 import { orgChallengeBytes, orgIdFromRootPubSign, signOrgTeamCert, signOrgMemberCert, signOrgPolicy } from "./org-credential.ts";
@@ -179,6 +179,25 @@ export class OrgAdminSession {
   async events(vaultId?: string, limit = 200): Promise<AdminEventInfo[]> {
     const msg = await this.request((reqId) => ({ type: "orgEventPull", reqId, vaultId: vaultId ?? "", limit }), "orgEventList");
     return msg.events;
+  }
+
+  /**
+   * 一次入職批次產碼(3b-4):為本組織指定的團隊各產一張一次性邀請碼;vaultIds 省略 = 全部團隊。
+   *
+   * **能力邊界(不假裝一鍵完成)**:產碼讓新人得以 enroll 進**待核准**佇列,金鑰信封仍要各團隊
+   * 擁有者親自包——那需要 root,治理模式下組織沒有。組織買到的是「不必逐一去拜託每位擁有者產碼」,
+   * 而不是繞過核准。回傳每個團隊的碼與當代擁有者公鑰,供組織端組出邀請 bundle。
+   */
+  async createEnrollTokens(
+    vaultIds: string[] | undefined,
+    role: MemberRole,
+    ttlSec: number,
+  ): Promise<{ vaultId: string; token: string; ownerPubSign: Uint8Array }[]> {
+    const msg = await this.request(
+      (reqId) => ({ type: "orgEnrollCreate", reqId, vaultIds: vaultIds ?? [], role, ttlSec }),
+      "orgEnrollTokens",
+    );
+    return msg.entries;
   }
 
   close(): void {

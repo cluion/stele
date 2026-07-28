@@ -56,6 +56,7 @@ export {
   type CreateTeamVaultOptions,
 } from "./bootstrap.ts";
 export { TeamAdminSession, type TeamAdminOptions } from "./team-admin.ts";
+export { encodeInvite, decodeInvite, type TeamInvite } from "./team-invite.ts";
 export { OrgAdminSession, type OrgAdminOptions, type AdminEventInfo } from "./org-admin.ts";
 export {
   signRoleCredential,
