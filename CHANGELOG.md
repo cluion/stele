@@ -2,6 +2,39 @@
 
 本專案的所有重要變更都記錄於此。格式依循 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/),版本遵循 [Semantic Versioning](https://semver.org/lang/zh-TW/)。
 
+## [0.26.0] - 2026-07-29
+
+查詢視圖:把筆記當成可查詢的資料庫。
+
+### 新增
+
+- **`stele-query` 程式碼區塊**:在所見即所得模式下渲染成查詢結果,點結果列直接開啟該篇筆記。語法對標 Dataview 的實用子集:
+
+  ```
+  LIST | TABLE 欄位 [AS 別名], …
+  [FROM #標籤 | "資料夾" | -否定 (AND|OR …)]
+  [WHERE 條件 (AND|OR …)]
+  [SORT 欄位 [ASC|DESC]]
+  [LIMIT n]
+  ```
+
+  例:`TABLE status, priority AS 優先度 FROM #工作 WHERE status = "進行中" SORT priority DESC`
+- **可查詢的資料**:frontmatter 的所有欄位、內文與 frontmatter 的 `#標籤`,以及隱含欄位 `file.name` / `file.path` / `file.folder` / `file.tags` / `file.mtime`。
+- 比較運算子 `=` `!=` `>` `<` `>=` `<=` `contains`;`FROM #專案` 也會命中子標籤 `#專案/Stele`,`FROM "資料夾"` 含子資料夾。
+
+### 設計
+
+- **只做子集,而且說清楚**:Dataview 還有 TASK、CALENDAR、函式、inline field、運算式。與其半套地假裝相容,不如語法少而準——查詢給出**看似合理但錯誤**的結果,比查不到更糟。所以語言標記用 `stele-query` 而不是 `dataview`,不讓人誤以為可以照搬。
+- **查詢只在所見即所得模式渲染,源碼模式維持原始文字**:順著既有的雙模式分工,要改查詢就切到源碼模式(Cmd/Ctrl+E)。比在渲染結果裡塞一個編輯狀態單純,也沒有「點哪裡才進得去」的猜謎。
+- **序列化完全不受影響**:這是 ProseMirror 的 node view,寫回磁碟的仍是原本的 code fence,位元組不變。
+- frontmatter 走真正的 YAML 解析器(js-yaml,MIT)。使用者的 frontmatter 會有清單、巢狀、引號與日期,手寫的子集解析器必然在某個奇怪的地方給出錯誤答案。
+- 缺席的欄位一律讓比較不成立:沒有那個欄位的筆記不會悄悄混進結果;排序時缺值一律沉底。
+
+### 品質
+
+- 查詢語言 24 項測試(解析錯誤訊息、FROM/WHERE/SORT/LIMIT 各分支、缺欄位行為、空結果),資料層 13 項(YAML 壞掉不炸、標籤不吃 code fence 與標題、純數字不算標籤)。全庫 626 項測試全綠。
+- 走查以真的 vault 驗完整條路:TABLE 別名與排序、LIST、寫錯的查詢顯示明確原因、點結果開啟筆記,並確認切到源碼模式看得到查詢原文(序列化沒被破壞)。
+
 ## [0.25.1] - 2026-07-29
 
 大 vault 規模驗證與修復:反向連結從 183 ms 降到 0.9 ms。

@@ -796,3 +796,32 @@ body {
 .history-actions { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: 1px solid var(--border); }
 .history-actions .placeholder { margin: 0; font-size: var(--fs-sm); }
 .history-actions button.primary { white-space: nowrap; flex: 0 0 auto; width: auto; padding: var(--sp-2) var(--sp-4); }
+
+/* 查詢視圖:```stele-query 區塊在所見即所得模式渲染成的結果 */
+.query-view {
+  margin: var(--sp-3) 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.query-status { margin: 0; color: var(--text-muted); font-size: var(--fs-sm); }
+.query-error { margin: 0; color: var(--err); font-size: var(--fs-sm); }
+.query-count { margin: var(--sp-2) 0 0; color: var(--text-faint); font-size: var(--fs-xs, 0.75rem); }
+.query-list { list-style: none; margin: 0; padding: 0; }
+.query-list li { margin: 2px 0; }
+.query-link {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-align: left;
+}
+.query-link:hover { text-decoration: underline; }
+/* 欄位多時橫向捲動,不要把編輯區撐破 */
+.query-result { overflow-x: auto; }
+.query-result table { border-collapse: collapse; width: 100%; font-size: var(--fs-sm); }
+.query-result th, .query-result td { border-bottom: 1px solid var(--border); padding: var(--sp-1) var(--sp-2); text-align: left; vertical-align: top; }
+.query-result th { color: var(--text-muted); font-weight: 600; white-space: nowrap; }

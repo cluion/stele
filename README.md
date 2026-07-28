@@ -24,6 +24,8 @@ Stele is a local-first, end-to-end-encrypted, self-hostable knowledge base. Your
 - Wikilinks `[[ ]]`: autocomplete, click-to-navigate, create-on-the-fly, vault-wide link rewriting on rename
 - Backlinks panel and graph view
 - Daily notes with templates, CJK full-text search, quick switcher (Cmd/Ctrl+P)
+- **Query views**: a ` ```stele-query ` block turns your notes into a queryable database — list or table, filtered by tag, folder and frontmatter fields
+- **Version history**: snapshots are kept automatically, diffed character by character, and restorable; every version is a plain Markdown file you can browse in your file manager
 - Quartz Day / Ember Night dual themes — dark is a native design, not an inversion
 - Multi-device end-to-end encrypted sync, self-hosted server in one `docker run`
 - Built-in i18n (zh-TW / en)

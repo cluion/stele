@@ -24,6 +24,7 @@ import { createSourceView, topBlockCM, scrollToBlockCM, type SourceView } from "
 import { encodeCursor, participantCursor, throttle, type RemoteCursor } from "./remote-cursors.ts";
 import { remoteCursorPlugin, remoteCursorKey, type BlockCursor } from "./wysiwyg-cursors.ts";
 import { commentMarkPlugin, commentMarkKey, type CommentBlock } from "./comment-marks.ts";
+import { QueryNodeView, QUERY_LANG } from "./query-view.ts";
 import { GraphView } from "./graph-view.tsx";
 import type {
   SteleApi,
@@ -269,6 +270,13 @@ function Editor({
 }) {
   const { t } = useTranslation();
   const paneRef = useRef<HTMLDivElement>(null);
+  /** 導航與翻譯的最新值:EditorView 只建立一次,查詢視圖透過 ref 取用,才不會釘死第一版 */
+  const navigateRef = useRef(onNavigate);
+  const tRef = useRef(t);
+  useEffect(() => {
+    navigateRef.current = onNavigate;
+    tRef.current = t;
+  }, [onNavigate, t]);
   const ref = useRef<HTMLDivElement>(null);
   const [ytext, setYtext] = useState<Y.Text | undefined>();
   const ydocRef = useRef<Y.Doc | undefined>(undefined);
@@ -457,6 +465,24 @@ function Editor({
       const view = new EditorView(host, {
         state: binding.state,
         editable: () => !readOnly,
+        // 查詢視圖:```stele-query 區塊在所見即所得模式渲染成結果;源碼模式仍是原始查詢文字
+        nodeViews: {
+          code_block: (node) =>
+            node.attrs["params"] === QUERY_LANG
+              ? new QueryNodeView(node, {
+                  run: (src) => window.stele.runQuery(src),
+                  // 走 ref:EditorView 只建立一次,直接捕捉 onNavigate 會釘死第一版
+                  open: (path) => navigateRef.current(path.replace(/\.md$/, "")),
+                  labels: () => ({
+                    running: tRef.current("query.running"),
+                    empty: tRef.current("query.empty"),
+                    colFile: tRef.current("query.colFile"),
+                    error: (reason: string) => tRef.current("query.error", { reason }),
+                    count: (n: number) => tRef.current("query.count", { n }),
+                  }),
+                })
+              : (null as never),
+        },
         dispatchTransaction: (tr) => {
           binding.dispatch(tr);
           if (tr.selectionSet || tr.docChanged) reportPmCursor(binding.state);

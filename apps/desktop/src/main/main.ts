@@ -1119,6 +1119,12 @@ ipcMain.handle("vault:backlinks", (_e, rel: unknown) => {
 
 ipcMain.handle("vault:graph", () => requireSession().graph());
 
+/** 查詢視圖:執行一段查詢並回結果;解析失敗回 { error } 而非拋(錯字是常態,UI 要顯示原因) */
+ipcMain.handle("vault:query", (_e, source: unknown) => {
+  if (typeof source !== "string") throw new Error("非法參數");
+  return requireSession().runQuery(source);
+});
+
 /**
  * 筆記版本歷史(時光機)。純本地功能:不需要同步、不需要團隊,離線也能用。
  * 版本是 `.stele/history/<docId>/` 底下的純 Markdown 檔,使用者自己翻也讀得懂。

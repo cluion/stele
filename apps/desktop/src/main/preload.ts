@@ -81,6 +81,11 @@ export interface SteleApi {
   /** 複製筆記到空間:目標得一篇全新筆記(原筆記不動),回傳副本 rel */
   copyNoteToSpace(rel: string, spaceId: string): Promise<string>;
   /**
+   * 查詢視圖:執行 ```stele-query 區塊的內容。
+   * 回 { error } 表示語法有問題(要顯示給使用者),回結果表示查詢成功(空結果是正常的)。
+   */
+  runQuery(source: string): Promise<QueryOutcome>;
+  /**
    * 筆記版本歷史(時光機)。純本地:不需同步、不需團隊,離線可用。
    * 版本是 `.stele/history/` 底下的純 Markdown 檔,使用者自己翻也讀得懂。
    */
@@ -189,6 +194,15 @@ export interface SpacesOverview {
   /** 筆記歸屬:rel → spaceId(僅非預設空間的筆記;其餘視為預設空間) */
   assignments: Record<string, string>;
 }
+
+/** 查詢結果;error 表示語法有問題 */
+export type QueryOutcome =
+  | { error: string }
+  | {
+      /** TABLE 的欄位標題;LIST 為空陣列 */
+      columns: string[];
+      rows: Array<{ path: string; name: string; cells: unknown[] }>;
+    };
 
 /** 一筆歷史版本 */
 export interface VersionEntry {
@@ -334,6 +348,7 @@ const api: SteleApi = {
   moveNoteToSpace: (rel, spaceId) => ipcRenderer.invoke("spaces:move", rel, spaceId),
   copyNoteToSpace: (rel, spaceId) => ipcRenderer.invoke("spaces:copy", rel, spaceId),
   spaceAudit: () => ipcRenderer.invoke("spaces:audit"),
+  runQuery: (source) => ipcRenderer.invoke("vault:query", source),
   historyList: (rel) => ipcRenderer.invoke("history:list", rel),
   historyRead: (rel, ts) => ipcRenderer.invoke("history:read", rel, ts),
   historyCurrent: (rel) => ipcRenderer.invoke("history:current", rel),

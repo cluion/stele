@@ -4,7 +4,18 @@ import chokidar, { type FSWatcher } from "chokidar";
 import { readFileSync, readdirSync, statSync, realpathSync, mkdirSync, existsSync, writeFileSync, renameSync } from "node:fs";
 import { writeFile, rename } from "node:fs/promises";
 import path from "node:path";
-import { extractWikilinks, resolveWikilink, createWikilinkResolver, rewriteWikilinks, type WikilinkRef } from "@stele/editor-core";
+import {
+  extractWikilinks,
+  resolveWikilink,
+  createWikilinkResolver,
+  rewriteWikilinks,
+  pageMetadata,
+  parseQuery,
+  runQuery,
+  type WikilinkRef,
+  type PageMetadata,
+  type QueryResult,
+} from "@stele/editor-core";
 import { SearchIndex } from "./search-index.ts";
 import { DocStore, type DocPersistence } from "./doc-store.ts";
 import { HistoryStore } from "./history-store.ts";
@@ -215,6 +226,11 @@ class LinkIndex {
   files: string[] = [];
   private outgoing = new Map<string, WikilinkRef[]>();
   /**
+   * 查詢視圖的中繼資料(frontmatter 欄位、標籤、mtime)。與連結索引共用同一次讀檔——
+   * 另建一份索引就要把整個 vault 再讀一遍,大 vault 上那是實打實的成本。
+   */
+  private meta = new Map<string, PageMetadata>();
+  /**
    * 預建索引的解析器,懶建、files 一變就作廢。
    * 反向連結與關聯圖都要對全庫每一個 wikilink 解析一次,逐次線性搜尋是 O(檔案數 × 連結數)
    * ——1000 篇的 vault 實測 183 ms,而 backlinks 掛在每次開啟筆記的路徑上。
@@ -231,16 +247,30 @@ class LinkIndex {
   rebuild(): void {
     this.files = listMarkdown(this.root);
     this.outgoing.clear();
+    this.meta.clear();
     this.resolver = undefined;
     for (const rel of this.files) this.updateFile(rel);
+  }
+
+  /** 查詢視圖用的全庫中繼資料 */
+  pages(): PageMetadata[] {
+    return [...this.meta.values()];
   }
 
   updateFile(rel: string, content?: string): void {
     try {
       const source = content ?? readFileSync(path.join(this.root, rel), "utf8");
       this.outgoing.set(rel, extractWikilinks(source));
+      let mtime = 0;
+      try {
+        mtime = statSync(path.join(this.root, rel)).mtimeMs;
+      } catch {
+        // 檔案剛被刪掉:mtime 留 0,查詢仍可用其他欄位
+      }
+      this.meta.set(rel, pageMetadata(rel, source, mtime));
     } catch {
       this.outgoing.delete(rel);
+      this.meta.delete(rel);
     }
     if (!this.files.includes(rel)) {
       this.files = [...this.files, rel].sort();
@@ -250,6 +280,7 @@ class LinkIndex {
 
   removeFile(rel: string): void {
     this.outgoing.delete(rel);
+    this.meta.delete(rel);
     this.files = this.files.filter((f) => f !== rel);
     this.resolver = undefined;
   }
@@ -452,6 +483,16 @@ export class VaultSession {
         }
       },
     };
+  }
+
+  /**
+   * 執行查詢視圖的查詢(對標 Dataview 的子集)。解析失敗回 { error },由 UI 顯示原因——
+   * 查詢是使用者手寫的,錯字是常態,不該用例外處理。
+   */
+  runQuery(source: string): QueryResult | { error: string } {
+    const parsed = parseQuery(source);
+    if ("error" in parsed) return parsed;
+    return runQuery(parsed, this.index.pages());
   }
 
   /** 筆記目前全文(CRDT 為準);還原前用來把現況先存成一版 */
