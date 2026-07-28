@@ -2,6 +2,13 @@
 
 本專案的所有重要變更都記錄於此。格式依循 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/),版本遵循 [Semantic Versioning](https://semver.org/lang/zh-TW/)。
 
+## [未發布]
+
+### 安全
+
+- **升級三個有已知弱點的建置期依賴**:`brace-expansion`(DoS)、`fast-uri`(host confusion)、`tar`(遞迴 DoS)。三者都只出現在建置工具鏈裡(eslint 與 electron-builder 的傳遞依賴),**沒有進入桌面 app 或伺服器的產出**,因此對使用者無實際暴露;仍然升級,因為建置工具跑在有發布權限的機器上。`brace-expansion` 的 1.x/2.x 分支已無維護、沒有修復版,只能整樹釘到 5.0.8。
+- 驗證方式:除了全庫測試與 smoke,另外**實際跑一次 electron-builder 打包**——受影響的三個套件都在它底下,只跑測試看不出打包是否壞掉。
+
 ## [0.23.0] - 2026-07-28
 
 管理事件彙整:組織能在一處看見旗下所有團隊是**怎麼被管理的**。
