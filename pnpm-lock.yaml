@@ -156,6 +156,9 @@ importers:
       '@capacitor/ios':
         specifier: ^8.4.2
         version: 8.4.2(@capacitor/core@8.4.2)
+      '@stele/server':
+        specifier: workspace:*
+        version: link:../server
       '@types/node':
         specifier: latest
         version: 26.1.2
