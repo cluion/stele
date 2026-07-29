@@ -9,7 +9,7 @@
     "build": "node scripts/build.mjs",
     "sync": "pnpm build && cap sync",
     "ios": "pnpm build && cap run ios",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run"
   },
   "dependencies": {
     "@capacitor/core": "^8.4.2",

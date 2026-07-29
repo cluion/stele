@@ -9,7 +9,7 @@ import {
   type SyncDocState,
   type SyncStatus,
 } from "@stele/sync";
-import { extractWikilinks, resolveWikilink, createWikilinkResolver } from "@stele/editor-core";
+import { searchNotes, resolveNote, backlinksOf, type Hit, type Note } from "./notes.ts";
 import type { VaultStorage } from "./storage.ts";
 
 /**
@@ -162,57 +162,25 @@ export class MobileVault {
     return this.docs.get(docId)?.getText("md").toString() ?? "";
   }
 
-  /**
-   * 全文搜尋。**刻意是線性掃描**,不搬桌面那套 MiniSearch:內容全在記憶體的 Y.Doc 裡,
-   * 手機上的 vault 規模也不會到需要索引的量級。要是哪天真的慢了,再把桌面的索引層
-   * 抽成共用套件——在那之前,一份不會與桌面行為分岔的簡單實作比較划算。
-   */
-  search(query: string): Array<{ docId: string; rel: string; line: string }> {
-    const needle = query.trim().toLowerCase();
-    if (needle.length === 0) return [];
-    const out: Array<{ docId: string; rel: string; line: string }> = [];
-    for (const { docId, rel } of this.list()) {
-      const text = this.read(docId);
-      const hitName = rel.toLowerCase().includes(needle);
-      const line = text.split("\n").find((l) => l.toLowerCase().includes(needle));
-      if (!hitName && line === undefined) continue;
-      // 命中檔名但內文沒有時,拿第一行非空白當上下文
-      out.push({ docId, rel, line: (line ?? text.split("\n").find((l) => l.trim() !== "") ?? "").trim() });
-    }
-    return out;
+  /** 目前全部筆記(含內容)攤平;查詢層是純函式,只吃這個 */
+  private notes(): Note[] {
+    return this.list().map(({ docId, rel }) => ({ docId, rel, text: this.read(docId) }));
   }
 
-  /** rel → docId;wikilink 解析後要換回 doc 才讀得到內容 */
-  private docIdOf(rel: string): string | undefined {
-    for (const [docId, path] of this.paths().entries()) if (path === rel) return docId;
-    return undefined;
+  /** 全文搜尋(檔名優先於內文);規則與測試在 notes.ts */
+  search(query: string): Hit[] {
+    return searchNotes(this.notes(), query);
   }
 
-  /** 解析 wikilink 目標;解不到(還沒同步到、或根本不存在)回 undefined——手機上不建檔 */
+  /** 解析 wikilink 目標;解不到回 undefined——手機上不建檔 */
   resolve(target: string): { docId: string; rel: string } | undefined {
-    const rel = resolveWikilink(
-      this.list().map((i) => i.rel),
-      target,
-    );
-    if (!rel) return undefined;
-    const docId = this.docIdOf(rel);
-    return docId ? { docId, rel } : undefined;
+    const note = resolveNote(this.notes(), target);
+    return note ? { docId: note.docId, rel: note.rel } : undefined;
   }
 
   /** 反向連結:哪些筆記連到這一篇 */
-  backlinks(rel: string): Array<{ docId: string; rel: string; line: string }> {
-    const items = this.list();
-    const resolver = createWikilinkResolver(items.map((i) => i.rel));
-    const out: Array<{ docId: string; rel: string; line: string }> = [];
-    for (const item of items) {
-      if (item.rel === rel) continue;
-      for (const ref of extractWikilinks(this.read(item.docId))) {
-        if (resolver(ref.target) !== rel) continue;
-        out.push({ docId: item.docId, rel: item.rel, line: ref.line });
-        break; // 同一篇連過來多次只列一列,面板上不需要重複
-      }
-    }
-    return out;
+  backlinks(rel: string): Hit[] {
+    return backlinksOf(this.notes(), rel);
   }
 
   /**
