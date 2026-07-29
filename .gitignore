@@ -5,6 +5,12 @@ prototypes/shell/tmp-vault/
 prototypes/mirror/fixtures/vault/.stele/
 apps/desktop/release/
 
-# Capacitor 產生的原生專案:CapApp-SPM/Package.swift 內含本機絕對路徑(pnpm store),
-# 不適合進版控;要出 app 時再另議原生專案的版控策略(見 plan/p4-4-mobile.md)
-apps/mobile/ios/
+# Capacitor 的原生專案進版控(Info.plist 有我們的客製),但生成物不進:
+# Package.swift 內含本機絕對路徑(pnpm store)、public/ 是 web 產物的副本
+apps/mobile/ios/App/CapApp-SPM/
+apps/mobile/ios/App/App/public/
+apps/mobile/ios/App/App/capacitor.config.json
+apps/mobile/ios/App/build/
+apps/mobile/ios/DerivedData/
+apps/mobile/ios/App/App.xcodeproj/project.xcworkspace/
+apps/mobile/ios/App/App.xcodeproj/xcuserdata/

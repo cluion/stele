@@ -113,8 +113,17 @@ async function connect(settings: VaultSettings): Promise<void> {
 // ── 清單 ──
 function renderList(): void {
   const items = vault!.list();
-  const shown = query ? rankFiles(items.map((i) => i.rel), query, 50) : items.map((i) => i.rel);
   const byRel = new Map(items.map((i) => [i.rel, i.docId]));
+  /**
+   * 有查詢時走全文搜尋(檔名 + 內文),沒有時列全部。檔名的模糊比對排在前面:
+   * 打「靈感」通常是想去那一篇,不是想看到所有提過「靈感」的段落。
+   */
+  const ranked = query ? rankFiles(items.map((i) => i.rel), query, 50) : [];
+  const hits = query ? vault!.search(query) : [];
+  const context = new Map(hits.map((h) => [h.rel, h.line]));
+  const shown = query
+    ? [...ranked, ...hits.map((h) => h.rel).filter((rel) => !ranked.includes(rel))]
+    : items.map((i) => i.rel);
 
   const search = el("input", { className: "search", type: "search", placeholder: "搜尋筆記…", value: query });
   search.oninput = () => {
@@ -130,7 +139,13 @@ function renderList(): void {
   for (const rel of shown) {
     const docId = byRel.get(rel);
     if (!docId) continue;
-    const button = el("button", {}, el("span", { className: "name", textContent: displayName(rel) }));
+    const line = context.get(rel);
+    const button = el(
+      "button",
+      {},
+      el("span", { className: "name", textContent: displayName(rel) }),
+      ...(query && line ? [el("span", { className: "context", textContent: line })] : []),
+    );
     button.onclick = () => {
       open = { docId, rel };
       editing = false;
@@ -150,7 +165,11 @@ function renderList(): void {
       el("span", { className: `status ${status}`, textContent: STATUS_TEXT[status] }),
     ),
     search,
-    items.length === 0 ? el("p", { className: "hint", textContent: "尚未同步到任何筆記。" }) : list,
+    items.length === 0
+      ? el("p", { className: "hint", textContent: "尚未同步到任何筆記。" })
+      : shown.length === 0
+        ? el("p", { className: "hint", textContent: "沒有符合的筆記。" })
+        : list,
     compose,
   );
 }
@@ -159,6 +178,40 @@ function renderList(): void {
 function renderNote(): void {
   const body = el("article", { className: "reader" });
   renderMarkdownTo(body, vault!.read(open!.docId));
+  /**
+   * wikilink 走事件委派:渲染出來的是 `<span class="wikilink" data-target>`(與桌面同一套
+   * schema),不必為了可點而改渲染層。解不到目標就不動作——手機上不建檔,
+   * 「點一下就生出一篇空筆記」在小螢幕上多半是誤觸而非本意。
+   */
+  body.onclick = (e) => {
+    const target = (e.target as HTMLElement).closest("[data-target]")?.getAttribute("data-target");
+    if (!target) return;
+    const dest = vault!.resolve(target);
+    if (!dest) return;
+    open = dest;
+    editing = false;
+    render();
+  };
+
+  const links = vault!.backlinks(open!.rel);
+  const backlinks = el("section", { className: "backlinks" });
+  if (links.length > 0) {
+    backlinks.append(el("h2", { textContent: `反向連結 ${String(links.length)}` }));
+    for (const link of links) {
+      const item = el(
+        "button",
+        {},
+        el("span", { className: "name", textContent: displayName(link.rel) }),
+        el("span", { className: "context", textContent: link.line }),
+      );
+      item.onclick = () => {
+        open = { docId: link.docId, rel: link.rel };
+        editing = false;
+        render();
+      };
+      backlinks.append(item);
+    }
+  }
 
   const back = el("button", { className: "back", textContent: "‹ 筆記" });
   back.onclick = () => {
@@ -174,6 +227,7 @@ function renderNote(): void {
   app().replaceChildren(
     el("header", { className: "bar" }, back, el("h1", { textContent: displayName(open!.rel) }), edit),
     body,
+    backlinks,
   );
 }
 

@@ -113,3 +113,35 @@ button.primary:disabled { opacity: 0.6; }
   line-height: var(--lh-prose);
   resize: none;
 }
+
+/* 搜尋命中與反向連結共用的「檔名 + 上下文」兩行式 */
+.notes .name, .backlinks .name { display: block; }
+.notes .context, .backlinks .context {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.backlinks {
+  padding: var(--sp-3) var(--sp-4) calc(var(--sp-6) + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.backlinks h2 { margin: 0 0 var(--sp-2); font-size: var(--fs-sm); color: var(--text-muted); font-weight: 600; }
+.backlinks button {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: var(--sp-2) 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+/* 內文裡的 wikilink 要看得出可以點 */
+.reader .wikilink { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
