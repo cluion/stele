@@ -1,7 +1,7 @@
 import * as Y from "yjs";
 import { ShareClient, ShareCipher, type SocketLike, type SyncStatus } from "@stele/sync";
 import { parseShareLink } from "./share-link.ts";
-import { renderMarkdown } from "./render.ts";
+import { renderMarkdownTo } from "@stele/editor-core";
 
 /**
  * 分享檢視器:唯讀開啟一則分享
@@ -38,7 +38,7 @@ function main(): void {
   const doc = new Y.Doc();
   const ytext = doc.getText("md");
   const content = el("content");
-  const rerender = (): void => renderMarkdown(content, ytext.toString());
+  const rerender = (): void => renderMarkdownTo(content, ytext.toString());
   ytext.observe(rerender);
 
   const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/`;

@@ -18,6 +18,9 @@ const EXCEPTIONS = new Map([
   ["detect-libc", "Apache-2.0,OSI 寬鬆授權;better-sqlite3 傳遞依賴,無法單獨替換"],
   ["tunnel-agent", "Apache-2.0,OSI 寬鬆授權;better-sqlite3 傳遞依賴,無法單獨替換"],
   ["ieee754", "BSD-3-Clause,OSI 寬鬆授權;better-sqlite3 傳遞依賴,無法單獨替換"],
+  // 以下 2 個為 Capacitor(行動端原生殼)傳遞依賴,待業主追認
+  ["@capacitor/synapse", "ISC,OSI 寬鬆授權(條款等同 MIT);@capacitor/core 傳遞依賴,無法單獨替換"],
+  ["tslib", "0BSD,OSI 寬鬆授權(較 MIT 更寬鬆,無署名義務);Capacitor 外掛的 TypeScript runtime helper,無法單獨替換"],
 ]);
 
 const passes = (license) => license.split(/\s+OR\s+|[()]/i).some((part) => part.trim().startsWith("MIT"));

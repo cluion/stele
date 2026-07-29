@@ -5,6 +5,23 @@
  * 元件一律吃 token,禁止直接寫色碼
  */
 
+/**
+ * CJK 字型只掛在中日韓的碼位範圍上。理由見 --font-ui 的註解:
+ * 系統字型排在前面時會吞掉 CJK 回退,而把中文字型整個排到前面又會讓拉丁字也跟著換掉。
+ * `local()` 逐一嘗試各平台的內建中文字型,一個都沒有時瀏覽器自己回退,不下載任何字型檔。
+ */
+@font-face {
+  font-family: "Stele CJK";
+  src: local("PingFang TC"), local("PingFang SC"), local("Noto Sans TC"), local("Noto Sans CJK TC"), local("Microsoft JhengHei");
+  unicode-range: U+2E80-303F, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FF00-FFEF;
+}
+
+@font-face {
+  font-family: "Stele CJK Mono";
+  src: local("Sarasa Mono TC"), local("PingFang TC"), local("Noto Sans TC"), local("Microsoft JhengHei");
+  unicode-range: U+2E80-303F, U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FF00-FFEF;
+}
+
 :root {
   /* ── 色彩:石英(亮)── */
   --bg: #f6f7f9;
@@ -28,9 +45,14 @@
   --overlay: rgba(20, 23, 28, 0.35);
 
   /* ── 字體(zh-TW + en 混排)── */
-  --font-ui: system-ui, "Noto Sans TC", "Noto Sans CJK TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+  /* CJK 家族**必須排在 `-apple-system` / `system-ui` 之前**,並以 `unicode-range` 限定範圍。
+     iOS WebKit 一旦以系統字型開頭就不再替中日韓字符往後回退——即使清單後面明確列了
+     PingFang 也一樣,整段中文會變成豆腐字(iOS 模擬器實測:把 PingFang 排在 system-ui
+     之後仍然無效,排到最前面才正常)。unicode-range 讓拉丁字仍舊走系統字型,
+     只有 CJK 走中文字型,兩邊都不犧牲。 */
+  --font-ui: "Stele CJK", -apple-system, system-ui, sans-serif;
   --font-prose: var(--font-ui);
-  --font-mono: ui-monospace, "JetBrains Mono", "Noto Sans Mono", "Sarasa Mono TC", monospace;
+  --font-mono: "Stele CJK Mono", ui-monospace, "JetBrains Mono", "Noto Sans Mono", monospace;
 
   /* ── 字級(UI 14 基準;編輯器內文 16)── */
   --fs-xs: 12px;

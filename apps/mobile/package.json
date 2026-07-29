@@ -1,0 +1,31 @@
+{
+  "name": "@stele/mobile",
+  "private": true,
+  "version": "0.27.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "Stele 行動端(Capacitor 原生殼)",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "sync": "pnpm build && cap sync",
+    "ios": "pnpm build && cap run ios",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@capacitor/core": "^8.4.2",
+    "@capacitor/filesystem": "^8.0.0",
+    "@capacitor/preferences": "^8.0.0",
+    "@stele/editor-core": "workspace:*",
+    "@stele/sync": "workspace:*",
+    "@stele/ui": "workspace:*",
+    "yjs": "latest"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.4.2",
+    "@capacitor/ios": "^8.4.2",
+    "@types/node": "latest",
+    "esbuild": "latest",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  }
+}

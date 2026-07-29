@@ -26,6 +26,7 @@ export {
 } from "./canvas.ts";
 export { extractWikilinks, rewriteWikilinks, type WikilinkRef } from "./links.ts";
 export { steleSchema } from "./schema.ts";
+export { renderMarkdownTo } from "./render.ts";
 export { parseBlock, serializeBlock, parseDoc, type ParsedBlock, type ParsedDoc } from "./convert.ts";
 export {
   encodeAnchor,

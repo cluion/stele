@@ -3,7 +3,8 @@ import reactHooks from "eslint-plugin-react-hooks";
 
 export default tseslint.config(
   {
-    ignores: ["**/dist/**", "**/node_modules/**", "prototypes/**", "**/*.mjs", "**/*.cjs"],
+    // ios/ 是 Capacitor 生成的原生專案(含複製進去的 web 產物與 SPM artifacts),不是我們的原始碼
+    ignores: ["**/dist/**", "**/node_modules/**", "prototypes/**", "apps/mobile/ios/**", "**/*.mjs", "**/*.cjs"],
   },
   ...tseslint.configs.recommendedTypeChecked,
   {
