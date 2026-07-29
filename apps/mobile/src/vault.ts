@@ -184,6 +184,27 @@ export class MobileVault {
   }
 
   /**
+   * 新建一篇筆記。docId 由本端產生(與桌面同樣是 UUID),路徑寫進 meta 的 LWW map,
+   * 然後 `track` 讓同步層當場開始推——不 track 的話,這篇要等下一次重連的對帳才上得去,
+   * 而「在手機上記一筆」的價值就在於它馬上會出現在桌面。
+   *
+   * 離線時 track 是 no-op(client 會在重連的 reconcile 依 listDocIds 補上),
+   * 筆記仍已寫進本地檔案與 meta,不會遺失。
+   */
+  create(relRaw: string): { docId: string; rel: string } {
+    const rel = relRaw.endsWith(".md") || relRaw.endsWith(".canvas") ? relRaw : `${relRaw}.md`;
+    const existing = this.list().find((i) => i.rel === rel);
+    if (existing) return existing; // 撞名就開既有那篇,不覆蓋別人的內容
+    const docId = crypto.randomUUID();
+    const doc = this.openDoc(docId);
+    const title = rel.slice(rel.lastIndexOf("/") + 1).replace(/\.(md|canvas)$/, "");
+    doc.transact(() => doc.getText("md").insert(0, `# ${title}\n\n`), "local");
+    this.meta.transact(() => this.paths().set(docId, rel), "local");
+    this.client?.track(docId);
+    return { docId, rel };
+  }
+
+  /**
    * 覆寫一篇筆記的內容。走 CRDT 的最小差異而非整份重寫:協作者收到的是一串小改動,
    * 游標不會全部跳掉——與桌面 `applyTextDiff` 同一個理由。
    */

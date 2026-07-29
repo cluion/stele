@@ -155,7 +155,14 @@ function renderList(): void {
   }
 
   const compose = el("button", { className: "fab", textContent: "+", title: "新增筆記" });
-  compose.onclick = () => alert("新建筆記在下一個 slice(需要先解決身分種子的保管)。");
+  compose.onclick = () => {
+    // 手機上「馬上記一筆」的路徑要短:問一個名字就直接進編輯,不再多一層表單
+    const name = window.prompt("新筆記名稱");
+    if (name === null || name.trim().length === 0) return;
+    open = vault!.create(name.trim());
+    editing = true;
+    render();
+  };
 
   app().replaceChildren(
     el(
