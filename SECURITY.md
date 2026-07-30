@@ -81,8 +81,14 @@ A single 32-byte random seed is HKDF-expanded into two independent subkeys:
 
 `memberId = hex(SHA-256(pubSign))`. The server enforces this binding, so a
 member id is not a self-chosen label — claiming someone else's id would require a
-SHA-256 collision. The seed is stored under the OS keychain via Electron
-`safeStorage` (macOS Keychain / Windows DPAPI).
+SHA-256 collision. The seed is stored under the OS keychain: on desktop via
+Electron `safeStorage` (macOS Keychain / Windows DPAPI), on iOS via the app's own
+minimal Keychain plugin, pinned to
+`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` with
+`kSecAttrSynchronizable = false` — the seed does not enter device backups or
+iCloud Keychain. The mobile app never falls back to unprotected storage on a
+device: the fallback used for browser-based development refuses to run outside
+localhost.
 
 ### 2.3 Key hierarchy
 
@@ -421,8 +427,11 @@ between organizations).
 A trusted device is assumed. On an unlocked, compromised device, decrypted
 content, the vault key in memory, and the plaintext `.md` mirror are all
 exposed. The identity seed is protected at rest by the OS keychain; the personal
-vault key is passphrase-derived and never stored. Stele does not defend against a
-fully compromised endpoint.
+vault key is passphrase-derived and never stored. On mobile, a team vault's root
+key is likewise never written to disk — it is re-fetched from the member's own
+key envelope on every launch, so the device holds no long-term team secret beyond
+the identity seed in the Keychain. Stele does not defend against a fully
+compromised endpoint.
 
 ### 4.6 Metadata visible to the server
 
