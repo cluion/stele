@@ -1,7 +1,10 @@
 import { renderMarkdownTo, rankFiles } from "@stele/editor-core";
 import type { SyncStatus } from "@stele/sync";
 import { CapacitorStorage } from "./storage.ts";
-import { MobileVault, type VaultSettings } from "./vault.ts";
+import { MobileVault, isTeamSettings, type VaultSettings } from "./vault.ts";
+import { createSecretStore } from "./secrets.ts";
+import { loadOrCreateIdentity } from "./identity.ts";
+import { recordFromInvite, openTeamVault, type TeamRecord } from "./join.ts";
 
 /**
  * 行動端 UI。首版就兩件事:**翻一下**與**馬上記一筆**——那是手機真正會被拿來做的兩件事。
@@ -12,14 +15,22 @@ import { MobileVault, type VaultSettings } from "./vault.ts";
  */
 
 const SETTINGS_KEY = "vault-settings";
+const TEAM_KEY = "team-record";
 const DEVICE_KEY = "device-id";
 
 const storage = new CapacitorStorage();
+const secrets = createSecretStore();
 let vault: MobileVault | undefined;
 let status: SyncStatus = "connecting";
 let query = "";
 let open: { docId: string; rel: string } | undefined;
 let editing = false;
+/** 團隊 vault 才有:目前這台裝置的連線紀錄(信任錨可能被組織委任鏈換掉,一變就存回去) */
+let team: TeamRecord | undefined;
+/** 唯讀成員(viewer):不給新建與編輯的入口。真正的柵欄在伺服器與收件端,這裡只是不騙人 */
+let readOnly = false;
+/** 已送出加入申請、等 owner 核准 */
+let awaitingApproval = false;
 
 const app = (): HTMLElement => document.getElementById("app")!;
 
@@ -39,6 +50,7 @@ const STATUS_TEXT: Record<SyncStatus, string> = { connecting: "連線中…", on
 const displayName = (rel: string): string => rel.replace(/\.(md|canvas)$/, "");
 
 function render(): void {
+  if (awaitingApproval) return renderAwaiting();
   if (!vault) return renderSetup();
   if (open && editing) return renderEditor();
   if (open) return renderNote();
@@ -46,43 +58,138 @@ function render(): void {
 }
 
 // ── 設定:連上一個既有的 vault ──
-function renderSetup(message?: string): void {
-  const url = el("input", { type: "url", placeholder: "wss://sync.example.com", autocapitalize: "off" });
-  const vaultId = el("input", { type: "text", placeholder: "vault id", autocapitalize: "off" });
-  const token = el("input", { type: "password", placeholder: "伺服器 token" });
-  const passphrase = el("input", { type: "password", placeholder: "vault 密語" });
-  const submit = el("button", { className: "primary", textContent: "連線" });
+/** 兩種入口:個人 vault 用密語,團隊 vault 用邀請碼。手機上不建新 vault */
+let setupMode: "personal" | "team" = "personal";
 
-  submit.onclick = () => {
-    const settings: VaultSettings = {
-      url: url.value.trim(),
-      vaultId: vaultId.value.trim(),
-      token: token.value,
-      passphrase: passphrase.value,
+function renderSetup(message?: string): void {
+  const tab = (mode: typeof setupMode, label: string): HTMLButtonElement => {
+    const b = el("button", { className: `tab${setupMode === mode ? " on" : ""}`, textContent: label });
+    b.onclick = () => {
+      setupMode = mode;
+      renderSetup();
     };
-    if (!settings.url || !settings.vaultId || !settings.passphrase) return renderSetup("請填完伺服器位址、vault id 與密語。");
-    submit.disabled = true;
-    submit.textContent = "連線中…";
-    void connect(settings).catch((err: unknown) => renderSetup(`連線失敗:${String(err)}`));
+    return b;
   };
+
+  const hint =
+    setupMode === "personal"
+      ? "手機是既有知識庫的第二個端點:連上你已經在用的 vault,內容會解密後存成這台裝置上的 Markdown 檔。"
+      : "貼上團隊擁有者給你的邀請碼。這台裝置會用自己的身分金鑰申請加入,等擁有者核准後才拿得到團隊金鑰。";
+
+  const fields: HTMLElement[] = [];
+  const submit = el("button", { className: "primary", textContent: setupMode === "personal" ? "連線" : "加入團隊" });
+
+  if (setupMode === "personal") {
+    const url = el("input", { type: "url", placeholder: "wss://sync.example.com", autocapitalize: "off" });
+    const vaultId = el("input", { type: "text", placeholder: "vault id", autocapitalize: "off" });
+    const token = el("input", { type: "password", placeholder: "伺服器 token" });
+    const passphrase = el("input", { type: "password", placeholder: "vault 密語" });
+    fields.push(url, vaultId, token, passphrase);
+    submit.onclick = () => {
+      const settings: VaultSettings = {
+        url: url.value.trim(),
+        vaultId: vaultId.value.trim(),
+        token: token.value,
+        passphrase: passphrase.value,
+      };
+      if (!settings.url || !settings.vaultId || !settings.passphrase) return renderSetup("請填完伺服器位址、vault id 與密語。");
+      submit.disabled = true;
+      submit.textContent = "連線中…";
+      void connect(settings).catch((err: unknown) => renderSetup(`連線失敗:${String(err)}`));
+    };
+  } else {
+    const invite = el("textarea", { className: "invite", placeholder: "貼上邀請碼", autocapitalize: "off", rows: 4 });
+    fields.push(invite);
+    submit.onclick = () => {
+      submit.disabled = true;
+      submit.textContent = "加入中…";
+      void joinTeam(invite.value).catch((err: unknown) => renderSetup(`加入失敗:${String(err)}`));
+    };
+  }
 
   app().replaceChildren(
     el("header", { className: "bar" }, el("h1", { textContent: "Stele" })),
+    el("nav", { className: "tabs" }, tab("personal", "個人 vault"), tab("team", "團隊")),
+    el(
+      "section",
+      { className: "setup" },
+      el("p", { className: "hint", textContent: hint }),
+      ...fields,
+      submit,
+      ...(message ? [el("p", { className: "error", textContent: message })] : []),
+    ),
+  );
+}
+
+/** 等核准:pending 是加入流程的一站,不是失敗——畫面要說得出「現在卡在誰身上」 */
+function renderAwaiting(message?: string): void {
+  const retry = el("button", { className: "primary", textContent: "再試一次" });
+  retry.onclick = () => {
+    if (!team) return;
+    retry.disabled = true;
+    retry.textContent = "確認中…";
+    void resumeTeam(team).catch((err: unknown) => renderAwaiting(`確認失敗:${String(err)}`));
+  };
+  const back = el("button", { textContent: "改用其他 vault" });
+  back.onclick = () => {
+    awaitingApproval = false;
+    void storage.writeSetting(TEAM_KEY, "");
+    team = undefined;
+    render();
+  };
+  app().replaceChildren(
+    el("header", { className: "bar" }, el("h1", { textContent: "等待核准" })),
     el(
       "section",
       { className: "setup" },
       el("p", {
         className: "hint",
-        textContent: "手機是既有知識庫的第二個端點:連上你已經在用的 vault,內容會解密後存成這台裝置上的 Markdown 檔。",
+        textContent: "已送出加入申請。團隊擁有者核准後,這台裝置才拿得到團隊金鑰——在那之前看不到任何內容。",
       }),
-      url,
-      vaultId,
-      token,
-      passphrase,
-      submit,
+      retry,
+      back,
       ...(message ? [el("p", { className: "error", textContent: message })] : []),
     ),
   );
+}
+
+// ── 團隊 vault:加入與復原 ──
+async function joinTeam(inviteText: string): Promise<void> {
+  const { record, invite } = recordFromInvite(inviteText.trim()); // 碼壞掉在這裡就拋
+  await resumeTeam(record, invite.enrollToken);
+}
+
+/**
+ * 用既有紀錄開團隊 vault:認證 → 拉自己的 root 信封 → 連線。首次加入才帶邀請碼。
+ * 回來的紀錄可能已經不同(組織撤換 owner、政策收緊),一律存回去。
+ */
+async function resumeTeam(record: TeamRecord, enrollToken?: string): Promise<void> {
+  const identity = await loadOrCreateIdentity(secrets);
+  const res = await openTeamVault(record, identity, enrollToken !== undefined ? { enrollToken } : {});
+  team = res.record;
+  await storage.writeSetting(TEAM_KEY, JSON.stringify(res.record));
+  if (res.status === "pending") {
+    awaitingApproval = true;
+    renderAwaiting();
+    return;
+  }
+  awaitingApproval = false;
+  readOnly = res.role === "viewer";
+  await connect(res.settings);
+}
+
+/**
+ * 金鑰輪換後續跑:owner 換掉團隊金鑰(多半是因為移除了某個成員)後,舊 root 解不開新內容,
+ * 推送已自動暫停。重跑一次 bootstrap 取新 root 就能接回去——使用者不該為此重開 app。
+ */
+async function refreshTeamKeys(): Promise<void> {
+  if (!team || !vault) return;
+  const identity = await loadOrCreateIdentity(secrets);
+  const res = await openTeamVault(team, identity);
+  team = res.record;
+  await storage.writeSetting(TEAM_KEY, JSON.stringify(res.record));
+  if (res.status !== "ready") return; // 被移出團隊:等 onRevoked 收尾
+  await vault.applyRotation(res.settings.root, res.settings.epoch, res.settings.spaceKeys, res.settings.restrictedSpaceIds);
 }
 
 async function connect(settings: VaultSettings): Promise<void> {
@@ -99,15 +206,37 @@ async function connect(settings: VaultSettings): Promise<void> {
         render();
       },
       onChanged: () => render(),
+      // 團隊金鑰輪換:背景取新 root 接回去,不打擾使用者
+      onKeyRotated: () => void refreshTeamKeys().catch((err: unknown) => console.error("輪換後續跑失敗:", err)),
+      onRevoked: () => {
+        void teardown();
+        renderSetup("你已不在這個團隊裡。已經同步下來的筆記留在這台裝置上,但不會再更新。");
+      },
     },
     deviceId,
   );
   await next.start(settings);
   vault = next;
-  // 密語不落盤:它是主金鑰的來源,存起來等於把整個 vault 的鑰匙放在檔案系統裡。
-  // 其餘連線資訊可以留,下次開啟只要再輸入密語。
-  await storage.writeSetting(SETTINGS_KEY, JSON.stringify({ url: settings.url, vaultId: settings.vaultId, token: settings.token }));
+  if (isTeamSettings(settings)) {
+    // 團隊 vault 的連線資訊已隨 TeamRecord 存好;root 不落盤,每次開 app 重新 bootstrap
+    await storage.writeSetting(SETTINGS_KEY, "");
+  } else {
+    // 密語不落盤:它是主金鑰的來源,存起來等於把整個 vault 的鑰匙放在檔案系統裡。
+    // 其餘連線資訊可以留,下次開啟只要再輸入密語。
+    await storage.writeSetting(SETTINGS_KEY, JSON.stringify({ url: settings.url, vaultId: settings.vaultId, token: settings.token }));
+  }
   render();
+}
+
+/** 收掉目前的 vault(被移出團隊時);本地筆記留著,那是使用者的東西 */
+async function teardown(): Promise<void> {
+  const current = vault;
+  vault = undefined;
+  team = undefined;
+  open = undefined;
+  editing = false;
+  await storage.writeSetting(TEAM_KEY, "");
+  await current?.stop();
 }
 
 // ── 清單 ──
@@ -177,7 +306,8 @@ function renderList(): void {
       : shown.length === 0
         ? el("p", { className: "hint", textContent: "沒有符合的筆記。" })
         : list,
-    compose,
+    // 唯讀成員不給新增入口:按了也只會被伺服器拒,不如一開始就別假裝可以
+    ...(readOnly ? [] : [compose]),
   );
 }
 
@@ -232,7 +362,7 @@ function renderNote(): void {
   };
 
   app().replaceChildren(
-    el("header", { className: "bar" }, back, el("h1", { textContent: displayName(open!.rel) }), edit),
+    el("header", { className: "bar" }, back, el("h1", { textContent: displayName(open!.rel) }), ...(readOnly ? [] : [edit])),
     body,
     backlinks,
   );
@@ -280,6 +410,7 @@ function devAutoConnect(): VaultSettings | undefined {
 
 async function main(): Promise<void> {
   const saved = await storage.readSetting(SETTINGS_KEY);
+  const savedTeam = await storage.readSetting(TEAM_KEY);
   renderSetup();
 
   const dev = devAutoConnect();
@@ -288,10 +419,25 @@ async function main(): Promise<void> {
     return;
   }
 
+  /**
+   * 團隊 vault 自動接回去:不必問任何東西。憑據是 Keychain 裡那把身分金鑰,
+   * 不是使用者記得住的字串——這正是團隊 vault 與個人 vault 在手機上最大的體感差別。
+   */
+  if (savedTeam) {
+    setupMode = "team";
+    try {
+      await resumeTeam(JSON.parse(savedTeam) as TeamRecord);
+      return;
+    } catch (err) {
+      renderSetup(`重新連上團隊失敗:${String(err)}`);
+      return;
+    }
+  }
+
   if (!saved) return;
   // 連線資訊帶回來,密語仍要現場輸入(它是主金鑰的來源,不落盤)
   try {
-    const rest = JSON.parse(saved) as Omit<VaultSettings, "passphrase">;
+    const rest = JSON.parse(saved) as { url: string; vaultId: string; token: string };
     const inputs = document.querySelectorAll<HTMLInputElement>(".setup input");
     if (inputs[0]) inputs[0].value = rest.url;
     if (inputs[1]) inputs[1].value = rest.vaultId;

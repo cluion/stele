@@ -3,10 +3,14 @@ import {
   SyncClient,
   deriveVaultKey,
   MasterKeySpaces,
+  WrappedKeySpaces,
   spaceOf,
+  spaceMembersOf,
   type Cipher,
   type SocketLike,
+  type SpaceKeySource,
   type SyncDocState,
+  type SyncIdentity,
   type SyncStatus,
 } from "@stele/sync";
 import { searchNotes, resolveNote, backlinksOf, type Hit, type Note } from "./notes.ts";
@@ -27,17 +31,48 @@ import type { VaultStorage } from "./storage.ts";
 const META_DOC_ID = "vault-meta";
 const STATE_SETTING = "sync-states";
 
-export interface VaultSettings {
+interface BaseSettings {
   url: string;
   token: string;
   vaultId: string;
+}
+
+/** 個人 vault:主金鑰由密語衍生,沒有其他成員,不簽也不驗 */
+export interface PersonalVaultSettings extends BaseSettings {
   passphrase: string;
 }
+
+/**
+ * 團隊 vault:主金鑰(root)是 `bootstrapTeamKey` 從自己的信封解出來的,不是密語衍生的。
+ * 連線一律帶身分——團隊 vault 的每一筆寫入都要簽,收到的每一筆都要查成員目錄驗作者。
+ */
+export interface TeamVaultSettings extends BaseSettings {
+  identity: SyncIdentity;
+  /** 信任錨:驗信封、成員目錄與政策的 owner 公鑰(綁組織時是委任鏈認定的當代 owner) */
+  ownerPubSign: Uint8Array;
+  root: Uint8Array;
+  epoch: number;
+  /** 受限空間的獨立金鑰;沒有份的空間就是不在這個 map 裡 */
+  spaceKeys?: ReadonlyMap<string, Uint8Array>;
+  restrictedSpaceIds?: readonly string[];
+  requireSignedWrites?: boolean;
+}
+
+export type VaultSettings = PersonalVaultSettings | TeamVaultSettings;
+
+export const isTeamSettings = (s: VaultSettings): s is TeamVaultSettings => "root" in s;
 
 export interface VaultEvents {
   onStatus(status: SyncStatus): void;
   /** 筆記清單或內容有變(遠端同步下來、或本地寫入落地) */
   onChanged(): void;
+  /**
+   * 金鑰已輪換(團隊 vault):推送已自動暫停。上層應重跑 bootstrap 取新 root,
+   * 再呼叫 `applyRotation` 恢復收斂——不接這個事件,手機會安靜地停在舊紀元。
+   */
+  onKeyRotated?(epoch: number): void;
+  /** 被移出團隊:已停止重連,上層據此告訴使用者發生了什麼 */
+  onRevoked?(code: string): void;
 }
 
 export class MobileVault {
@@ -47,6 +82,10 @@ export class MobileVault {
   private readonly states = new Map<string, SyncDocState>();
   private readonly deviceId: string;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 空間金鑰來源;輪換時原地換 root,不重建 client */
+  private keys: SpaceKeySource | undefined;
+  /** 團隊 vault 才有:判斷自己是否在某受限空間的名單裡 */
+  private memberId: string | undefined;
 
   constructor(
     private readonly storage: VaultStorage,
@@ -79,18 +118,31 @@ export class MobileVault {
     this.meta.on("update", () => {
       void this.storage.writeState(META_DOC_ID, Y.encodeStateAsUpdate(this.meta)).catch(() => undefined);
     });
-    // 主金鑰與桌面同一條路徑、同一個工作因子(2^18)。行動端若另訂較低的工作因子,
-    // 同一句 passphrase 在兩邊會衍生出不同金鑰——那是一輩子拔不掉的相容包袱。
-    const key = await deriveVaultKey(settings.passphrase, settings.vaultId);
+    /**
+     * 金鑰來源。個人 vault 是密語 → scrypt 2^18 衍生主金鑰,與桌面同一條路徑、同一個工作因子
+     * ——行動端若另訂較低的工作因子,同一句 passphrase 在兩邊會衍生出不同金鑰,那是一輩子
+     * 拔不掉的相容包袱。團隊 vault 的 root 則是加入流程從自己的信封解出來的,不經密語。
+     */
+    const team = isTeamSettings(settings);
+    this.memberId = team ? settings.identity.memberId : undefined;
+    this.keys = team
+      ? new WrappedKeySpaces(settings.root, settings.spaceKeys, settings.restrictedSpaceIds)
+      : new MasterKeySpaces(await deriveVaultKey(settings.passphrase, settings.vaultId));
     /**
      * 走**空間路由**而非單一 cipher:每篇筆記以其所屬空間的金鑰加解密,與桌面同一條路徑。
      * 少了這一層,放在非預設空間的筆記在手機上會靜默解不開——而「解不開」與「還沒同步到」
      * 在畫面上長得一模一樣,是最難查的那種錯。
+     *
+     * encrypt 端是硬性防線:受限空間而我沒有它的金鑰就拒絕加密,寧可寫入失敗。放行的話,
+     * 這篇會以 root 衍生的金鑰重新加密推上共享日誌——等於把只給部分人的內容攤給整個 vault 看。
      */
-    const spaces = new MasterKeySpaces(key);
+    const keys = this.keys;
     const cipher: Cipher = {
-      encrypt: (docId, plain) => spaces.cipher(spaceOf(this.meta, docId)).then((c) => c.encrypt(docId, plain)),
-      decrypt: (docId, data) => spaces.cipher(spaceOf(this.meta, docId)).then((c) => c.decrypt(docId, data)),
+      encrypt: (docId, plain) => {
+        if (!this.canDecrypt(docId)) return Promise.reject(new Error(`無此空間的金鑰,拒絕加密:${docId}`));
+        return keys.cipher(spaceOf(this.meta, docId)).then((c) => c.encrypt(docId, plain));
+      },
+      decrypt: (docId, data) => keys.cipher(spaceOf(this.meta, docId)).then((c) => c.decrypt(docId, data)),
     };
 
     // 路徑對照一變就把該篇物化到磁碟:遠端改名、新增在這裡落地
@@ -113,8 +165,69 @@ export class MobileVault {
       },
       createSocket: (url) => new WebSocket(url) as unknown as SocketLike,
       onStatus: (status) => this.events.onStatus(status),
+      // 以下四項只有團隊 vault 有:帶身分認證、逐寫入簽驗、金鑰紀元與輪換/撤銷通知
+      ...(team
+        ? {
+            identity: settings.identity,
+            ownerPubSign: settings.ownerPubSign,
+            epoch: settings.epoch,
+            requireSignedWrites: settings.requireSignedWrites,
+            onKeyRotated: (epoch: number) => this.events.onKeyRotated?.(epoch),
+            onRevoked: (code: string) => this.events.onRevoked?.(code),
+          }
+        : {}),
     });
     this.client.start();
+  }
+
+  /**
+   * 這篇筆記所屬的空間,我有沒有金鑰。個人 vault 恆為 true(所有空間都由主金鑰衍生)。
+   *
+   * 判準與桌面 `canDecrypt` 相同:有獨立金鑰 → 有;信封層說受限而我沒金鑰 → 沒有;
+   * 兩者皆非則看 meta 的名單有沒有把這個空間圈起來。信封層優先於 meta,因為 meta 是
+   * 同步下來的、可能還沒到齊,而信封是我這一紀元實際拿到的東西。
+   */
+  private canDecrypt(docId: string): boolean {
+    if (!this.keys?.hasSpaceKey) return true;
+    const spaceId = spaceOf(this.meta, docId);
+    if (this.keys.hasSpaceKey(spaceId)) return true;
+    if (this.keys.isRestricted?.(spaceId)) return false;
+    return spaceMembersOf(this.meta, spaceId) === undefined;
+  }
+
+  /**
+   * 輪換後把新金鑰接上(團隊 vault):上層收到 `onKeyRotated` → 重跑 bootstrap → 呼叫這裡。
+   * 先卸掉這一紀元解不開的 doc 再恢復推送——留著的話,client 恢復後會拿新金鑰把它整份重推,
+   * 而那正是「我已經沒權限的內容被我重新加密外洩」的路徑。
+   */
+  async applyRotation(root: Uint8Array, epoch: number, spaceKeys?: ReadonlyMap<string, Uint8Array>, restrictedSpaceIds?: readonly string[]): Promise<void> {
+    if (!this.keys?.rotate || !this.client) throw new Error("此 vault 的金鑰來源不支援輪換");
+    this.keys.rotate(root, spaceKeys, restrictedSpaceIds);
+    for (const docId of this.paths().keys()) {
+      if (this.canDecrypt(docId)) continue;
+      this.client.forget(docId);
+      // 確定無權(信封說受限、我沒金鑰、名單也明確排除我)才刪本地明文;
+      // 不確定就留著——授權競態下的暫態誤刪是拿不回來的
+      if (this.definitelyInaccessible(docId)) void this.purgeLocal(docId);
+    }
+    await this.client.applyRotation(epoch);
+  }
+
+  /** 三重確認的「確定無權」;任何一項不成立都當作不確定,不動使用者的檔案 */
+  private definitelyInaccessible(docId: string): boolean {
+    if (!this.keys?.isRestricted || this.memberId === undefined) return false;
+    const spaceId = spaceOf(this.meta, docId);
+    if (!this.keys.isRestricted(spaceId) || (this.keys.hasSpaceKey?.(spaceId) ?? false)) return false;
+    const members = spaceMembersOf(this.meta, spaceId);
+    return members !== undefined && !members.includes(this.memberId);
+  }
+
+  private async purgeLocal(docId: string): Promise<void> {
+    const rel = this.paths().get(docId);
+    this.docs.get(docId)?.destroy();
+    this.docs.delete(docId);
+    if (rel) await this.storage.deleteNote(rel).catch(() => undefined);
+    this.events.onChanged();
   }
 
   private openDoc(docId: string): Y.Doc {

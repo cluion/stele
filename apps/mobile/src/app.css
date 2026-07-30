@@ -34,7 +34,8 @@ body {
 .status.offline { color: var(--warn); }
 
 .setup { display: flex; flex-direction: column; gap: var(--sp-3); padding: var(--sp-4); }
-.setup input {
+.setup input,
+.setup textarea {
   padding: var(--sp-3);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -42,6 +43,22 @@ body {
   color: var(--text);
   font: inherit;
 }
+/* 邀請碼是一長串 base64:等寬、可換行,貼進來時看得出有沒有貼完整 */
+.setup textarea.invite { font-family: var(--font-mono, monospace); font-size: var(--fs-sm); resize: vertical; word-break: break-all; }
+
+/* 個人 / 團隊 兩種入口 */
+.tabs { display: flex; gap: var(--sp-2); padding: 0 var(--sp-4); }
+.tabs .tab {
+  flex: 1;
+  min-height: 44px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+.tabs .tab.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
 button.primary {
   padding: var(--sp-3);
   border: 0;
