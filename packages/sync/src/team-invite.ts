@@ -1,3 +1,5 @@
+import { utf8ToBase64Url, base64UrlToUtf8 } from "./base64.ts";
+
 /**
  * 團隊邀請 bundle:owner 產給被邀請者的一段字串(out-of-band 交付,如複製貼上)。
  * 攜帶加入所需的一切:伺服器位址、准入 token、vaultId、一次性邀請碼,以及
@@ -23,14 +25,14 @@ export interface TeamInvite {
 }
 
 export function encodeInvite(invite: TeamInvite): string {
-  return Buffer.from(JSON.stringify(invite), "utf8").toString("base64url");
+  return utf8ToBase64Url(JSON.stringify(invite));
 }
 
 /** 解析並驗證邀請 bundle;缺欄位或格式錯即拋 */
 export function decodeInvite(text: string): TeamInvite {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(Buffer.from(text.trim(), "base64url").toString("utf8"));
+    parsed = JSON.parse(base64UrlToUtf8(text.trim()));
   } catch {
     throw new Error("邀請碼格式錯誤");
   }

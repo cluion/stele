@@ -57,6 +57,7 @@ export {
 } from "./bootstrap.ts";
 export { TeamAdminSession, type TeamAdminOptions } from "./team-admin.ts";
 export { encodeInvite, decodeInvite, type TeamInvite } from "./team-invite.ts";
+export { bytesToBase64, base64ToBytes, bytesToBase64Url, base64UrlToBytes } from "./base64.ts";
 export { OrgAdminSession, type OrgAdminOptions, type AdminEventInfo } from "./org-admin.ts";
 export {
   signRoleCredential,

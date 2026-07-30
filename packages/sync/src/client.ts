@@ -10,6 +10,7 @@ import {
   type SharePermission,
 } from "./protocol.ts";
 import { identityCipher, type Cipher } from "./cipher.ts";
+import { bytesToBase64, base64ToBytes } from "./base64.ts";
 import { identityChallengeBytes, type SyncIdentity } from "./identity.ts";
 import { signWrite, verifyWrite, type WriteKind } from "./update-signature.ts";
 import { signAwarenessIdentity, verifyAwarenessIdentity } from "./awareness-identity.ts";
@@ -198,7 +199,7 @@ export class SyncClient {
    * 換錨即清空目錄並重拉:舊錨驗出來的成員資料一律不留(可能是前任才背書的組合)。
    */
   setOwnerPubSign(ownerPubSign: Uint8Array): void {
-    if (this.opts.ownerPubSign && Buffer.from(this.opts.ownerPubSign).equals(Buffer.from(ownerPubSign))) return;
+    if (this.opts.ownerPubSign && bytesEqual(this.opts.ownerPubSign, ownerPubSign)) return;
     this.opts = { ...this.opts, ownerPubSign };
     this.memberDir.clear();
     void this.pullDirectory();
@@ -344,7 +345,7 @@ export class SyncClient {
     if (cached?.key === cacheKey) return { ...state, memberId: id.memberId, sig: cached.sig };
     try {
       const bytes = signAwarenessIdentity(id.sign, { docId, epoch: this.epoch, clientId, memberId: id.memberId, name, color });
-      const sig = Buffer.from(bytes).toString("base64");
+      const sig = bytesToBase64(bytes);
       this.awarenessSigs.set(docId, { key: cacheKey, sig });
       return { ...state, memberId: id.memberId, sig };
     } catch (err) {
@@ -383,7 +384,14 @@ export class SyncClient {
         unverified();
         continue;
       }
-      const ok = verifyAwarenessIdentity(Buffer.from(sig, "base64"), member.pubSign, {
+      // sig 是遠端字串:不是合法 base64 就當偽造整筆丟掉,不讓它把整輪在場處理炸掉
+      let sigBytes: Uint8Array;
+      try {
+        sigBytes = base64ToBytes(sig);
+      } catch {
+        continue;
+      }
+      const ok = verifyAwarenessIdentity(sigBytes, member.pubSign, {
         docId,
         epoch: this.epoch,
         clientId,
@@ -422,14 +430,30 @@ export class SyncClient {
       }
     };
     socket.onmessage = (event) => {
-      this.rx = this.rx
-        .then(() => {
-          const bytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
-          return this.handleMessage(decodeServerMessage(bytes));
-        })
-        .catch((err: unknown) => {
-          console.error("同步訊息處理失敗:", err);
+      const bytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
+      let msg: ServerMessage;
+      try {
+        msg = decodeServerMessage(bytes);
+      } catch (err) {
+        console.error("同步訊息解碼失敗:", err);
+        return;
+      }
+      /**
+       * 成員目錄的回覆**不進佇列**,當場處理。
+       *
+       * `rx` 是嚴格序列的,而 authOk 的處理會 `await pullDirectory()` 等這則回覆——排在它後面
+       * 等於等自己,只能被 5 秒逾時打斷。實測:團隊 vault 每次連線後的第一筆寫入都慢 5 秒,
+       * 而且完全靜默。插隊只讓目錄**更早**到,不會晚到,原本「目錄先於 doc 訊息」的順序保證不變。
+       */
+      if (msg.type === "memberCertList") {
+        void Promise.resolve(this.handleMessage(msg)).catch((err: unknown) => {
+          console.error("成員目錄處理失敗:", err);
         });
+        return;
+      }
+      this.rx = this.rx.then(() => this.handleMessage(msg)).catch((err: unknown) => {
+        console.error("同步訊息處理失敗:", err);
+      });
     };
     socket.onerror = () => {
       // onclose 會跟著觸發,重連交給它
