@@ -29,6 +29,8 @@ Stele(石碑)是一套本地優先、可端對端加密同步、可自架的知�
 - **版本回溯(時光機)**:自動留存歷史版本,逐字比對後還原;版本是純 Markdown 檔,用檔案總管也翻得動
 - 日石英 / 夜燭石 雙主題,原生設計非反轉
 - 多裝置端對端加密同步、自架伺服器一行 `docker run`
+- **團隊 vault**:邀請碼加人、擁有者核准、金鑰逐成員信封包裝、寫入帶作者簽章——伺服器看到的始終只有密文
+- **iOS app**:在手機上讀、搜尋、記一筆(見下)
 - 內建 i18n(zh-TW / en)
 
 ## 安裝
@@ -44,6 +46,17 @@ Stele 未經簽章,第一次開啟請**右鍵點 Stele.app → 開啟**以通過
 ### 其他平台
 
 到[最新發佈](https://github.com/cluion/stele/releases/latest)下載 `.dmg`(macOS)、`.AppImage` 或 `.deb`(Linux)。
+
+### iOS
+
+iOS app **還沒有 App Store 或 TestFlight 管道**——那需要 Apple Developer 帳號、憑證與審查,尚未著手。目前請自行建置:
+
+```bash
+pnpm --filter @stele/mobile sync   # 建置 web 層並同步 Xcode 專案
+pnpm --filter @stele/mobile ios    # 在模擬器或實機上執行
+```
+
+需要 Xcode。手機的定位是**既有知識庫的第二個端點**:連上一個已經在用的 vault——個人 vault 用密語,團隊 vault 用邀請碼——筆記會以明文 `.md` 落在裝置上,和桌面的 vault 資料夾一致。它做的是讀、搜尋、wikilink 導航、反向連結,以及記一筆。WYSIWYG 編輯、白板編輯與管理面板留在桌面。
 
 ## 開發與執行
 
@@ -74,6 +87,7 @@ docker run -d -p 4800:4800 -v stele-data:/data -e STELE_TOKEN=請換成至少16�
 | `packages/sync` | 同步協議、SyncClient、E2EE 加密層 |
 | `packages/ui` | 設計系統與 tokens |
 | `apps/desktop` | Electron 桌面 app |
+| `apps/mobile` | iOS app(Capacitor 原生殼) |
 | `apps/server` | 自架同步伺服器(blind relay) |
 
 ## 授權

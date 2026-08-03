@@ -29,6 +29,8 @@ Stele is a local-first, end-to-end-encrypted, self-hostable knowledge base. Your
 - **Version history**: snapshots are kept automatically, diffed character by character, and restorable; every version is a plain Markdown file you can browse in your file manager
 - Quartz Day / Ember Night dual themes — dark is a native design, not an inversion
 - Multi-device end-to-end encrypted sync, self-hosted server in one `docker run`
+- **Team vaults**: invite members by code, owner-approved, per-member key envelopes and signed writes — the server still sees only ciphertext
+- **iOS app**: read, search and jot down a note on your phone (see below)
 - Built-in i18n (zh-TW / en)
 
 ## Install
@@ -44,6 +46,17 @@ Stele is not code-signed, so on first launch **right-click Stele.app → Open** 
 ### Other platforms
 
 Download a `.dmg` (macOS), `.AppImage`, or `.deb` (Linux) from the [latest release](https://github.com/cluion/stele/releases/latest).
+
+### iOS
+
+The iOS app has **no App Store or TestFlight channel yet** — that needs an Apple Developer account, certificates and review, which hasn't been set up. For now, build it yourself:
+
+```bash
+pnpm --filter @stele/mobile sync   # build the web layer and sync the Xcode project
+pnpm --filter @stele/mobile ios    # run on a simulator or a connected device
+```
+
+Requires Xcode. The phone is meant as a **second endpoint for a knowledge base you already have**: you connect it to an existing vault — with a passphrase for a personal vault, or an invite code for a team one — and notes land on the device as plain `.md` files, the same as the desktop vault folder. It does reading, search, wikilink navigation, backlinks, and writing a quick note. WYSIWYG editing, canvas editing and admin panels stay on the desktop.
 
 ## Develop & run
 
@@ -74,6 +87,7 @@ A single TypeScript monorepo (pnpm workspace):
 | `packages/sync` | Sync protocol, SyncClient, E2EE crypto layer |
 | `packages/ui` | Design system and tokens |
 | `apps/desktop` | Electron desktop app |
+| `apps/mobile` | iOS app (Capacitor native shell) |
 | `apps/server` | Self-hosted sync server (blind relay) |
 
 ## License
